@@ -1,0 +1,148 @@
+/* ── Font variables (theme-independent) ──────────────────────────────────────── */
+:root {
+  --font-display: 'Playfair Display', Georgia, serif;
+  --font-body: 'Inter', sans-serif;
+  --font-mono: 'JetBrains Mono', monospace;
+}
+
+/* ── Dark theme (default) ────────────────────────────────────────────────────── */
+:root,
+[data-theme='dark'] {
+  --bg-base: #080c14;
+  --bg-panel: #0f1521;
+  --bg-card: #141c2e;
+  --bg-input: #1a2236;
+  --border: #1f2d47;
+  --border-bright: #2a3f5f;
+
+  --text-primary: #e8edf5;
+  --text-secondary: #8b9ab5;
+  --text-muted: #4a5a78;
+
+  --accent-gold: #e8b84b;
+  --accent-gold-d: #c49a2d;
+  --accent-gold-text: #080c14;
+
+  --shadow-tooltip: 0 6px 24px rgba(0, 0, 0, 0.55);
+  --shadow-chart: 0 8px 32px rgba(0, 0, 0, 0.6);
+}
+
+/* ── High contrast / colourblind-friendly theme ──────────────────────────────── */
+/* Chart series use the Wong (2011) colourblind-safe palette.                    */
+[data-theme='hc'] {
+  --bg-base: #000000;
+  --bg-panel: #0d0d0d;
+  --bg-card: #141414;
+  --bg-input: #1f1f1f;
+  --border: #555555;
+  --border-bright: #888888;
+
+  --text-primary: #ffffff;
+  --text-secondary: #dddddd;
+  --text-muted: #aaaaaa;
+
+  --accent-gold: #ffdd00;
+  --accent-gold-d: #ccaa00;
+  --accent-gold-text: #000000;
+
+  --shadow-tooltip: 0 6px 24px rgba(0, 0, 0, 0.8);
+  --shadow-chart: 0 8px 32px rgba(0, 0, 0, 0.8);
+}
+
+/* ── Light theme ─────────────────────────────────────────────────────────────── */
+[data-theme='light'] {
+  --bg-base: #f0f3f8;
+  --bg-panel: #ffffff;
+  --bg-card: #f7f9fc;
+  --bg-input: #edf1f7;
+  --border: #dde2ed;
+  --border-bright: #c4cdd9;
+
+  --text-primary: #111827;
+  --text-secondary: #4b5568;
+  --text-muted: #9ca3af;
+
+  --accent-gold: #a06800;
+  --accent-gold-d: #7d5000;
+  --accent-gold-text: #ffffff;
+
+  --shadow-tooltip: 0 6px 24px rgba(0, 0, 0, 0.15);
+  --shadow-chart: 0 8px 32px rgba(0, 0, 0, 0.12);
+}
+
+/* ── Reset ───────────────────────────────────────────────────────────────────── */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  background: var(--bg-base);
+  color: var(--text-primary);
+  font-family: var(--font-body);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ── Custom scrollbar ────────────────────────────────────────────────────────── */
+::-webkit-scrollbar {
+  width: 6px;
+}
+::-webkit-scrollbar-track {
+  background: var(--bg-base);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border-bright);
+  border-radius: 3px;
+}
+
+/* ── Range input ─────────────────────────────────────────────────────────────── */
+input[type='range'] {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 2px;
+  background: var(--border-bright);
+  border-radius: 2px;
+  outline: none;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+input[type='range']::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--accent-gold);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent-gold) 20%, transparent);
+  cursor: pointer;
+  transition:
+    box-shadow 0.15s,
+    transform 0.15s;
+}
+
+input[type='range']::-webkit-slider-thumb:hover {
+  box-shadow: 0 0 0 6px color-mix(in srgb, var(--accent-gold) 25%, transparent);
+  transform: scale(1.15);
+}
+
+input[type='range']::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border: none;
+  border-radius: 50%;
+  background: var(--accent-gold);
+  cursor: pointer;
+}
