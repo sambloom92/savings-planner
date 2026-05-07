@@ -1939,6 +1939,19 @@ export default function App() {
     };
   }, [summary, realTerms, inflRate, p.currentAge, p.retirementAge]);
 
+  // 4% rule: need 25× annual spending as a portfolio (1 / 0.04 = 25).
+  // Expressed in the same terms as the chart (real or nominal).
+  // In real terms the spending figure is already in today's money, so no inflation needed.
+  // In nominal terms we inflate the spending to retirement-date prices first.
+  const fourPctTarget = realTerms
+    ? p.targetNetExpenses * 25
+    : p.targetNetExpenses * 25 * Math.pow(1 + inflRate, p.retirementAge - p.currentAge);
+
+  // First retirement year's year-end row from displayData (already real-terms adjusted).
+  // The chart plots closingBalance at every age point, so this matches what the graph shows
+  // at retirementAge — keeping stat-card figures consistent with graph hover / axis readings.
+  const retYearEndRow = displayData.find((d) => d.phase === 'retirement') ?? null;
+
   return (
     <div
       style={{
@@ -2305,17 +2318,28 @@ export default function App() {
                 >
                   <StatCard
                     label="Net Worth at Retirement"
-                    value={fmtGBPLarge(displaySummary.netWorth)}
+                    value={fmtGBPLarge(
+                      retYearEndRow
+                        ? retYearEndRow.pension +
+                            retYearEndRow.isa +
+                            retYearEndRow.gia +
+                            retYearEndRow.mortgage +
+                            retYearEndRow.unsecuredDebt +
+                            retYearEndRow.studentLoan
+                        : displaySummary.netWorth
+                    )}
                     color="var(--accent-gold)"
-                    subtitle={`Age ${p.retirementAge}${realTerms ? " · today's £" : ''}`}
-                    help="Pension + ISA + GIA balances at retirement, minus any outstanding debts (mortgage, unsecured loans, student loan). Does not include property equity, defined benefit pensions, or other illiquid assets."
+                    subtitle={`Age ${p.retirementAge} · year-end${realTerms ? " · today's £" : ''}`}
+                    help="Pension + ISA + GIA balances at the end of your first retirement year, minus any outstanding debts. Matches the chart value at that age. Does not include property equity, defined benefit pensions, or other illiquid assets."
                   />
                   <StatCard
                     label="Pension Pot"
-                    value={fmtGBPLarge(displaySummary.pensionPot)}
+                    value={fmtGBPLarge(
+                      retYearEndRow ? retYearEndRow.pension : displaySummary.pensionPot
+                    )}
                     color="#4f8ef7"
-                    subtitle={`ISA: ${fmtGBPLarge(displaySummary.isaBalance)} · GIA: ${fmtGBPLarge(displaySummary.giaBalance)}`}
-                    help="Your defined contribution pension pot at retirement, from accumulated employee and employer contributions plus investment growth. ISA and GIA balances shown below — together these are your total investable assets."
+                    subtitle={`ISA: ${fmtGBPLarge(retYearEndRow ? retYearEndRow.isa : displaySummary.isaBalance)} · GIA: ${fmtGBPLarge(retYearEndRow ? retYearEndRow.gia : displaySummary.giaBalance)}`}
+                    help="Your defined contribution pension pot at the end of your first retirement year, after PCLS distribution (if taken), one year of drawdown, and one year of investment growth. Matches the chart value at that age."
                   />
                   <StatCard
                     label={
@@ -2428,6 +2452,32 @@ export default function App() {
                   paddingTop: 2,
                 }}
               >
+                <span
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 3,
+                    fontFamily: 'var(--font-mono)',
+                    fontSize: 10,
+                    color: 'var(--text-muted)',
+                    whiteSpace: 'nowrap',
+                    letterSpacing: '0.04em',
+                  }}
+                >
+                  4% rule: {fmtGBPLarge(fourPctTarget)}
+                  <HelpTip
+                    text={
+                      'The 4% rule is a retirement planning heuristic: if you withdraw 4% of your portfolio in year one and adjust for inflation each year, historical data suggests the portfolio survives a 30-year retirement. This implies you need 25× your annual spending saved (1 ÷ 0.04 = 25).\n\n' +
+                      'This line shows that target in ' +
+                      (realTerms ? "today's money." : 'nominal terms at your retirement date.') +
+                      '\n\nWhy the model may differ:\n' +
+                      '• The model uses year-by-year drawdown with actual tax calculations, so it draws less gross from the pension when income is within the personal allowance.\n' +
+                      '• State pension income offsets spending needs, reducing how much the portfolio must provide — the 4% rule ignores guaranteed income sources.\n' +
+                      '• The model sequences across ISA, GIA, and pension in a tax-efficient order, whereas the 4% rule assumes a single undifferentiated pot.\n' +
+                      '• The 4% rule was calibrated on a 30-year horizon. Longer retirements (e.g. retiring at 55 to age 95) may require a lower safe withdrawal rate of 3–3.5%.'
+                    }
+                  />
+                </span>
                 <button
                   onClick={() => setShowDetails((v) => !v)}
                   style={{
@@ -2507,6 +2557,10 @@ export default function App() {
 
                   <YAxis
                     tickFormatter={yTickFmt}
+                    domain={[
+                      (dataMin) => dataMin,
+                      (dataMax) => Math.max(dataMax, fourPctTarget * 1.04),
+                    ]}
                     tick={{
                       fill: 'var(--text-muted)',
                       fontSize: 11,
@@ -2528,6 +2582,23 @@ export default function App() {
                   />
 
                   <ReferenceLine y={0} stroke="var(--border-bright)" strokeWidth={1} />
+
+                  <ReferenceLine
+                    y={fourPctTarget}
+                    stroke="#6ee7b7"
+                    strokeDasharray="6 3"
+                    strokeOpacity={0.55}
+                    strokeWidth={1.5}
+                    label={{
+                      value: '4% rule',
+                      position: 'insideTopRight',
+                      fill: '#6ee7b7',
+                      fillOpacity: 0.75,
+                      fontSize: 9,
+                      fontFamily: 'var(--font-mono)',
+                      letterSpacing: '0.06em',
+                    }}
+                  />
 
                   <ReferenceLine
                     x={p.retirementAge}

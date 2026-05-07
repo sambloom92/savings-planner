@@ -210,7 +210,7 @@ function computeGIACGT(
 ) {
   if (gross <= 0 || bal <= 0) return 0;
   const gainFrac = Math.max(0, (bal - costBasis) / bal);
-  const totalGain = round2(gross * gainFrac);
+  const totalGain = gross * gainFrac; // keep unrounded — intermediate value used in subtraction
   const taxable = Math.max(0, totalGain - annualExempt);
   const basicRoom = Math.max(0, GIA_CGT_CONSTANTS.basicRateLimit - otherIncome);
   const atBasic = Math.min(taxable, basicRoom);
@@ -767,6 +767,16 @@ export function projectLifecycle(profile, rates, pots = {}, retirementOptions = 
     });
   }
 
+  // Retirement-entry snapshots — populated inside the retirement block, used in summary below.
+  // Declared here so they are in scope at summary-build time regardless of whether a
+  // retirement phase exists (null signals "no retirement phase").
+  let retEntryPension = null;
+  let retEntryISA = null;
+  let retEntryGIA = null;
+  let retEntryCostBasis = null;
+  let retEntryMortgage = null;
+  let retEntryUnsecured = null;
+
   // ── Retirement phase ─────────────────────────────────────────────────────
   if (retirementOptions != null) {
     const {
@@ -798,6 +808,16 @@ export function projectLifecycle(profile, rates, pots = {}, retirementOptions = 
       giaBal = round2(giaBal + toGIA);
       costBasis = round2(costBasis + toGIA);
     }
+
+    // Snapshot balances at the point of retirement entry (after PCLS, before any drawdown).
+    // The year-by-year loop mutates the running state variables, so by maxAge they may be
+    // zero. The summary must reflect "what you have at retirement", not "what's left at maxAge".
+    retEntryPension = pensionBal;
+    retEntryISA = isaBal;
+    retEntryGIA = giaBal;
+    retEntryCostBasis = costBasis;
+    retEntryMortgage = mortgageBalance;
+    retEntryUnsecured = round2(debts.reduce((s, d) => s + d.balance, 0));
 
     // Track remaining Lump Sum Allowance across retirement years (UFPLS path only).
     // Under UFPLS the tax-free component of each withdrawal counts against this £268,275
@@ -950,7 +970,7 @@ export function projectLifecycle(profile, rates, pots = {}, retirementOptions = 
       if (remaining > 0 && giaBal > 0) {
         const gainFrac = gainFracPreStep2;
         const grossForExempt =
-          gainFrac > 0 ? round2(GIA_CGT_CONSTANTS.annualExemptAmount / gainFrac) : giaBal;
+          gainFrac > 0 ? GIA_CGT_CONSTANTS.annualExemptAmount / gainFrac : giaBal; // unrounded — used only in Math.min
         const draw = round2(Math.min(remaining, Math.min(grossForExempt, giaBal)));
         giaExemptCGT = computeGIACGT(draw, giaBal, costBasis, incomeForCGT);
         const net = round2(draw - giaExemptCGT);
@@ -1128,14 +1148,27 @@ export function projectLifecycle(profile, rates, pots = {}, retirementOptions = 
   }
 
   // ── Summary ──────────────────────────────────────────────────────────────
-  const finalUnsecuredBalance = round2(debts.reduce((s, d) => s + d.balance, 0));
+  // When there is a retirement phase, report balances at retirement entry (after PCLS, before
+  // drawdown) so headline figures reflect "what you have on day one of retirement". Using the
+  // post-loop state would give zero whenever pots are fully depleted by maxAge.
+  // Use retirement-entry snapshots when available; fall back to end-of-accumulation values
+  // when there is no retirement phase.
+  const sumPension = retEntryPension !== null ? retEntryPension : pensionBal;
+  const sumISA = retEntryISA !== null ? retEntryISA : isaBal;
+  const sumGIA = retEntryGIA !== null ? retEntryGIA : giaBal;
+  const sumCostBasis = retEntryCostBasis !== null ? retEntryCostBasis : costBasis;
+  const sumMortgage = retEntryMortgage !== null ? retEntryMortgage : mortgageBalance;
+  const sumUnsecured =
+    retEntryUnsecured !== null
+      ? retEntryUnsecured
+      : round2(debts.reduce((s, d) => s + d.balance, 0));
   // Nominal state pension at the age it first becomes payable, triple-lock grown from today.
   const projectedStatePension = round2(
     computeStatePension(niYears) *
       Math.pow(1 + triplelock, Math.max(0, statePensionAge - currentAge))
   );
-  const totalSavings = round2(pensionBal + isaBal + giaBal);
-  const totalDebt = round2(mortgageBalance + finalUnsecuredBalance + slBalance);
+  const totalSavings = round2(sumPension + sumISA + sumGIA);
+  const totalDebt = round2(sumMortgage + sumUnsecured + slBalance);
 
   return {
     startYear: currentYear,
@@ -1145,13 +1178,13 @@ export function projectLifecycle(profile, rates, pots = {}, retirementOptions = 
     summary: {
       retirementYear,
       retirementAge,
-      pensionPot: pensionBal,
-      isaBalance: isaBal,
-      giaBalance: giaBal,
-      giaCostBasis: costBasis,
-      giaUnrealisedGain: round2(giaBal - costBasis),
-      mortgageOutstanding: mortgageBalance,
-      unsecuredDebtOutstanding: finalUnsecuredBalance,
+      pensionPot: sumPension,
+      isaBalance: sumISA,
+      giaBalance: sumGIA,
+      giaCostBasis: sumCostBasis,
+      giaUnrealisedGain: round2(sumGIA - sumCostBasis),
+      mortgageOutstanding: sumMortgage,
+      unsecuredDebtOutstanding: sumUnsecured,
       studentLoanOutstanding: slBalance,
       totalSavings,
       totalDebt,
