@@ -37,7 +37,16 @@ function yTickFmt(v) {
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────────
-const TABS = ['Personal', 'Pension', 'Savings', 'Mortgage', 'Debts', 'Rates', 'Retire'];
+const TABS = [
+  'Personal',
+  'Pension',
+  'Savings',
+  'Mortgage',
+  'Debts',
+  'Rates',
+  'Retire',
+  'Simulation',
+];
 
 const PLAN_OPTIONS = [
   { value: '', label: 'None' },
@@ -111,9 +120,9 @@ const DEFAULTS = {
   // Monte Carlo settings
   mcTrials: 200,
   mcVolatility: 1.0,
-  mcCyclePeriod: 7,
-  mcCycleSeverity: 1.0,
-  mcCycleRegularity: 0.5,
+  mcBearFreq: 12,
+  mcBearSeverity: 0.15,
+  mcCrisisPersistence: 0.6,
 };
 
 // ── Small components ──────────────────────────────────────────────────────────
@@ -1031,84 +1040,142 @@ function TabContent({ tab, p, set }) {
             Debt rates are set per-instrument in the Mortgage and Debts tabs. BoE rate also applies
             to Plan 1/4 student loan interest. All figures are nominal (not inflation-adjusted).
           </InfoBox>
+        </>
+      );
 
-          {/* ── Monte Carlo settings ── */}
-          <div style={{ marginTop: 4, paddingTop: 16, borderTop: '1px solid var(--border)' }}>
-            <SecHead>Monte Carlo Settings</SecHead>
-            <InfoBox>
-              These settings apply when the Monte Carlo tab is active in the chart. Switch to that
-              tab to run the simulation.
-            </InfoBox>
-            <>
-              <Slider
-                label="Trials"
-                value={p.mcTrials}
-                min={50}
-                max={1000}
-                step={50}
-                format={(v) => `${v}`}
-                onChange={set('mcTrials')}
-                allowInput
-                help="Number of independent lifecycle projections to run. More trials give smoother percentile bands but take longer to compute. 200–500 is a good balance for interactive use."
-              />
-              <Slider
-                label="Volatility"
-                value={p.mcVolatility}
-                min={0.1}
-                max={3}
-                step={0.1}
-                format={(v) => `${v.toFixed(1)}×`}
-                onChange={set('mcVolatility')}
-                allowInput
-                help={
-                  'Scales the standard deviation of the random rate shocks. At 1× (default): investment returns ±8 pp per year (1 sd), macro rates ±0.8 pp.\n\n' +
-                  'Each year draws fresh rates — this models both sequence-of-returns risk and year-to-year market volatility.\n\n' +
-                  'At 1×: p90 trial ≈ base + 8 pp in a given year, p10 ≈ base − 8 pp. Increase for a wider fan, decrease for a narrower one.'
-                }
-              />
-              <Slider
-                label="Cycle Period"
-                value={p.mcCyclePeriod}
-                min={3}
-                max={20}
-                step={1}
-                format={(v) => `${v} yrs`}
-                onChange={set('mcCyclePeriod')}
-                allowInput
-                help={
-                  'Mean number of years between recession troughs (the business cycle length).\n\n' +
-                  'Historical UK/US cycles average 7–10 years between recessions. Shorter values (3–5 yr) model more volatile, emerging-market-like conditions. Longer values (15–20 yr) model calmer, structurally stable economies.'
-                }
-              />
-              <Slider
-                label="Cycle Severity"
-                value={p.mcCycleSeverity}
-                min={0}
-                max={3}
-                step={0.1}
-                format={(v) => `${v.toFixed(1)}×`}
-                onChange={set('mcCycleSeverity')}
-                allowInput
-                help={
-                  'Amplitude of the economic cycle effect on investment returns.\n\n' +
-                  'At 1× (default): recessions cut investment returns by up to 8 pp (e.g. 7% → −1%) and booms add up to 8 pp. At 0×: no cycle effect (pure noise only). At 2×: severe swings of ±16 pp, consistent with deep recessions like 2008–09.'
-                }
-              />
-              <Slider
-                label="Cycle Regularity"
-                value={p.mcCycleRegularity}
-                min={0}
-                max={1}
-                step={0.05}
-                format={(v) => `${(v * 100).toFixed(0)}%`}
-                onChange={set('mcCycleRegularity')}
-                allowInput
-                help={
-                  'How closely recessions follow the fixed cycle period.\n\n' +
-                  '100%: recessions arrive like clockwork every N years (purely deterministic timing). 0%: recession timing is completely random — the cycle period sets the average spacing but each interval is independent. 50% (default): moderate jitter — cycles follow the period loosely, with ±one-period uncertainty over a full cycle.'
-                }
-              />
-            </>
+    case 'Simulation':
+      return (
+        <>
+          <InfoBox>
+            These settings control the Monte Carlo simulation. Switch to the Monte Carlo tab in the
+            chart to run it.
+          </InfoBox>
+          <Slider
+            label="Trials"
+            value={p.mcTrials}
+            min={50}
+            max={1000}
+            step={50}
+            format={(v) => `${v}`}
+            onChange={set('mcTrials')}
+            allowInput
+            help="Number of independent lifecycle projections to run. More trials give smoother percentile bands but take longer to compute. 200–500 is a good balance for interactive use."
+          />
+          <Slider
+            label="Volatility"
+            value={p.mcVolatility}
+            min={0.1}
+            max={3}
+            step={0.1}
+            format={(v) => `${v.toFixed(1)}×`}
+            onChange={set('mcVolatility')}
+            allowInput
+            help={
+              'Scales the standard deviation of the random rate shocks. At 1× (default): investment returns ±8 pp per year (1 sd), macro rates ±0.8 pp.\n\n' +
+              'Each year draws fresh rates — this models both sequence-of-returns risk and year-to-year market volatility.\n\n' +
+              'At 1×: p90 trial ≈ base + 8 pp in a given year, p10 ≈ base − 8 pp. Increase for a wider fan, decrease for a narrower one.'
+            }
+          />
+          <Slider
+            label="Bear market frequency"
+            value={p.mcBearFreq}
+            min={4}
+            max={30}
+            step={1}
+            format={(v) => `every ${v} yrs`}
+            onChange={set('mcBearFreq')}
+            allowInput
+            help={
+              'Average number of years between bear markets (market downturns lasting 1–3 years).\n\n' +
+              'At 12 years (default): roughly matches post-war UK/US history. At 4–6 years: more crisis-prone, similar to the 1970s or emerging markets. At 20–30 years: unusually calm conditions.\n\n' +
+              'Each bear market shifts investment returns down by the Bear Market Severity amount for its duration.'
+            }
+          />
+          <Slider
+            label="Bear market severity"
+            value={p.mcBearSeverity}
+            min={0.02}
+            max={0.4}
+            step={0.01}
+            format={(v) => `−${(v * 100).toFixed(0)} pp`}
+            onChange={set('mcBearSeverity')}
+            allowInput
+            help={
+              'How much a bear market cuts annual investment returns during the downturn.\n\n' +
+              'At −15 pp (default): a portfolio earning 7% in normal years earns −8% during a bear — consistent with a moderate recession. At −30 pp: severe crash conditions (2008-style). At −5 pp: a mild correction only.'
+            }
+          />
+          {/* Crisis persistence toggle */}
+          <div style={{ marginBottom: 10 }}>
+            <div
+              style={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                marginBottom: 6,
+              }}
+            >
+              <span
+                style={{
+                  fontSize: 12,
+                  fontFamily: 'var(--font-body)',
+                  color: 'var(--text-secondary)',
+                }}
+              >
+                Crisis persistence
+              </span>
+              <div
+                style={{
+                  display: 'flex',
+                  background: 'var(--bg-input)',
+                  border: '1px solid var(--border)',
+                  borderRadius: 5,
+                  overflow: 'hidden',
+                }}
+              >
+                {[
+                  { label: 'Short', value: 0.3 },
+                  { label: 'Medium', value: 0.6 },
+                  { label: 'Long', value: 0.8 },
+                ].map(({ label, value }) => (
+                  <button
+                    key={value}
+                    onClick={() => set('mcCrisisPersistence')(value)}
+                    style={{
+                      padding: '3px 9px',
+                      background:
+                        p.mcCrisisPersistence === value ? 'var(--accent-gold)' : 'transparent',
+                      border: 'none',
+                      color:
+                        p.mcCrisisPersistence === value
+                          ? 'var(--accent-gold-text)'
+                          : 'var(--text-secondary)',
+                      fontFamily: 'var(--font-mono)',
+                      fontSize: 10,
+                      fontWeight: 600,
+                      letterSpacing: '0.05em',
+                      cursor: 'pointer',
+                      transition: 'all 0.15s',
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <p
+              style={{
+                fontSize: 11,
+                color: 'var(--text-muted)',
+                fontFamily: 'var(--font-body)',
+                lineHeight: 1.5,
+              }}
+            >
+              How long elevated volatility lingers after a bear market ends. Short: volatility
+              normalises within 1–2 years. Long: unsettled conditions persist for 5+ years, as in
+              the aftermath of 2008.
+            </p>
           </div>
         </>
       );
@@ -2079,9 +2146,9 @@ export default function App() {
           runMonteCarlo(mcProfile, mcRates, mcPots, mcRetOpts, {
             trials: p.mcTrials,
             volatility: p.mcVolatility,
-            cyclePeriod: p.mcCyclePeriod,
-            cycleSeverity: p.mcCycleSeverity,
-            cycleRegularity: p.mcCycleRegularity,
+            bearFreq: p.mcBearFreq,
+            bearSeverity: p.mcBearSeverity,
+            crisisPersistence: p.mcCrisisPersistence,
           })
         );
       } catch {
@@ -2657,42 +2724,58 @@ export default function App() {
                 </p>
               </div>
 
-              {/* Centre: tab switcher — fixed width, never moves */}
+              {/* Centre: tab switcher + tooltip — fixed, never moves */}
               <div
                 style={{
                   display: 'flex',
-                  background: 'var(--bg-input)',
-                  border: '1px solid var(--border)',
-                  borderRadius: 6,
-                  overflow: 'hidden',
-                  flexShrink: 0,
+                  alignItems: 'center',
+                  gap: 6,
                   alignSelf: 'center',
+                  flexShrink: 0,
                 }}
               >
-                {[
-                  { key: 'det', label: 'Deterministic' },
-                  { key: 'mc', label: 'Monte Carlo' },
-                ].map(({ key, label }) => (
-                  <button
-                    key={key}
-                    onClick={() => setChartTab(key)}
-                    style={{
-                      padding: '4px 12px',
-                      background: chartTab === key ? 'var(--accent-gold)' : 'transparent',
-                      border: 'none',
-                      color: chartTab === key ? 'var(--accent-gold-text)' : 'var(--text-secondary)',
-                      fontFamily: 'var(--font-mono)',
-                      fontSize: 10,
-                      fontWeight: 600,
-                      letterSpacing: '0.06em',
-                      cursor: 'pointer',
-                      transition: 'all 0.15s',
-                      whiteSpace: 'nowrap',
-                    }}
-                  >
-                    {label}
-                  </button>
-                ))}
+                <div
+                  style={{
+                    display: 'flex',
+                    background: 'var(--bg-input)',
+                    border: '1px solid var(--border)',
+                    borderRadius: 6,
+                    overflow: 'hidden',
+                  }}
+                >
+                  {[
+                    { key: 'det', label: 'Deterministic' },
+                    { key: 'mc', label: 'Monte Carlo' },
+                  ].map(({ key, label }) => (
+                    <button
+                      key={key}
+                      onClick={() => setChartTab(key)}
+                      style={{
+                        padding: '4px 12px',
+                        background: chartTab === key ? 'var(--accent-gold)' : 'transparent',
+                        border: 'none',
+                        color:
+                          chartTab === key ? 'var(--accent-gold-text)' : 'var(--text-secondary)',
+                        fontFamily: 'var(--font-mono)',
+                        fontSize: 10,
+                        fontWeight: 600,
+                        letterSpacing: '0.06em',
+                        cursor: 'pointer',
+                        transition: 'all 0.15s',
+                        whiteSpace: 'nowrap',
+                      }}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+                <HelpTip
+                  text={
+                    'Deterministic: one fixed projection using the exact rates you set in the Rates tab. Useful for understanding how the plan works and stress-testing specific assumptions.\n\n' +
+                    'Monte Carlo: runs hundreds of simulations, each with a different random sequence of market returns and economic conditions. The fan chart shows the spread of outcomes — the wide band is the 10th–90th percentile range, the narrow band is 25th–75th, and the centre line is the median.\n\n' +
+                    'Use Monte Carlo to understand retirement risk — specifically, whether your plan survives bad luck, not just average conditions.'
+                  }
+                />
               </div>
 
               {/* Right: tab-specific controls (flex:1, right-aligned) */}
@@ -2755,6 +2838,8 @@ export default function App() {
                   <FanChart
                     percentileData={mcResults.percentileData}
                     portfolioMatrix={mcResults.portfolioMatrix}
+                    allPotData={mcResults.allPotData}
+                    potSeries={series.filter((s) => ['pension', 'isa', 'gia'].includes(s.key))}
                     repPaths={mcResults.repPaths}
                     realTerms={realTerms}
                     inflRate={inflRate}
@@ -2764,6 +2849,7 @@ export default function App() {
                     onHoverRow={(row) => {
                       setHoveredRow(row ?? null);
                     }}
+                    fourPctTarget={fourPctTarget}
                     showDetails={true}
                     colorMode={colorMode}
                     height={mobile ? 260 : 390}

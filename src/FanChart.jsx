@@ -21,9 +21,9 @@ export const PCT_KEYS = ['p10', 'p25', 'p50', 'p75', 'p90'];
 export const PCT_CFG = {
   p10: { pct: 10, label: '10th %ile', color: '#f43f5e', width: 1.5 },
   p25: { pct: 25, label: '25th %ile', color: '#fb923c', width: 1.5 },
-  p50: { pct: 50, label: 'Median', color: '#4f8ef7', width: 2.5 },
+  p50: { pct: 50, label: 'Median', color: '#e8b84b', width: 2.5 },
   p75: { pct: 75, label: '75th %ile', color: '#34d399', width: 1.5 },
-  p90: { pct: 90, label: '90th %ile', color: '#4ade80', width: 1.5 },
+  p90: { pct: 90, label: '90th %ile', color: '#4f8ef7', width: 1.5 },
 };
 
 // ── Canvas layout ─────────────────────────────────────────────────────────────
@@ -65,10 +65,16 @@ function cssVar(name) {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 }
 
+// ── Pot drawing order: pension at bottom, ISA in middle, GIA on top ───────────
+// Matches the stacking order used in the deterministic Recharts AreaChart.
+const POT_STACK_ORDER = ['pension', 'isa', 'gia'];
+
 // ── Core draw function ────────────────────────────────────────────────────────
-// lockedPath:   number[] | null — real-terms-adjusted portfolio values for the
-//               pinned trial, one entry per age row in adjData.
-// lockedPctKey: string | null   — which percentile was clicked (for colour).
+// lockedPath:    number[] | null — real-terms total portfolio per year (fallback)
+// lockedPctKey:  string | null
+// lockedPotData: {pension,isa,gia}[] | null — real-terms per-pot values per year
+// potSeries:     {key,name,color}[] | null  — pot colour config
+// fourPctTarget: number | null              — 4% rule threshold (same real/nominal basis as adjData)
 function drawFanChart(
   canvas,
   W,
@@ -79,7 +85,10 @@ function drawFanChart(
   retirementAge,
   statePensionAge,
   lockedPath,
-  lockedPctKey
+  lockedPctKey,
+  lockedPotData,
+  potSeries,
+  fourPctTarget
 ) {
   const ctx = canvas.getContext('2d');
 
@@ -106,8 +115,12 @@ function drawFanChart(
 
   const minAge = adjData[0].age;
   const maxAgeVal = adjData[adjData.length - 1].age;
-  const rawMax = Math.max(...adjData.map((d) => d.p90), 1);
-  // Pad the top by 8% so lines don't clip at the top edge
+  // Scale to the locked trial's own peak (pot total) — or p90 in fan mode.
+  const rawMax = lockedPotData
+    ? Math.max(...lockedPotData.map((d) => (d.pension ?? 0) + (d.isa ?? 0) + (d.gia ?? 0)), 1)
+    : lockedPath
+      ? Math.max(...lockedPath, 1)
+      : Math.max(...adjData.map((d) => d.p90), 1);
   const maxVal = rawMax * 1.08;
 
   function xOf(age) {
@@ -151,6 +164,28 @@ function drawFanChart(
     ctx.moveTo(spX, PAD.top);
     ctx.lineTo(spX, PAD.top + cH);
     ctx.stroke();
+  }
+
+  // 4% rule horizontal line (always shown, both fan and locked modes)
+  if (fourPctTarget != null && fourPctTarget > 0 && fourPctTarget < maxVal) {
+    const fy = yOf(fourPctTarget);
+    ctx.setLineDash([6, 3]);
+    ctx.strokeStyle = '#6ee7b7';
+    ctx.lineWidth = 1.5;
+    ctx.globalAlpha = 0.55;
+    ctx.beginPath();
+    ctx.moveTo(PAD.left, fy);
+    ctx.lineTo(PAD.left + cW, fy);
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+    ctx.setLineDash([]);
+    // Label at the right edge
+    ctx.font = `bold 8px ${mono}`;
+    ctx.fillStyle = '#6ee7b7';
+    ctx.globalAlpha = 0.75;
+    ctx.textAlign = 'right';
+    ctx.fillText('4% rule', PAD.left + cW - 2, fy - 4);
+    ctx.globalAlpha = 1;
   }
 
   ctx.setLineDash([]);
@@ -209,32 +244,66 @@ function drawFanChart(
     ctx.fillText(`${sfAge}`, sx, sy + 24);
   }
 
-  // ── Mode: locked single trial vs. full fan ────────────────────────────────
-  if (lockedPath) {
-    // Draw only the pinned trial's path; suppress bands, fan lines, hover.
-    const cfg = PCT_CFG[lockedPctKey];
+  // ── Mode: locked single trial (stacked pots) vs. full fan ───────────────────
+  if (lockedPotData && potSeries) {
+    // Build a colour lookup from potSeries
+    const potColor = Object.fromEntries(potSeries.map((s) => [s.key, s.color]));
 
-    ctx.beginPath();
-    for (let i = 0; i < adjData.length; i++) {
-      const x = xOf(adjData[i].age);
-      const y = yOf(lockedPath[i]);
-      if (i === 0) ctx.moveTo(x, y);
-      else ctx.lineTo(x, y);
+    // Precompute cumulative sums per year: [0, pension, pension+isa, total]
+    const cumData = lockedPotData.map((d) => {
+      const vals = [0];
+      for (const k of POT_STACK_ORDER) vals.push(vals[vals.length - 1] + Math.max(0, d[k] ?? 0));
+      return vals;
+    });
+
+    // Draw each pot as a filled band, bottom-to-top
+    for (let pi = 0; pi < POT_STACK_ORDER.length; pi++) {
+      const key = POT_STACK_ORDER[pi];
+      const color = potColor[key];
+      if (!color) continue;
+
+      ctx.beginPath();
+      for (let i = 0; i < adjData.length; i++) {
+        const x = xOf(adjData[i].age);
+        if (i === 0) ctx.moveTo(x, yOf(cumData[i][pi + 1]));
+        else ctx.lineTo(x, yOf(cumData[i][pi + 1]));
+      }
+      for (let i = adjData.length - 1; i >= 0; i--) {
+        ctx.lineTo(xOf(adjData[i].age), yOf(cumData[i][pi]));
+      }
+      ctx.closePath();
+      ctx.globalAlpha = 0.55;
+      ctx.fillStyle = color;
+      ctx.fill();
+      ctx.globalAlpha = 1;
+
+      // Top-edge stroke line
+      ctx.beginPath();
+      for (let i = 0; i < adjData.length; i++) {
+        const x = xOf(adjData[i].age);
+        if (i === 0) ctx.moveTo(x, yOf(cumData[i][pi + 1]));
+        else ctx.lineTo(x, yOf(cumData[i][pi + 1]));
+      }
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([]);
+      ctx.globalAlpha = 0.9;
+      ctx.stroke();
+      ctx.globalAlpha = 1;
     }
-    ctx.strokeStyle = cfg.color;
-    ctx.lineWidth = 2;
-    ctx.setLineDash([]);
-    ctx.stroke();
 
-    // Shortfall for the locked trial
-    for (let i = 1; i < lockedPath.length; i++) {
-      if (lockedPath[i] <= 0 && lockedPath[i - 1] > 0) {
-        drawShortfallMarker(adjData[i].age, cfg);
+    // Shortfall marker (when total portfolio hits zero)
+    for (let i = 1; i < lockedPotData.length; i++) {
+      const total = cumData[i][POT_STACK_ORDER.length];
+      const prevTotal = cumData[i - 1][POT_STACK_ORDER.length];
+      if (total <= 0 && prevTotal > 0) {
+        drawShortfallMarker(adjData[i].age, PCT_CFG[lockedPctKey]);
         break;
       }
     }
 
     // In-chart label
+    const cfg = PCT_CFG[lockedPctKey];
     ctx.font = `bold 10px ${mono}`;
     ctx.fillStyle = cfg.color;
     ctx.textAlign = 'left';
@@ -249,9 +318,9 @@ function drawFanChart(
     //   p10–p25  red (adverse tail)
     //   p25–p75  blue (central range)
     //   p75–p90  green (favourable tail)
-    fillBand('p10', 'p25', PCT_CFG.p10.color, 0.18);
-    fillBand('p25', 'p75', '#4f8ef7', 0.22);
-    fillBand('p75', 'p90', PCT_CFG.p90.color, 0.18);
+    fillBand('p10', 'p25', PCT_CFG.p10.color, 0.18); // red  — adverse tail
+    fillBand('p25', 'p75', PCT_CFG.p50.color, 0.22); // gold — central range
+    fillBand('p75', 'p90', PCT_CFG.p75.color, 0.18); // green — favourable tail
 
     // Draw non-median lines first, median on top
     for (const key of ['p10', 'p25', 'p75', 'p90']) drawLine(key);
@@ -403,9 +472,9 @@ function FanLegend() {
     >
       {/* Band swatches — three coloured regions matching the canvas bands */}
       {[
-        { label: '10–25%', bg: 'rgba(244,63,94,0.22)', border: 'rgba(244,63,94,0.45)' },
-        { label: '25–75%', bg: 'rgba(79,142,247,0.26)', border: 'rgba(79,142,247,0.5)' },
-        { label: '75–90%', bg: 'rgba(74,222,128,0.22)', border: 'rgba(74,222,128,0.45)' },
+        { label: '10–25%', bg: 'rgba(244,63,94,0.22)', border: 'rgba(244,63,94,0.45)' }, // red
+        { label: '25–75%', bg: 'rgba(232,184,75,0.26)', border: 'rgba(232,184,75,0.5)' }, // gold
+        { label: '75–90%', bg: 'rgba(52,211,153,0.22)', border: 'rgba(52,211,153,0.45)' }, // green
       ].map(({ label, bg, border }) => (
         <div key={label} style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
           <div
@@ -470,6 +539,8 @@ function FanLegend() {
 export function FanChart({
   percentileData,
   portfolioMatrix,
+  allPotData,
+  potSeries,
   repPaths,
   realTerms,
   inflRate,
@@ -477,6 +548,7 @@ export function FanChart({
   retirementAge,
   statePensionAge,
   onHoverRow,
+  fourPctTarget = null,
   showDetails,
   colorMode = 'dark',
   height = 390,
@@ -533,6 +605,21 @@ export function FanChart({
     });
   }, [lockedTrial, portfolioMatrix, percentileData, realTerms, inflRate, currentAge]);
 
+  // Real-terms adjusted per-pot breakdown for the locked trial.
+  const adjLockedPotData = useMemo(() => {
+    if (!lockedTrial || !allPotData || !percentileData) return null;
+    const trialPots = allPotData[lockedTrial.trialIdx];
+    if (!trialPots) return null;
+    return trialPots.map((pots, i) => {
+      const f = realTerms ? Math.pow(1 / (1 + inflRate), percentileData[i].age - currentAge) : 1;
+      return {
+        pension: Math.max(0, pots.pension * f),
+        isa: Math.max(0, pots.isa * f),
+        gia: Math.max(0, pots.gia * f),
+      };
+    });
+  }, [lockedTrial, allPotData, percentileData, realTerms, inflRate, currentAge]);
+
   // Redraw whenever data, hover, lock state, or container size changes
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -548,7 +635,10 @@ export function FanChart({
       retirementAge,
       statePensionAge,
       adjLockedPath,
-      lockedTrial?.pctKey ?? null
+      lockedTrial?.pctKey ?? null,
+      adjLockedPotData,
+      potSeries ?? null,
+      fourPctTarget
     );
     coordRef.current = { ...coords, adjData };
     // colorMode in deps: theme change re-reads CSS vars via cssVar() at draw time
@@ -561,7 +651,10 @@ export function FanChart({
     statePensionAge,
     colorMode,
     adjLockedPath,
+    adjLockedPotData,
     lockedTrial,
+    potSeries,
+    fourPctTarget,
   ]);
 
   // Mousemove: update hover; frozen while a trial is locked
@@ -678,7 +771,35 @@ export function FanChart({
           gap: 8,
         }}
       >
-        <FanLegend />
+        {/* In locked mode show pot legend; otherwise show percentile band legend */}
+        {isLocked && potSeries ? (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap' }}>
+            {[...potSeries].reverse().map((s) => (
+              <div key={s.key} style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+                <div
+                  style={{
+                    width: 20,
+                    height: 10,
+                    background: s.color,
+                    opacity: 0.65,
+                    borderRadius: 2,
+                  }}
+                />
+                <span
+                  style={{
+                    fontSize: 10,
+                    color: 'var(--text-muted)',
+                    fontFamily: 'var(--font-mono)',
+                  }}
+                >
+                  {s.name}
+                </span>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <FanLegend />
+        )}
         {isLocked ? (
           <span
             style={{

@@ -1,31 +1,48 @@
 /**
- * Monte Carlo simulation — year-by-year stochastic rates with economic cycles.
+ * Monte Carlo simulation — two-regime Markov model with t(ν=5) shocks
+ * and GARCH-like volatility persistence.
  *
  * For each trial:
- *   1. Draw a random initial cycle phase φ₀ ~ Uniform(0, 2π)
- *   2. For each year t, advance the phase:
- *        φ_t = φ_{t-1} + ω₀ + ε_t
- *        ω₀ = 2π / cyclePeriod   (nominal angular frequency)
- *        ε_t ~ N(0, σ_phase²)   (phase noise — controls regularity)
- *        σ_phase = (1 - cycleRegularity) * 2 * ω₀
- *   3. Cycle effect:  cycle_t = sin(φ_t) * cycleSeverity
- *   4. Annual i.i.d. noise:
- *        z1_t ~ N(0, σ_mkt²)   → market rates
- *        z2_t ~ N(0, σ_mac²)   → macro rates
- *   5. Year t rates:
- *        savingsRate_t    = max(0, base + cycle_t * 0.08 + z1 * σ_mkt)
- *        retirementRate_t = max(0, base + cycle_t * 0.06 + z1 * σ_mkt * 0.75)
- *        inflationRate_t  = max(0, base - cycle_t * 0.01 + z2 * σ_mac)
- *        boeRate_t        = max(0, base - cycle_t * 0.01 + z2 * σ_mac)
- *        wageGrowthRate_t = base + cycle_t * 0.02 + z2 * σ_mac * 0.5
- *   6. Pass the full per-year array as yearlyRatesOverride to projectLifecycle
+ *   1. Regime state: normal or bear, starts normal.
+ *      Each year:
+ *        If normal: enter bear with p_enter = 1 / bearFreq
+ *        If bear:   exit  bear with p_exit  = 0.5  (avg bear ≈ 2 years)
  *
- * σ_mkt = volatility * 0.08  (annual market vol, ~8pp 1-sd per year)
- * σ_mac = volatility * 0.008 (annual macro vol, ~0.8pp 1-sd per year)
+ *   2. Volatility state (asymmetric: instant spike, slow decay):
+ *        During bear:  volState = VOL_BEAR  (immediate snap — φ doesn't affect crisis intensity)
+ *        After bear:   volState = φ × volState + (1−φ) × VOL_NORMAL
+ *        φ = crisisPersistence (0.3 short · 0.6 medium · 0.8 long)
+ *        → φ purely controls post-crisis decay speed, giving a clean monotonic
+ *          ordering: Short has least lingering excess vol → best long-run outcomes
+ *
+ *   3. Shocks:
+ *        z1 ~ t(ν=5)  — market returns (fat tails; more realistic than normal)
+ *        z2 ~ N(0,1)  — macro rates (inflation/BoE/wages; lighter tails acceptable)
+ *
+ *   4. Bear shift: Δ = bearSeverity when inBear, else 0
+ *      (bearSeverity stored as a positive fraction, e.g. 0.15 = −15 pp to returns)
+ *
+ *   5. Year t rates:
+ *        savingsRate    = base − Δ          + z1 × σ_eff
+ *        retirementRate = base − Δ × 0.75   + z1 × σ_eff × 0.75
+ *        inflationRate  = max(−0.05, base + Δ × 0.15 + z2 × σ_mac)
+ *        boeRate        = max(−0.05, base + Δ × 0.10 + z2 × σ_mac)
+ *        wageGrowthRate = base − Δ × 0.25   + z2 × σ_mac × 0.5
+ *
+ *      σ_eff      = σ_mkt × volState        (vol clustering)
+ *      σ_mkt      = volatility × 0.08
+ *      σ_mac      = volatility × 0.008
+ *
+ * Investment rates have no floor — see note in previous version.
+ * Macro rates floored at −5% to prevent extreme deflation artefacts.
  */
 
 import { projectLifecycle } from './ukLifecycle.js';
 
+const VOL_BEAR = 2.5; // vol multiplier target during bear regimes
+const VOL_NORMAL = 1.0; // vol multiplier target during normal regimes
+
+// ── PRNG (xorshift-based, seedable) ──────────────────────────────────────────
 function makePRNG(seed) {
   let s = seed >>> 0;
   return function () {
@@ -36,6 +53,7 @@ function makePRNG(seed) {
   };
 }
 
+// ── Standard normal via Box-Muller ────────────────────────────────────────────
 function sampleNorm(rand) {
   let u;
   do {
@@ -44,6 +62,21 @@ function sampleNorm(rand) {
   return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * rand());
 }
 
+// ── Student t(ν=5) via normal/chi-squared ratio ───────────────────────────────
+// t(ν) = Z / √(χ²(ν)/ν)  where χ²(ν) = Σᵢ Zᵢ²  (ν independent normals)
+// At ν=5 the distribution looks near-normal in the centre but has meaningfully
+// fatter tails — empirically a good fit for annual equity return distributions.
+function sampleT5(rand) {
+  const z = sampleNorm(rand);
+  let chi2 = 0;
+  for (let i = 0; i < 5; i++) {
+    const w = sampleNorm(rand);
+    chi2 += w * w;
+  }
+  return z / Math.sqrt(chi2 / 5);
+}
+
+// ── Percentile helper ─────────────────────────────────────────────────────────
 function pctile(sorted, p) {
   const idx = (p / 100) * (sorted.length - 1);
   const lo = Math.floor(idx);
@@ -51,6 +84,7 @@ function pctile(sorted, p) {
   return lo === hi ? sorted[lo] : sorted[lo] + (idx - lo) * (sorted[hi] - sorted[lo]);
 }
 
+// ── Total portfolio value for one row ────────────────────────────────────────
 function rowPortfolio(row) {
   return Math.max(
     0,
@@ -60,49 +94,68 @@ function rowPortfolio(row) {
   );
 }
 
+// ── Main simulation ───────────────────────────────────────────────────────────
 export function runMonteCarlo(profile, baseRates, pots, retirementOpts, opts = {}) {
   const {
     trials = 200,
     volatility = 1.0,
     seed = 0xdeadbeef,
-    cyclePeriod = 7,
-    cycleSeverity = 1.0,
-    cycleRegularity = 0.5,
+    bearFreq = 12, // years between bear markets (on average)
+    bearSeverity = 0.15, // return penalty during bear (positive fraction)
+    crisisPersistence = 0.6, // φ for vol AR(1): 0.3 short · 0.6 medium · 0.8 long
   } = opts;
 
   const σ_mkt = volatility * 0.08;
   const σ_mac = volatility * 0.008;
-  const ω0 = (2 * Math.PI) / Math.max(1, cyclePeriod);
-  const σ_phase = (1 - Math.max(0, Math.min(1, cycleRegularity))) * 2 * ω0;
+  const φ = Math.max(0, Math.min(0.99, crisisPersistence));
+  const pEnter = 1 / Math.max(1, bearFreq); // P(normal → bear) per year
+  const pExit = 0.5; // P(bear → normal) per year ≈ 2-yr avg bear
 
   const totalYears = retirementOpts.maxAge - profile.currentAge + 1;
   const rand = makePRNG(seed);
   const successful = [];
 
   for (let t = 0; t < trials; t++) {
-    // Random initial phase so trials don't synchronise
-    let phase = rand() * 2 * Math.PI;
+    let inBear = false;
+    let volState = VOL_NORMAL;
 
     const yearlyRatesOverride = [];
     for (let y = 0; y < totalYears; y++) {
-      // Advance stochastic phase
-      phase += ω0 + (σ_phase > 0 ? sampleNorm(rand) * σ_phase : 0);
-      const cycle = Math.sin(phase) * cycleSeverity;
+      // ── Regime transition ──────────────────────────────────────────────────
+      if (inBear) {
+        if (rand() < pExit) inBear = false;
+      } else {
+        if (rand() < pEnter) inBear = true;
+      }
 
-      const z1 = sampleNorm(rand);
-      const z2 = sampleNorm(rand);
+      // ── Volatility state ───────────────────────────────────────────────────
+      // During a bear: vol snaps immediately to VOL_BEAR so φ has no effect
+      // on crisis intensity — it only controls how slowly vol decays afterward.
+      // After a bear: AR(1) decay toward VOL_NORMAL at rate (1−φ).
+      // This gives a clean monotonic ordering: Short decays fastest → lowest
+      // integrated excess vol → best outcomes; Long decays slowest → worst.
+      if (inBear) {
+        volState = VOL_BEAR;
+      } else {
+        volState = φ * volState + (1 - φ) * VOL_NORMAL;
+      }
+      const σ_eff = σ_mkt * volState;
+
+      // ── Shocks ────────────────────────────────────────────────────────────
+      const z1 = sampleT5(rand); // fat-tailed market shock
+      const z2 = sampleNorm(rand); // macro shock (normal is fine here)
+
+      // ── Bear shift (positive = downward pressure on returns) ───────────────
+      const Δ = inBear ? bearSeverity : 0;
 
       yearlyRatesOverride.push({
-        // Investment rates: no floor — negative values represent down-market years.
-        // A zero floor would truncate the left tail while leaving the right tail open,
-        // inflating the effective mean and causing higher volatility to spuriously
-        // increase long-run wealth rather than widen the spread around the median.
-        savingsRate: baseRates.savingsRate + cycle * 0.08 + z1 * σ_mkt,
-        retirementRate: baseRates.retirementRate + cycle * 0.06 + z1 * σ_mkt * 0.75,
-        // Macro rates: allow mild deflation (floor at −5%) but prevent extreme values.
-        inflationRate: Math.max(-0.05, baseRates.inflationRate - cycle * 0.01 + z2 * σ_mac),
-        boeRate: Math.max(-0.05, baseRates.boeRate - cycle * 0.01 + z2 * σ_mac),
-        wageGrowthRate: baseRates.wageGrowthRate + cycle * 0.02 + z2 * σ_mac * 0.5,
+        // Investment rates: no floor (see module docstring)
+        savingsRate: baseRates.savingsRate - Δ + z1 * σ_eff,
+        retirementRate: baseRates.retirementRate - Δ * 0.75 + z1 * σ_eff * 0.75,
+        // Macro rates: mild reflation during crises; floor at −5%
+        inflationRate: Math.max(-0.05, baseRates.inflationRate + Δ * 0.15 + z2 * σ_mac),
+        boeRate: Math.max(-0.05, baseRates.boeRate + Δ * 0.1 + z2 * σ_mac),
+        wageGrowthRate: baseRates.wageGrowthRate - Δ * 0.25 + z2 * σ_mac * 0.5,
       });
     }
 
@@ -111,7 +164,7 @@ export function runMonteCarlo(profile, baseRates, pots, retirementOpts, opts = {
         projectLifecycle(profile, baseRates, pots, retirementOpts, yearlyRatesOverride)
       );
     } catch {
-      /* skip */
+      /* skip failed trials */
     }
   }
 
@@ -120,20 +173,16 @@ export function runMonteCarlo(profile, baseRates, pots, retirementOpts, opts = {
   const ages = successful[0].yearlyBreakdown.map((r) => r.age);
   const portfolioMatrix = successful.map((r) => r.yearlyBreakdown.map(rowPortfolio));
 
-  // ── Rank trials for representative-path selection ──────────────────────────
+  // ── Rank trials for representative-path selection ─────────────────────────
   // Sort order (ascending = worst → best):
-  //   1. Trials that survive to maxAge rank above all exhausted trials.
-  //      Among survivors: rank by balance at maxAge (higher = better).
-  //   2. Exhausted trials: rank by shortfall age (later = better).
-  //   3. Same shortfall age: rank by total portfolio area (sum of yearly
-  //      balances — higher means more wealth throughout the projection).
-
+  //   Survivors (never exhaust funds) always beat exhausted trials.
+  //   Among survivors:  rank by final balance at maxAge.
+  //   Among exhausted:  rank by shortfall age, then total portfolio area.
   const maxAgeIdx = ages.length - 1;
 
   function trialScore(col) {
     const finalBal = col[maxAgeIdx] ?? 0;
-    // Find first year where portfolio drops to zero after being positive.
-    let shortfallAge = Infinity; // Infinity signals no exhaustion
+    let shortfallAge = Infinity;
     for (let i = 1; i < col.length; i++) {
       if (col[i] <= 0 && col[i - 1] > 0) {
         shortfallAge = ages[i];
@@ -147,15 +196,10 @@ export function runMonteCarlo(profile, baseRates, pots, retirementOpts, opts = {
   const ranked = portfolioMatrix
     .map((col, i) => ({ i, ...trialScore(col) }))
     .sort((a, b) => {
-      const aExhausted = a.shortfallAge !== Infinity;
-      const bExhausted = b.shortfallAge !== Infinity;
-      // Non-exhausted always beats exhausted
-      if (aExhausted !== bExhausted) return aExhausted ? -1 : 1;
-      if (!aExhausted) {
-        // Both survive: rank by final balance
-        return a.finalBal - b.finalBal;
-      }
-      // Both exhausted: rank by shortfall age, then total area
+      const aEx = a.shortfallAge !== Infinity;
+      const bEx = b.shortfallAge !== Infinity;
+      if (aEx !== bEx) return aEx ? -1 : 1;
+      if (!aEx) return a.finalBal - b.finalBal;
       if (a.shortfallAge !== b.shortfallAge) return a.shortfallAge - b.shortfallAge;
       return a.totalBal - b.totalBal;
     });
@@ -184,5 +228,15 @@ export function runMonteCarlo(profile, baseRates, pots, retirementOpts, opts = {
     repPaths[p] = successful[repTrialIdx[p]].yearlyBreakdown;
   }
 
-  return { percentileData, repPaths, trialCount: successful.length, portfolioMatrix };
+  // Per-trial pot balances — lightweight snapshot used by the locked-trial
+  // stacked view in FanChart (pension / ISA / GIA closing balances only).
+  const allPotData = successful.map((r) =>
+    r.yearlyBreakdown.map((row) => ({
+      pension: Math.max(0, row.pension?.closingBalance ?? 0),
+      isa: Math.max(0, row.isa?.closingBalance ?? 0),
+      gia: Math.max(0, row.gia?.closingBalance ?? 0),
+    }))
+  );
+
+  return { percentileData, repPaths, trialCount: successful.length, portfolioMatrix, allPotData };
 }
