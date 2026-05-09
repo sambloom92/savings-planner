@@ -11,6 +11,8 @@ import {
   ResponsiveContainer,
 } from 'recharts';
 import { projectLifecycle } from './ukLifecycle.js';
+import { runMonteCarlo } from './ukMonteCarlo.js';
+import { FanChart } from './FanChart.jsx';
 
 // ── Formatters ────────────────────────────────────────────────────────────────
 const fmtGBP = (n) => `£${Math.round(Math.abs(n)).toLocaleString('en-GB')}`;
@@ -106,6 +108,12 @@ const DEFAULTS = {
   maxAge: 90,
   targetNetExpenses: 30_000,
   takePCLS: true,
+  // Monte Carlo settings
+  mcTrials: 200,
+  mcVolatility: 1.0,
+  mcCyclePeriod: 7,
+  mcCycleSeverity: 1.0,
+  mcCycleRegularity: 0.5,
 };
 
 // ── Small components ──────────────────────────────────────────────────────────
@@ -117,6 +125,18 @@ const THEMES = [
   { value: 'light', label: 'Light', title: 'Light' },
   { value: 'device', label: 'Auto', title: 'Follow device preference' },
 ];
+
+// Module-level — not a hook, so direct DOM mutation is fine here.
+// Called synchronously before setColorMode() so CSS variables are updated
+// before any child useEffect (e.g. the canvas draw) reads them.
+function applyDataTheme(value) {
+  document.documentElement.dataset.theme =
+    value === 'device'
+      ? window.matchMedia('(prefers-color-scheme: dark)').matches
+        ? 'dark'
+        : 'light'
+      : value;
+}
 
 function useMobile() {
   const [mobile, setMobile] = useState(() => window.innerWidth < 768);
@@ -1011,6 +1031,85 @@ function TabContent({ tab, p, set }) {
             Debt rates are set per-instrument in the Mortgage and Debts tabs. BoE rate also applies
             to Plan 1/4 student loan interest. All figures are nominal (not inflation-adjusted).
           </InfoBox>
+
+          {/* ── Monte Carlo settings ── */}
+          <div style={{ marginTop: 4, paddingTop: 16, borderTop: '1px solid var(--border)' }}>
+            <SecHead>Monte Carlo Settings</SecHead>
+            <InfoBox>
+              These settings apply when the Monte Carlo tab is active in the chart. Switch to that
+              tab to run the simulation.
+            </InfoBox>
+            <>
+              <Slider
+                label="Trials"
+                value={p.mcTrials}
+                min={50}
+                max={1000}
+                step={50}
+                format={(v) => `${v}`}
+                onChange={set('mcTrials')}
+                allowInput
+                help="Number of independent lifecycle projections to run. More trials give smoother percentile bands but take longer to compute. 200–500 is a good balance for interactive use."
+              />
+              <Slider
+                label="Volatility"
+                value={p.mcVolatility}
+                min={0.1}
+                max={3}
+                step={0.1}
+                format={(v) => `${v.toFixed(1)}×`}
+                onChange={set('mcVolatility')}
+                allowInput
+                help={
+                  'Scales the standard deviation of the random rate shocks. At 1× (default): investment returns ±8 pp per year (1 sd), macro rates ±0.8 pp.\n\n' +
+                  'Each year draws fresh rates — this models both sequence-of-returns risk and year-to-year market volatility.\n\n' +
+                  'At 1×: p90 trial ≈ base + 8 pp in a given year, p10 ≈ base − 8 pp. Increase for a wider fan, decrease for a narrower one.'
+                }
+              />
+              <Slider
+                label="Cycle Period"
+                value={p.mcCyclePeriod}
+                min={3}
+                max={20}
+                step={1}
+                format={(v) => `${v} yrs`}
+                onChange={set('mcCyclePeriod')}
+                allowInput
+                help={
+                  'Mean number of years between recession troughs (the business cycle length).\n\n' +
+                  'Historical UK/US cycles average 7–10 years between recessions. Shorter values (3–5 yr) model more volatile, emerging-market-like conditions. Longer values (15–20 yr) model calmer, structurally stable economies.'
+                }
+              />
+              <Slider
+                label="Cycle Severity"
+                value={p.mcCycleSeverity}
+                min={0}
+                max={3}
+                step={0.1}
+                format={(v) => `${v.toFixed(1)}×`}
+                onChange={set('mcCycleSeverity')}
+                allowInput
+                help={
+                  'Amplitude of the economic cycle effect on investment returns.\n\n' +
+                  'At 1× (default): recessions cut investment returns by up to 8 pp (e.g. 7% → −1%) and booms add up to 8 pp. At 0×: no cycle effect (pure noise only). At 2×: severe swings of ±16 pp, consistent with deep recessions like 2008–09.'
+                }
+              />
+              <Slider
+                label="Cycle Regularity"
+                value={p.mcCycleRegularity}
+                min={0}
+                max={1}
+                step={0.05}
+                format={(v) => `${(v * 100).toFixed(0)}%`}
+                onChange={set('mcCycleRegularity')}
+                allowInput
+                help={
+                  'How closely recessions follow the fixed cycle period.\n\n' +
+                  '100%: recessions arrive like clockwork every N years (purely deterministic timing). 0%: recession timing is completely random — the cycle period sets the average spacing but each interval is independent. 50% (default): moderate jitter — cycles follow the period loosely, with ±one-period uncertainty over a full cycle.'
+                }
+              />
+            </>
+          </div>
         </>
       );
 
@@ -1738,12 +1837,13 @@ export default function App() {
   });
   const [activeTab, setActiveTab] = useState('Personal');
   const [realTerms, setRealTerms] = useState(false);
-  const [showDetails, setShowDetails] = useState(false);
   const [hoveredRow, setHoveredRow] = useState(null);
   const hoveredAgeRef = useRef(null);
   const [copyMsg, setCopyMsg] = useState(null);
   const [pasteMsg, setPasteMsg] = useState(null);
   const [colorMode, setColorMode] = useState(() => localStorage.getItem('colorMode') ?? 'dark');
+  // 'det' = deterministic chart  |  'mc' = Monte Carlo fan chart
+  const [chartTab, setChartTab] = useState('det');
   const series = colorMode === 'hc' ? SERIES_HC : SERIES_DEFAULT;
   const mobile = useMobile();
   const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -1753,22 +1853,22 @@ export default function App() {
     localStorage.setItem('inputs', JSON.stringify(p));
   }, [p]);
 
-  // Apply theme to <html data-theme="…"> and persist to localStorage
+  // Persist colorMode and, for 'device', keep data-theme in sync with OS preference.
+  // data-theme itself is set synchronously via changeColorMode() before each render.
   useEffect(() => {
     localStorage.setItem('colorMode', colorMode);
-    if (colorMode !== 'device') {
-      document.documentElement.dataset.theme = colorMode;
-      return;
+    if (colorMode === 'device') {
+      const mq = window.matchMedia('(prefers-color-scheme: dark)');
+      const apply = () => applyDataTheme('device');
+      mq.addEventListener('change', apply);
+      return () => mq.removeEventListener('change', apply);
     }
-    // Device mode: resolve immediately then listen for OS changes
-    const mq = window.matchMedia('(prefers-color-scheme: dark)');
-    const apply = () => {
-      document.documentElement.dataset.theme = mq.matches ? 'dark' : 'light';
-    };
-    apply();
-    mq.addEventListener('change', apply);
-    return () => mq.removeEventListener('change', apply);
   }, [colorMode]);
+
+  function changeColorMode(value) {
+    applyDataTheme(value); // synchronous — CSS vars correct before any effect runs
+    setColorMode(value);
+  }
 
   async function handleCopy() {
     try {
@@ -1897,6 +1997,102 @@ export default function App() {
     }
   }, [p]);
 
+  // ── Monte Carlo stochastic modelling ───────────────────────────────────────
+  // All setState calls live inside the timeout callback (not the effect body)
+  // to avoid the react-hooks/set-state-in-effect lint rule.
+  // A 150 ms debounce absorbs rapid slider changes.
+  const [mcResults, setMcResults] = useState(null);
+  const [mcPending, setMcPending] = useState(false);
+
+  useEffect(() => {
+    const delay = chartTab === 'mc' ? 150 : 0;
+    const tid = setTimeout(() => {
+      if (chartTab !== 'mc') {
+        setMcResults(null);
+        setMcPending(false);
+        return;
+      }
+      setMcPending(true);
+      try {
+        const mortgageRate =
+          p.mortgageRateType === 'boe'
+            ? (p.boePct + p.mortgageSpreadPct) / 100
+            : p.mortgageRatePct / 100;
+        const unsecuredRate =
+          p.unsecuredRateType === 'boe'
+            ? (p.boePct + p.unsecuredSpreadPct) / 100
+            : p.unsecuredRatePct / 100;
+
+        const mcProfile = {
+          currentAge: p.currentAge,
+          retirementAge: p.retirementAge,
+          grossIncome: p.grossIncome,
+          annualSavings: p.annualSavings,
+          employeePensionRate: p.employeePensionPct / 100,
+          employerPensionRate: p.employerPensionPct / 100,
+          niContributionYears: p.niContributionYears,
+          statePensionAge: p.statePensionAge,
+          studentLoanPlan: p.studentLoanPlan || null,
+        };
+        const mcRates = {
+          savingsRate: p.savingsPct / 100,
+          retirementRate: p.retireReturnPct / 100,
+          wageGrowthRate: p.wageGrowthPct / 100,
+          mortgageRate,
+          unsecuredRate,
+          inflationRate: p.inflationPct / 100,
+          boeRate: p.boePct / 100,
+          fiscalDragRate: p.fiscalDragPct / 100,
+        };
+        const mcPots = {
+          pensionBalance: p.pensionBalance,
+          isaBalance: p.isaBalance,
+          giaBalance: p.giaBalance,
+          giaCostBasis: Math.min(p.giaCostBasis, p.giaBalance),
+        };
+        if (p.mortgageBalance > 0) {
+          mcPots.mortgage = {
+            balance: p.mortgageBalance,
+            termYears: p.mortgageTermYears,
+            type: p.mortgageType,
+            monthlyOverpayment: p.mortgageOverpayment,
+          };
+        }
+        if (p.unsecuredBalance > 0) {
+          mcPots.unsecuredDebts = [
+            { balance: p.unsecuredBalance, monthlyPayment: p.unsecuredMonthly },
+          ];
+        }
+        if (p.studentLoanPlan && p.studentLoanBalance > 0) {
+          mcPots.studentLoan = {
+            balance: p.studentLoanBalance,
+            repaymentStartYear: 2025 - p.studentLoanYears,
+          };
+        }
+        const mcRetOpts = {
+          targetNetAnnualExpenses: p.targetNetExpenses,
+          maxAge: p.maxAge,
+          takePCLS: p.takePCLS,
+        };
+
+        setMcResults(
+          runMonteCarlo(mcProfile, mcRates, mcPots, mcRetOpts, {
+            trials: p.mcTrials,
+            volatility: p.mcVolatility,
+            cyclePeriod: p.mcCyclePeriod,
+            cycleSeverity: p.mcCycleSeverity,
+            cycleRegularity: p.mcCycleRegularity,
+          })
+        );
+      } catch {
+        setMcResults(null);
+      }
+      setMcPending(false);
+    }, delay);
+
+    return () => clearTimeout(tid);
+  }, [p, chartTab]);
+
   // ── Real-terms adjustment ──────────────────────────────────────────────────
   // Divides every monetary value by (1 + inflationRate)^(age − currentAge)
   // so all figures are expressed in today's purchasing power.
@@ -2021,7 +2217,7 @@ export default function App() {
               return (
                 <button
                   key={value}
-                  onClick={() => setColorMode(value)}
+                  onClick={() => changeColorMode(value)}
                   title={title}
                   style={{
                     padding: '4px 10px',
@@ -2408,16 +2604,19 @@ export default function App() {
               padding: '20px 16px 12px 8px',
             }}
           >
+            {/* ── Chart card header — 3-column layout keeps tab switcher stable ── */}
             <div
               style={{
                 paddingLeft: 16,
+                paddingRight: 8,
                 marginBottom: 14,
                 display: 'flex',
-                justifyContent: 'space-between',
                 alignItems: 'flex-start',
+                gap: 12,
               }}
             >
-              <div>
+              {/* Left: title + subtitle (flex:1 so it absorbs spare space) */}
+              <div style={{ flex: 1, minWidth: 0 }}>
                 <h2
                   style={{
                     fontFamily: 'var(--font-display)',
@@ -2428,7 +2627,7 @@ export default function App() {
                     marginBottom: 3,
                   }}
                 >
-                  Asset &amp; Debt Balances by Age
+                  {chartTab === 'mc' ? 'Monte Carlo Simulation' : 'Asset & Debt Balances by Age'}
                 </h2>
                 <p
                   style={{
@@ -2437,236 +2636,337 @@ export default function App() {
                     fontFamily: 'var(--font-body)',
                   }}
                 >
-                  Assets above axis · Debts below ·{' '}
-                  {realTerms
-                    ? `Real terms (today's £, ${p.inflationPct}% inflation)`
-                    : 'Nominal terms'}
+                  {chartTab === 'mc' ? (
+                    <>
+                      Total portfolio · {p.mcTrials} trials ·{' '}
+                      {realTerms
+                        ? `Real terms (today's £, ${p.inflationPct}% inflation)`
+                        : 'Nominal terms'}
+                      {mcPending && (
+                        <span style={{ color: 'var(--text-muted)' }}> · computing…</span>
+                      )}
+                    </>
+                  ) : (
+                    <>
+                      Assets above axis · Debts below ·{' '}
+                      {realTerms
+                        ? `Real terms (today's £, ${p.inflationPct}% inflation)`
+                        : 'Nominal terms'}
+                    </>
+                  )}
                 </p>
               </div>
+
+              {/* Centre: tab switcher — fixed width, never moves */}
               <div
                 style={{
                   display: 'flex',
-                  alignItems: 'center',
-                  gap: 12,
-                  paddingRight: 8,
-                  paddingTop: 2,
+                  background: 'var(--bg-input)',
+                  border: '1px solid var(--border)',
+                  borderRadius: 6,
+                  overflow: 'hidden',
+                  flexShrink: 0,
+                  alignSelf: 'center',
                 }}
               >
-                <span
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 3,
-                    fontFamily: 'var(--font-mono)',
-                    fontSize: 10,
-                    color: 'var(--text-muted)',
-                    whiteSpace: 'nowrap',
-                    letterSpacing: '0.04em',
-                  }}
-                >
-                  4% rule: {fmtGBPLarge(fourPctTarget)}
+                {[
+                  { key: 'det', label: 'Deterministic' },
+                  { key: 'mc', label: 'Monte Carlo' },
+                ].map(({ key, label }) => (
+                  <button
+                    key={key}
+                    onClick={() => setChartTab(key)}
+                    style={{
+                      padding: '4px 12px',
+                      background: chartTab === key ? 'var(--accent-gold)' : 'transparent',
+                      border: 'none',
+                      color: chartTab === key ? 'var(--accent-gold-text)' : 'var(--text-secondary)',
+                      fontFamily: 'var(--font-mono)',
+                      fontSize: 10,
+                      fontWeight: 600,
+                      letterSpacing: '0.06em',
+                      cursor: 'pointer',
+                      transition: 'all 0.15s',
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+
+              {/* Right: tab-specific controls (flex:1, right-aligned) */}
+              <div
+                style={{
+                  flex: 1,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'flex-end',
+                  gap: 12,
+                  alignSelf: 'center',
+                }}
+              >
+                {chartTab === 'det' && (
+                  <span
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 3,
+                      fontFamily: 'var(--font-mono)',
+                      fontSize: 10,
+                      color: 'var(--text-muted)',
+                      whiteSpace: 'nowrap',
+                      letterSpacing: '0.04em',
+                    }}
+                  >
+                    4% rule: {fmtGBPLarge(fourPctTarget)}
+                    <HelpTip
+                      text={
+                        'The 4% rule is a retirement planning heuristic: if you withdraw 4% of your portfolio in year one and adjust for inflation each year, historical data suggests the portfolio survives a 30-year retirement. This implies you need 25× your annual spending saved (1 ÷ 0.04 = 25).\n\n' +
+                        'This line shows that target in ' +
+                        (realTerms ? "today's money." : 'nominal terms at your retirement date.') +
+                        '\n\nWhy the model may differ:\n' +
+                        '• The model uses year-by-year drawdown with actual tax calculations, so it draws less gross from the pension when income is within the personal allowance.\n' +
+                        '• State pension income offsets spending needs, reducing how much the portfolio must provide — the 4% rule ignores guaranteed income sources.\n' +
+                        '• The model sequences across ISA, GIA, and pension in a tax-efficient order, whereas the 4% rule assumes a single undifferentiated pot.\n' +
+                        '• The 4% rule was calibrated on a 30-year horizon. Longer retirements (e.g. retiring at 55 to age 95) may require a lower safe withdrawal rate of 3–3.5%.'
+                      }
+                    />
+                  </span>
+                )}
+                {chartTab === 'mc' && (
                   <HelpTip
                     text={
-                      'The 4% rule is a retirement planning heuristic: if you withdraw 4% of your portfolio in year one and adjust for inflation each year, historical data suggests the portfolio survives a 30-year retirement. This implies you need 25× your annual spending saved (1 ÷ 0.04 = 25).\n\n' +
-                      'This line shows that target in ' +
-                      (realTerms ? "today's money." : 'nominal terms at your retirement date.') +
-                      '\n\nWhy the model may differ:\n' +
-                      '• The model uses year-by-year drawdown with actual tax calculations, so it draws less gross from the pension when income is within the personal allowance.\n' +
-                      '• State pension income offsets spending needs, reducing how much the portfolio must provide — the 4% rule ignores guaranteed income sources.\n' +
-                      '• The model sequences across ISA, GIA, and pension in a tax-efficient order, whereas the 4% rule assumes a single undifferentiated pot.\n' +
-                      '• The 4% rule was calibrated on a 30-year horizon. Longer retirements (e.g. retiring at 55 to age 95) may require a lower safe withdrawal rate of 3–3.5%.'
+                      `${mcResults ? mcResults.trialCount : 0} successful trials shown. Each trial varies investment returns (market factor) and inflation / BoE / wage growth (macro factor) using correlated random shocks.\n\n` +
+                      'Bands show the 10th–90th percentile range (faint) and 25th–75th range (stronger). Lines show the 5 key percentiles.\n\n' +
+                      'Click and hold on a data point to isolate the single trial closest to that percentile at that age. Release to return to the full fan.\n\n' +
+                      'Shortfall labels (▼ with age) on the x-axis show when each percentile path runs out of money. Hover to see pot detail from that path.'
                     }
                   />
-                </span>
-                <button
-                  onClick={() => setShowDetails((v) => !v)}
-                  style={{
-                    padding: '3px 10px',
-                    background: showDetails ? 'rgba(232,184,75,0.15)' : 'transparent',
-                    border: `1px solid ${showDetails ? 'var(--accent-gold)' : 'var(--border-bright)'}`,
-                    borderRadius: 4,
-                    color: showDetails ? 'var(--accent-gold)' : 'var(--text-muted)',
-                    fontFamily: 'var(--font-mono)',
-                    fontSize: 10,
-                    fontWeight: 600,
-                    letterSpacing: '0.08em',
-                    cursor: 'pointer',
-                    transition: 'all 0.15s',
-                    whiteSpace: 'nowrap',
-                  }}
-                >
-                  {showDetails ? 'Details ✕' : 'Details'}
-                </button>
-                <LegendStrip series={series} />
+                )}
+                {chartTab === 'det' && <LegendStrip series={series} />}
               </div>
             </div>
 
-            {displayData.length > 0 ? (
-              <ResponsiveContainer width="100%" height={mobile ? 260 : 390}>
-                <AreaChart
-                  data={displayData}
-                  margin={{ top: 10, right: 16, left: 10, bottom: 0 }}
-                  onMouseMove={(chartEvt) => {
-                    if (!showDetails || !chartEvt?.activePayload?.[0]?.payload) return;
-                    const pl = chartEvt.activePayload[0].payload;
-                    if (hoveredAgeRef.current !== pl.age) {
-                      hoveredAgeRef.current = pl.age;
-                      setHoveredRow(pl._detail ?? null);
-                    }
-                  }}
-                  onMouseLeave={() => {
-                    hoveredAgeRef.current = null;
-                    setHoveredRow(null);
-                  }}
-                >
-                  <defs>
-                    {series.map((s) => (
-                      <linearGradient
-                        key={s.key}
-                        id={`grad-${s.key}`}
-                        x1="0"
-                        y1={s.stackId === 'neg' ? '1' : '0'}
-                        x2="0"
-                        y2={s.stackId === 'neg' ? '0' : '1'}
-                      >
-                        <stop offset="5%" stopColor={s.color} stopOpacity={0.45} />
-                        <stop offset="95%" stopColor={s.color} stopOpacity={0.05} />
-                      </linearGradient>
-                    ))}
-                  </defs>
-
-                  <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
-
-                  <XAxis
-                    dataKey="age"
-                    tick={{
-                      fill: 'var(--text-muted)',
-                      fontSize: 11,
+            {/* ── Monte Carlo tab ── */}
+            {chartTab === 'mc' && (
+              <>
+                {mcResults ? (
+                  <FanChart
+                    percentileData={mcResults.percentileData}
+                    portfolioMatrix={mcResults.portfolioMatrix}
+                    repPaths={mcResults.repPaths}
+                    realTerms={realTerms}
+                    inflRate={inflRate}
+                    currentAge={p.currentAge}
+                    retirementAge={p.retirementAge}
+                    statePensionAge={p.statePensionAge}
+                    onHoverRow={(row) => {
+                      setHoveredRow(row ?? null);
+                    }}
+                    showDetails={true}
+                    colorMode={colorMode}
+                    height={mobile ? 260 : 390}
+                  />
+                ) : mcPending ? (
+                  <div
+                    style={{
+                      height: mobile ? 260 : 390,
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      color: 'var(--text-muted)',
+                      fontSize: 13,
                       fontFamily: 'var(--font-mono)',
                     }}
-                    axisLine={{ stroke: 'var(--border)' }}
-                    tickLine={false}
-                    label={{
-                      value: 'Age',
-                      position: 'insideBottom',
-                      offset: -2,
-                      fill: 'var(--text-muted)',
-                      fontSize: 11,
+                  >
+                    Computing {p.mcTrials} trials…
+                  </div>
+                ) : (
+                  <div
+                    style={{
+                      height: mobile ? 260 : 390,
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      color: 'var(--text-muted)',
+                      fontSize: 13,
                     }}
-                  />
+                  >
+                    No results — check inputs
+                  </div>
+                )}
+              </>
+            )}
 
-                  <YAxis
-                    tickFormatter={yTickFmt}
-                    domain={[
-                      (dataMin) => dataMin,
-                      (dataMax) => Math.max(dataMax, fourPctTarget * 1.04),
-                    ]}
-                    tick={{
-                      fill: 'var(--text-muted)',
-                      fontSize: 11,
-                      fontFamily: 'var(--font-mono)',
+            {/* ── Deterministic tab ── */}
+            {chartTab === 'det' &&
+              (displayData.length > 0 ? (
+                <ResponsiveContainer width="100%" height={mobile ? 260 : 390}>
+                  <AreaChart
+                    data={displayData}
+                    margin={{ top: 10, right: 16, left: 10, bottom: 0 }}
+                    onMouseMove={(chartEvt) => {
+                      if (!chartEvt?.activePayload?.[0]?.payload) return;
+                      const pl = chartEvt.activePayload[0].payload;
+                      if (hoveredAgeRef.current !== pl.age) {
+                        hoveredAgeRef.current = pl.age;
+                        setHoveredRow(pl._detail ?? null);
+                      }
                     }}
-                    axisLine={false}
-                    tickLine={false}
-                    width={72}
-                  />
-
-                  <Tooltip
-                    content={<ChartTooltip series={series} />}
-                    cursor={{
-                      stroke: 'var(--accent-gold)',
-                      strokeWidth: 1,
-                      strokeDasharray: '4 2',
-                      opacity: 0.4,
+                    onMouseLeave={() => {
+                      hoveredAgeRef.current = null;
+                      setHoveredRow(null);
                     }}
-                  />
+                  >
+                    <defs>
+                      {series.map((s) => (
+                        <linearGradient
+                          key={s.key}
+                          id={`grad-${s.key}`}
+                          x1="0"
+                          y1={s.stackId === 'neg' ? '1' : '0'}
+                          x2="0"
+                          y2={s.stackId === 'neg' ? '0' : '1'}
+                        >
+                          <stop offset="5%" stopColor={s.color} stopOpacity={0.45} />
+                          <stop offset="95%" stopColor={s.color} stopOpacity={0.05} />
+                        </linearGradient>
+                      ))}
+                    </defs>
 
-                  <ReferenceLine y={0} stroke="var(--border-bright)" strokeWidth={1} />
+                    <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
 
-                  <ReferenceLine
-                    y={fourPctTarget}
-                    stroke="#6ee7b7"
-                    strokeDasharray="6 3"
-                    strokeOpacity={0.55}
-                    strokeWidth={1.5}
-                    label={{
-                      value: '4% rule',
-                      position: 'insideTopRight',
-                      fill: '#6ee7b7',
-                      fillOpacity: 0.75,
-                      fontSize: 9,
-                      fontFamily: 'var(--font-mono)',
-                      letterSpacing: '0.06em',
-                    }}
-                  />
-
-                  <ReferenceLine
-                    x={p.retirementAge}
-                    stroke="var(--accent-gold)"
-                    strokeDasharray="5 3"
-                    strokeOpacity={0.6}
-                    label={{
-                      value: 'Retire',
-                      position: 'top',
-                      fill: 'var(--accent-gold)',
-                      fontSize: 10,
-                      fontFamily: 'var(--font-mono)',
-                      letterSpacing: '0.08em',
-                    }}
-                  />
-                  {p.statePensionAge > p.retirementAge && p.statePensionAge <= p.maxAge && (
-                    <ReferenceLine
-                      x={p.statePensionAge}
-                      stroke="#a78bfa"
-                      strokeDasharray="4 3"
-                      strokeOpacity={0.5}
+                    <XAxis
+                      dataKey="age"
+                      tick={{
+                        fill: 'var(--text-muted)',
+                        fontSize: 11,
+                        fontFamily: 'var(--font-mono)',
+                      }}
+                      axisLine={{ stroke: 'var(--border)' }}
+                      tickLine={false}
                       label={{
-                        value: 'State Pension',
+                        value: 'Age',
+                        position: 'insideBottom',
+                        offset: -2,
+                        fill: 'var(--text-muted)',
+                        fontSize: 11,
+                      }}
+                    />
+
+                    <YAxis
+                      tickFormatter={yTickFmt}
+                      domain={[
+                        (dataMin) => dataMin,
+                        (dataMax) => Math.max(dataMax, fourPctTarget * 1.04),
+                      ]}
+                      tick={{
+                        fill: 'var(--text-muted)',
+                        fontSize: 11,
+                        fontFamily: 'var(--font-mono)',
+                      }}
+                      axisLine={false}
+                      tickLine={false}
+                      width={72}
+                    />
+
+                    <Tooltip
+                      content={<ChartTooltip series={series} />}
+                      cursor={{
+                        stroke: 'var(--accent-gold)',
+                        strokeWidth: 1,
+                        strokeDasharray: '4 2',
+                        opacity: 0.4,
+                      }}
+                    />
+
+                    <ReferenceLine y={0} stroke="var(--border-bright)" strokeWidth={1} />
+
+                    <ReferenceLine
+                      y={fourPctTarget}
+                      stroke="#6ee7b7"
+                      strokeDasharray="6 3"
+                      strokeOpacity={0.55}
+                      strokeWidth={1.5}
+                      label={{
+                        value: '4% rule',
+                        position: 'insideTopRight',
+                        fill: '#6ee7b7',
+                        fillOpacity: 0.75,
+                        fontSize: 9,
+                        fontFamily: 'var(--font-mono)',
+                        letterSpacing: '0.06em',
+                      }}
+                    />
+
+                    <ReferenceLine
+                      x={p.retirementAge}
+                      stroke="var(--accent-gold)"
+                      strokeDasharray="5 3"
+                      strokeOpacity={0.6}
+                      label={{
+                        value: 'Retire',
                         position: 'top',
-                        fill: '#a78bfa',
+                        fill: 'var(--accent-gold)',
                         fontSize: 10,
                         fontFamily: 'var(--font-mono)',
                         letterSpacing: '0.08em',
                       }}
                     />
-                  )}
+                    {p.statePensionAge > p.retirementAge && p.statePensionAge <= p.maxAge && (
+                      <ReferenceLine
+                        x={p.statePensionAge}
+                        stroke="#a78bfa"
+                        strokeDasharray="4 3"
+                        strokeOpacity={0.5}
+                        label={{
+                          value: 'State Pension',
+                          position: 'top',
+                          fill: '#a78bfa',
+                          fontSize: 10,
+                          fontFamily: 'var(--font-mono)',
+                          letterSpacing: '0.08em',
+                        }}
+                      />
+                    )}
 
-                  {series.map((s) => (
-                    <Area
-                      key={s.key}
-                      type="monotone"
-                      dataKey={s.key}
-                      name={s.name}
-                      stackId={s.stackId}
-                      stroke={s.color}
-                      strokeWidth={1.5}
-                      fill={`url(#grad-${s.key})`}
-                      baseValue={0}
-                    />
-                  ))}
-                </AreaChart>
-              </ResponsiveContainer>
-            ) : (
-              <div
-                style={{
-                  height: mobile ? 260 : 390,
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  color: 'var(--text-muted)',
-                  fontSize: 13,
-                  fontFamily: 'var(--font-body)',
-                }}
-              >
-                {error ? 'Fix the error above to see the projection.' : 'Calculating…'}
-              </div>
-            )}
+                    {series.map((s) => (
+                      <Area
+                        key={s.key}
+                        type="monotone"
+                        dataKey={s.key}
+                        name={s.name}
+                        stackId={s.stackId}
+                        stroke={s.color}
+                        strokeWidth={1.5}
+                        fill={`url(#grad-${s.key})`}
+                        baseValue={0}
+                      />
+                    ))}
+                  </AreaChart>
+                </ResponsiveContainer>
+              ) : (
+                <div
+                  style={{
+                    height: mobile ? 260 : 390,
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    color: 'var(--text-muted)',
+                    fontSize: 13,
+                    fontFamily: 'var(--font-body)',
+                  }}
+                >
+                  {error ? 'Fix the error above to see the projection.' : 'Calculating…'}
+                </div>
+              ))}
 
-            {showDetails && <YearDetailPanel row={hoveredRow} mobile={mobile} />}
+            <YearDetailPanel row={hoveredRow} mobile={mobile} />
           </div>
 
-          {/* Snapshot table */}
-          {displayData.length > 0 && (
+          {/* Snapshot table — deterministic tab only */}
+          {chartTab === 'det' && displayData.length > 0 && (
             <div
               style={{
                 background: 'var(--bg-panel)',
