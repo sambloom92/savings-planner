@@ -1944,6 +1944,7 @@ export default function App() {
   });
   const [activeTab, setActiveTab] = useState('Personal');
   const [realTerms, setRealTerms] = useState(false);
+  const [logScale, setLogScale] = useState(false);
   const [hoveredRow, setHoveredRow] = useState(null);
   const hoveredAgeRef = useRef(null);
   const [copyMsg, setCopyMsg] = useState(null);
@@ -2339,6 +2340,39 @@ export default function App() {
                 <button
                   key={opt}
                   onClick={() => setRealTerms(opt === 'Real')}
+                  style={{
+                    padding: '4px 12px',
+                    background: active ? 'var(--accent-gold)' : 'transparent',
+                    color: active ? 'var(--accent-gold-text)' : 'var(--text-muted)',
+                    border: 'none',
+                    cursor: 'pointer',
+                    fontFamily: 'var(--font-mono)',
+                    fontSize: 10,
+                    fontWeight: 600,
+                    letterSpacing: '0.08em',
+                    transition: 'all 0.15s',
+                  }}
+                >
+                  {opt}
+                </button>
+              );
+            })}
+          </div>
+          <HelpTip text="Linear: y-axis uses a linear scale — equal distances represent equal pound amounts. Log: y-axis uses a logarithmic scale — equal distances represent equal percentage growth, making early portfolio growth more visible." />
+          <div
+            style={{
+              display: 'flex',
+              borderRadius: 5,
+              overflow: 'hidden',
+              border: '1px solid var(--border-bright)',
+            }}
+          >
+            {['Lin', 'Log'].map((opt) => {
+              const active = logScale ? opt === 'Log' : opt === 'Lin';
+              return (
+                <button
+                  key={opt}
+                  onClick={() => setLogScale(opt === 'Log')}
                   style={{
                     padding: '4px 12px',
                     background: active ? 'var(--accent-gold)' : 'transparent',
@@ -2873,6 +2907,7 @@ export default function App() {
                     fourPctTarget={fourPctTarget}
                     showDetails={true}
                     colorMode={colorMode}
+                    logScale={logScale}
                     height={mobile ? 260 : 390}
                   />
                 ) : mcPending ? (
@@ -2963,11 +2998,17 @@ export default function App() {
                     />
 
                     <YAxis
+                      scale={logScale ? 'log' : 'linear'}
                       tickFormatter={yTickFmt}
-                      domain={[
-                        (dataMin) => dataMin,
-                        (dataMax) => Math.max(dataMax, fourPctTarget * 1.04),
-                      ]}
+                      domain={
+                        logScale
+                          ? [1, (dataMax) => Math.max(dataMax, fourPctTarget * 1.04)]
+                          : [
+                              (dataMin) => dataMin,
+                              (dataMax) => Math.max(dataMax, fourPctTarget * 1.04),
+                            ]
+                      }
+                      allowDataOverflow={logScale}
                       tick={{
                         fill: 'var(--text-muted)',
                         fontSize: 11,
