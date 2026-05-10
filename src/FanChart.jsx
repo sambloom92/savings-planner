@@ -174,7 +174,11 @@ function drawFanChart(
   ctx.stroke();
 
   // State pension
-  if (statePensionAge !== retirementAge && statePensionAge >= minAge && statePensionAge <= maxAgeVal) {
+  if (
+    statePensionAge !== retirementAge &&
+    statePensionAge >= minAge &&
+    statePensionAge <= maxAgeVal
+  ) {
     const spX = xOf(statePensionAge);
     ctx.strokeStyle = 'rgba(167,139,250,0.45)';
     ctx.beginPath();
@@ -394,7 +398,11 @@ function drawFanChart(
   ctx.fillStyle = 'rgba(232,184,75,0.85)';
   ctx.fillText('Retire', xOf(retirementAge), PAD.top - 8);
 
-  if (statePensionAge !== retirementAge && statePensionAge >= minAge && statePensionAge <= maxAgeVal) {
+  if (
+    statePensionAge !== retirementAge &&
+    statePensionAge >= minAge &&
+    statePensionAge <= maxAgeVal
+  ) {
     ctx.fillStyle = 'rgba(167,139,250,0.85)';
     ctx.fillText('State Pension', xOf(statePensionAge), PAD.top - 8);
   }

@@ -3021,22 +3021,24 @@ export default function App() {
                         letterSpacing: '0.08em',
                       }}
                     />
-                    {p.statePensionAge !== p.retirementAge && p.statePensionAge <= p.maxAge && p.statePensionAge > p.currentAge && (
-                      <ReferenceLine
-                        x={p.statePensionAge}
-                        stroke="#a78bfa"
-                        strokeDasharray="4 3"
-                        strokeOpacity={0.5}
-                        label={{
-                          value: 'State Pension',
-                          position: 'top',
-                          fill: '#a78bfa',
-                          fontSize: 10,
-                          fontFamily: 'var(--font-mono)',
-                          letterSpacing: '0.08em',
-                        }}
-                      />
-                    )}
+                    {p.statePensionAge !== p.retirementAge &&
+                      p.statePensionAge <= p.maxAge &&
+                      p.statePensionAge > p.currentAge && (
+                        <ReferenceLine
+                          x={p.statePensionAge}
+                          stroke="#a78bfa"
+                          strokeDasharray="4 3"
+                          strokeOpacity={0.5}
+                          label={{
+                            value: 'State Pension',
+                            position: 'top',
+                            fill: '#a78bfa',
+                            fontSize: 10,
+                            fontFamily: 'var(--font-mono)',
+                            letterSpacing: '0.08em',
+                          }}
+                        />
+                      )}
 
                     {series.map((s) => (
                       <Area
