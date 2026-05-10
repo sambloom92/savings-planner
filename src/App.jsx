@@ -13,28 +13,13 @@ import {
 import { projectLifecycle } from './ukLifecycle.js';
 import { runMonteCarlo } from './ukMonteCarlo.js';
 import { FanChart } from './FanChart.jsx';
+import { fmtGBPLarge, yTickFmt } from './formatters.js';
 
 // ── Formatters ────────────────────────────────────────────────────────────────
 const fmtGBP = (n) => `£${Math.round(Math.abs(n)).toLocaleString('en-GB')}`;
-
-const fmtGBPLarge = (n) => {
-  const abs = Math.abs(n);
-  const sign = n < 0 ? '-' : '';
-  if (abs >= 1_000_000) return `${sign}£${(abs / 1_000_000).toFixed(2)}m`;
-  return `${sign}£${Math.round(abs).toLocaleString('en-GB')}`;
-};
-
 const fmtPct = (n) => `${n.toFixed(1)}%`;
 const fmtAge = (n) => `${n} yrs`;
 const fmtYrs = (n) => `${n} yr${n === 1 ? '' : 's'}`;
-
-function yTickFmt(v) {
-  const a = Math.abs(v);
-  const sign = v < 0 ? '-' : '';
-  if (a >= 1_000_000) return `${sign}£${(a / 1_000_000).toFixed(1)}m`;
-  if (a >= 1_000) return `${sign}£${(a / 1_000).toFixed(0)}k`;
-  return `${sign}£${a}`;
-}
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 const TABS = [
@@ -971,7 +956,12 @@ function TabContent({ tab, p, set }) {
       );
     }
 
-    case 'Rates':
+    case 'Rates': {
+      const preEq = p.preRetirementEquityPct / 100;
+      const postEq = p.postRetirementEquityPct / 100;
+      const eq = p.equityReturnPct / 100;
+      const bd = p.bondReturnPct / 100;
+      const blendedRateText = `Effective blended rate: ${((preEq * eq + (1 - preEq) * bd) * 100).toFixed(2)}% pre-retirement → ${((postEq * eq + (1 - postEq) * bd) * 100).toFixed(2)}% post-retirement`;
       return (
         <>
           <Slider
@@ -1029,17 +1019,7 @@ function TabContent({ tab, p, set }) {
             allowInput
             help="Percentage of your portfolio in equities once the glide path is fully complete. The remainder is in bonds/cash. A typical cautious retirement portfolio holds 30–50% equities to reduce sequence-of-returns risk."
           />
-          <InfoBox>
-            {(() => {
-              const preEq = p.preRetirementEquityPct / 100;
-              const postEq = p.postRetirementEquityPct / 100;
-              const eq = p.equityReturnPct / 100;
-              const bd = p.bondReturnPct / 100;
-              const accRate = (preEq * eq + (1 - preEq) * bd) * 100;
-              const retRate = (postEq * eq + (1 - postEq) * bd) * 100;
-              return `Effective blended rate: ${accRate.toFixed(2)}% pre-retirement → ${retRate.toFixed(2)}% post-retirement`;
-            })()}
-          </InfoBox>
+          <InfoBox>{blendedRateText}</InfoBox>
           <Slider
             label="Glide path: start (years before retirement)"
             value={p.glideStartYears}
@@ -1101,6 +1081,7 @@ function TabContent({ tab, p, set }) {
           </InfoBox>
         </>
       );
+    }
 
     case 'Simulation':
       return (
@@ -2022,6 +2003,61 @@ export default function App() {
 
   const set = (key) => (value) => setP((prev) => ({ ...prev, [key]: value }));
 
+  // ── Shared helpers — derive rates + pots from current params ─────────────
+  // Used by both the deterministic memo and the Monte Carlo effect so there is
+  // a single source of truth for these derivations.
+  function buildRates(p) {
+    const mortgageRate =
+      p.mortgageRateType === 'boe'
+        ? (p.boePct + p.mortgageSpreadPct) / 100
+        : p.mortgageRatePct / 100;
+    const unsecuredRate =
+      p.unsecuredRateType === 'boe'
+        ? (p.boePct + p.unsecuredSpreadPct) / 100
+        : p.unsecuredRatePct / 100;
+    const preEq = p.preRetirementEquityPct / 100;
+    const postEq = p.postRetirementEquityPct / 100;
+    const eqRet = p.equityReturnPct / 100;
+    const bdRet = p.bondReturnPct / 100;
+    return {
+      savingsRate: preEq * eqRet + (1 - preEq) * bdRet,
+      retirementRate: postEq * eqRet + (1 - postEq) * bdRet,
+      wageGrowthRate: p.wageGrowthPct / 100,
+      mortgageRate,
+      unsecuredRate,
+      inflationRate: p.inflationPct / 100,
+      boeRate: p.boePct / 100,
+      fiscalDragRate: p.fiscalDragPct / 100,
+    };
+  }
+
+  function buildPots(p) {
+    const pots = {
+      pensionBalance: p.pensionBalance,
+      isaBalance: p.isaBalance,
+      giaBalance: p.giaBalance,
+      giaCostBasis: Math.min(p.giaCostBasis, p.giaBalance),
+    };
+    if (p.mortgageBalance > 0) {
+      pots.mortgage = {
+        balance: p.mortgageBalance,
+        termYears: p.mortgageTermYears,
+        type: p.mortgageType,
+        monthlyOverpayment: p.mortgageOverpayment,
+      };
+    }
+    if (p.unsecuredBalance > 0) {
+      pots.unsecuredDebts = [{ balance: p.unsecuredBalance, monthlyPayment: p.unsecuredMonthly }];
+    }
+    if (p.studentLoanPlan && p.studentLoanBalance > 0) {
+      pots.studentLoan = {
+        balance: p.studentLoanBalance,
+        repaymentStartYear: CURRENT_YEAR - p.studentLoanYears,
+      };
+    }
+    return pots;
+  }
+
   const { chartData, summary, error } = useMemo(() => {
     try {
       const profile = {
@@ -2035,51 +2071,8 @@ export default function App() {
         statePensionAge: p.statePensionAge,
         studentLoanPlan: p.studentLoanPlan || null,
       };
-      const mortgageRate =
-        p.mortgageRateType === 'boe'
-          ? (p.boePct + p.mortgageSpreadPct) / 100
-          : p.mortgageRatePct / 100;
-      const unsecuredRate =
-        p.unsecuredRateType === 'boe'
-          ? (p.boePct + p.unsecuredSpreadPct) / 100
-          : p.unsecuredRatePct / 100;
-      const preEq = p.preRetirementEquityPct / 100;
-      const postEq = p.postRetirementEquityPct / 100;
-      const eqRet = p.equityReturnPct / 100;
-      const bdRet = p.bondReturnPct / 100;
-      const rates = {
-        savingsRate: preEq * eqRet + (1 - preEq) * bdRet,
-        retirementRate: postEq * eqRet + (1 - postEq) * bdRet,
-        wageGrowthRate: p.wageGrowthPct / 100,
-        mortgageRate,
-        unsecuredRate,
-        inflationRate: p.inflationPct / 100,
-        boeRate: p.boePct / 100,
-        fiscalDragRate: p.fiscalDragPct / 100,
-      };
-      const pots = {
-        pensionBalance: p.pensionBalance,
-        isaBalance: p.isaBalance,
-        giaBalance: p.giaBalance,
-        giaCostBasis: Math.min(p.giaCostBasis, p.giaBalance),
-      };
-      if (p.mortgageBalance > 0) {
-        pots.mortgage = {
-          balance: p.mortgageBalance,
-          termYears: p.mortgageTermYears,
-          type: p.mortgageType,
-          monthlyOverpayment: p.mortgageOverpayment,
-        };
-      }
-      if (p.unsecuredBalance > 0) {
-        pots.unsecuredDebts = [{ balance: p.unsecuredBalance, monthlyPayment: p.unsecuredMonthly }];
-      }
-      if (p.studentLoanPlan && p.studentLoanBalance > 0) {
-        pots.studentLoan = {
-          balance: p.studentLoanBalance,
-          repaymentStartYear: CURRENT_YEAR - p.studentLoanYears,
-        };
-      }
+      const rates = buildRates(p);
+      const pots = buildPots(p);
 
       const retirementOptions = {
         targetNetAnnualExpenses: p.targetNetExpenses,
@@ -2146,15 +2139,6 @@ export default function App() {
       }
       setMcPending(true);
       try {
-        const mortgageRate =
-          p.mortgageRateType === 'boe'
-            ? (p.boePct + p.mortgageSpreadPct) / 100
-            : p.mortgageRatePct / 100;
-        const unsecuredRate =
-          p.unsecuredRateType === 'boe'
-            ? (p.boePct + p.unsecuredSpreadPct) / 100
-            : p.unsecuredRatePct / 100;
-
         const mcProfile = {
           currentAge: p.currentAge,
           retirementAge: p.retirementAge,
@@ -2166,45 +2150,8 @@ export default function App() {
           statePensionAge: p.statePensionAge,
           studentLoanPlan: p.studentLoanPlan || null,
         };
-        const mcPreEq = p.preRetirementEquityPct / 100;
-        const mcPostEq = p.postRetirementEquityPct / 100;
-        const mcEqRet = p.equityReturnPct / 100;
-        const mcBdRet = p.bondReturnPct / 100;
-        const mcRates = {
-          savingsRate: mcPreEq * mcEqRet + (1 - mcPreEq) * mcBdRet,
-          retirementRate: mcPostEq * mcEqRet + (1 - mcPostEq) * mcBdRet,
-          wageGrowthRate: p.wageGrowthPct / 100,
-          mortgageRate,
-          unsecuredRate,
-          inflationRate: p.inflationPct / 100,
-          boeRate: p.boePct / 100,
-          fiscalDragRate: p.fiscalDragPct / 100,
-        };
-        const mcPots = {
-          pensionBalance: p.pensionBalance,
-          isaBalance: p.isaBalance,
-          giaBalance: p.giaBalance,
-          giaCostBasis: Math.min(p.giaCostBasis, p.giaBalance),
-        };
-        if (p.mortgageBalance > 0) {
-          mcPots.mortgage = {
-            balance: p.mortgageBalance,
-            termYears: p.mortgageTermYears,
-            type: p.mortgageType,
-            monthlyOverpayment: p.mortgageOverpayment,
-          };
-        }
-        if (p.unsecuredBalance > 0) {
-          mcPots.unsecuredDebts = [
-            { balance: p.unsecuredBalance, monthlyPayment: p.unsecuredMonthly },
-          ];
-        }
-        if (p.studentLoanPlan && p.studentLoanBalance > 0) {
-          mcPots.studentLoan = {
-            balance: p.studentLoanBalance,
-            repaymentStartYear: 2025 - p.studentLoanYears,
-          };
-        }
+        const mcRates = buildRates(p);
+        const mcPots = buildPots(p);
         const mcRetOpts = {
           targetNetAnnualExpenses: p.targetNetExpenses,
           maxAge: p.maxAge,
@@ -2845,8 +2792,8 @@ export default function App() {
                 </div>
                 <HelpTip
                   text={
-                    'Deterministic: one fixed projection using the exact rates you set in the Rates tab. Useful for understanding how the plan works and stress-testing specific assumptions.\n\n' +
-                    'Monte Carlo: runs hundreds of simulations, each with a different random sequence of market returns and economic conditions. The fan chart shows the spread of outcomes — the wide band is the 10th–90th percentile range, the narrow band is 25th–75th, and the centre line is the median.\n\n' +
+                    'Deterministic: one fixed projection using the exact rates you set in the Rates tab. Useful for understanding how the plan works and stress-testing specific assumptions. Because it uses a single unchanging set of assumptions, it is inherently optimistic — there is no mechanism for things to go wrong beyond what you explicitly model.\n\n' +
+                    'Monte Carlo: runs hundreds of simulations, each with a different random sequence of market returns and economic conditions. The fan chart shows the spread of outcomes — the wide band is the 10th–90th percentile range, the narrow band is 25th–75th, and the centre line is the median. Because it models bear markets, volatility clustering, and sequences of bad returns, the median Monte Carlo outcome tends to be more pessimistic than the deterministic projection — this is the realistic cost of uncertainty.\n\n' +
                     'Use Monte Carlo to understand retirement risk — specifically, whether your plan survives bad luck, not just average conditions.'
                   }
                 />
@@ -3074,22 +3021,24 @@ export default function App() {
                         letterSpacing: '0.08em',
                       }}
                     />
-                    {p.statePensionAge > p.retirementAge && p.statePensionAge <= p.maxAge && (
-                      <ReferenceLine
-                        x={p.statePensionAge}
-                        stroke="#a78bfa"
-                        strokeDasharray="4 3"
-                        strokeOpacity={0.5}
-                        label={{
-                          value: 'State Pension',
-                          position: 'top',
-                          fill: '#a78bfa',
-                          fontSize: 10,
-                          fontFamily: 'var(--font-mono)',
-                          letterSpacing: '0.08em',
-                        }}
-                      />
-                    )}
+                    {p.statePensionAge !== p.retirementAge &&
+                      p.statePensionAge <= p.maxAge &&
+                      p.statePensionAge > p.currentAge && (
+                        <ReferenceLine
+                          x={p.statePensionAge}
+                          stroke="#a78bfa"
+                          strokeDasharray="4 3"
+                          strokeOpacity={0.5}
+                          label={{
+                            value: 'State Pension',
+                            position: 'top',
+                            fill: '#a78bfa',
+                            fontSize: 10,
+                            fontFamily: 'var(--font-mono)',
+                            letterSpacing: '0.08em',
+                          }}
+                        />
+                      )}
 
                     {series.map((s) => (
                       <Area
