@@ -89,8 +89,12 @@ const DEFAULTS = {
   employerPensionPct: 3,
   pensionBalance: 10_000,
   annualSavings: 12_000,
-  savingsPct: 7,
-  retireReturnPct: 3,
+  equityReturnPct: 7,
+  bondReturnPct: 3,
+  preRetirementEquityPct: 80,
+  postRetirementEquityPct: 40,
+  glideStartYears: 10,
+  glideEndYears: 5,
   isaBalance: 5_000,
   giaBalance: 0,
   giaCostBasis: 0,
@@ -982,26 +986,81 @@ function TabContent({ tab, p, set }) {
             help="Expected annual growth rate of your gross salary. Affects pension contributions, which are a percentage of salary. Can be negative to model pay cuts or career breaks."
           />
           <Slider
-            label="Investment Growth — Accumulation"
-            value={p.savingsPct}
+            label="Equity return"
+            value={p.equityReturnPct}
             min={0}
             max={15}
             step={0.1}
             format={fmtPct}
-            onChange={set('savingsPct')}
+            onChange={set('equityReturnPct')}
             allowInput
-            help="Expected annual investment return during the accumulation phase, when you are still investing for growth (typically equities-heavy). Expressed in nominal terms (before inflation). The model begins tapering away from this rate 10 years before retirement."
+            help="Expected annual nominal return on the equity portion of your portfolio (e.g. a global index fund). Long-run UK/global equity average is roughly 7–8% nominal. Combined with your equity allocation below to give an effective blended rate."
           />
           <Slider
-            label="Investment Growth — Retirement"
-            value={p.retireReturnPct}
+            label="Bond / cash return"
+            value={p.bondReturnPct}
             min={0}
-            max={15}
+            max={10}
             step={0.1}
             format={fmtPct}
-            onChange={set('retireReturnPct')}
+            onChange={set('bondReturnPct')}
             allowInput
-            help="Expected annual investment return in full retirement, after de-risking is complete (typically bonds and cash-heavy). The model linearly tapers from the accumulation rate to this rate over the window spanning 10 years before to 5 years after retirement. Set equal to the accumulation rate to disable tapering."
+            help="Expected annual nominal return on the bond or cash portion of your portfolio (e.g. gilts, money-market funds). UK gilt yields have historically been 2–4% nominal. Combined with your equity allocation below to give an effective blended rate."
+          />
+          <Slider
+            label="Pre-retirement equity allocation"
+            value={p.preRetirementEquityPct}
+            min={0}
+            max={100}
+            step={1}
+            format={(v) => `${v}%`}
+            onChange={set('preRetirementEquityPct')}
+            allowInput
+            help="Percentage of your portfolio in equities during the accumulation phase (before the glide path begins). The remainder is in bonds/cash. A typical growth portfolio holds 70–100% equities."
+          />
+          <Slider
+            label="Post-retirement equity allocation"
+            value={p.postRetirementEquityPct}
+            min={0}
+            max={100}
+            step={1}
+            format={(v) => `${v}%`}
+            onChange={set('postRetirementEquityPct')}
+            allowInput
+            help="Percentage of your portfolio in equities once the glide path is fully complete. The remainder is in bonds/cash. A typical cautious retirement portfolio holds 30–50% equities to reduce sequence-of-returns risk."
+          />
+          <InfoBox>
+            {(() => {
+              const preEq = p.preRetirementEquityPct / 100;
+              const postEq = p.postRetirementEquityPct / 100;
+              const eq = p.equityReturnPct / 100;
+              const bd = p.bondReturnPct / 100;
+              const accRate = (preEq * eq + (1 - preEq) * bd) * 100;
+              const retRate = (postEq * eq + (1 - postEq) * bd) * 100;
+              return `Effective blended rate: ${accRate.toFixed(2)}% pre-retirement → ${retRate.toFixed(2)}% post-retirement`;
+            })()}
+          </InfoBox>
+          <Slider
+            label="Glide path: start (years before retirement)"
+            value={p.glideStartYears}
+            min={0}
+            max={30}
+            step={1}
+            format={(v) => `${v} yr${v !== 1 ? 's' : ''}`}
+            onChange={set('glideStartYears')}
+            allowInput
+            help="How many years before your retirement date to begin shifting from the pre-retirement to the post-retirement allocation. E.g. 10 means de-risking starts at retirementAge − 10. Set to 0 to start the transition only at retirement. If this puts the start before your current age, the glide path is already in progress and rates are interpolated accordingly."
+          />
+          <Slider
+            label="Glide path: end (years after retirement)"
+            value={p.glideEndYears}
+            min={0}
+            max={15}
+            step={1}
+            format={(v) => `${v} yr${v !== 1 ? 's' : ''}`}
+            onChange={set('glideEndYears')}
+            allowInput
+            help="How many years after your retirement date the glide path finishes, reaching the full post-retirement allocation. E.g. 5 means fully de-risked by retirementAge + 5. Set to 0 for an instant switch at retirement."
           />
           <Slider
             label="Inflation Rate"
@@ -1984,9 +2043,13 @@ export default function App() {
         p.unsecuredRateType === 'boe'
           ? (p.boePct + p.unsecuredSpreadPct) / 100
           : p.unsecuredRatePct / 100;
+      const preEq  = p.preRetirementEquityPct  / 100;
+      const postEq = p.postRetirementEquityPct / 100;
+      const eqRet  = p.equityReturnPct / 100;
+      const bdRet  = p.bondReturnPct   / 100;
       const rates = {
-        savingsRate: p.savingsPct / 100,
-        retirementRate: p.retireReturnPct / 100,
+        savingsRate:    preEq  * eqRet + (1 - preEq)  * bdRet,
+        retirementRate: postEq * eqRet + (1 - postEq) * bdRet,
         wageGrowthRate: p.wageGrowthPct / 100,
         mortgageRate,
         unsecuredRate,
@@ -2022,6 +2085,8 @@ export default function App() {
         targetNetAnnualExpenses: p.targetNetExpenses,
         maxAge: p.maxAge,
         takePCLS: p.takePCLS,
+        glideStartYears: p.glideStartYears,
+        glideEndYears: p.glideEndYears,
       };
 
       const result = projectLifecycle(profile, rates, pots, retirementOptions);
@@ -2101,9 +2166,13 @@ export default function App() {
           statePensionAge: p.statePensionAge,
           studentLoanPlan: p.studentLoanPlan || null,
         };
+        const mcPreEq  = p.preRetirementEquityPct  / 100;
+        const mcPostEq = p.postRetirementEquityPct / 100;
+        const mcEqRet  = p.equityReturnPct / 100;
+        const mcBdRet  = p.bondReturnPct   / 100;
         const mcRates = {
-          savingsRate: p.savingsPct / 100,
-          retirementRate: p.retireReturnPct / 100,
+          savingsRate:    mcPreEq  * mcEqRet + (1 - mcPreEq)  * mcBdRet,
+          retirementRate: mcPostEq * mcEqRet + (1 - mcPostEq) * mcBdRet,
           wageGrowthRate: p.wageGrowthPct / 100,
           mortgageRate,
           unsecuredRate,
@@ -2140,6 +2209,8 @@ export default function App() {
           targetNetAnnualExpenses: p.targetNetExpenses,
           maxAge: p.maxAge,
           takePCLS: p.takePCLS,
+          glideStartYears: p.glideStartYears,
+          glideEndYears: p.glideEndYears,
         };
 
         setMcResults(
@@ -2149,6 +2220,8 @@ export default function App() {
             bearFreq: p.mcBearFreq,
             bearSeverity: p.mcBearSeverity,
             crisisPersistence: p.mcCrisisPersistence,
+            preRetirementEquity:  p.preRetirementEquityPct  / 100,
+            postRetirementEquity: p.postRetirementEquityPct / 100,
           })
         );
       } catch {
@@ -2820,7 +2893,7 @@ export default function App() {
                 {chartTab === 'mc' && (
                   <HelpTip
                     text={
-                      `${mcResults ? mcResults.trialCount : 0} successful trials shown. Each trial varies investment returns (market factor) and inflation / BoE / wage growth (macro factor) using correlated random shocks.\n\n` +
+                      `${mcResults ? mcResults.trialCount : 0} trials shown. Each trial varies investment returns (market factor) and inflation / BoE / wage growth (macro factor) using correlated random shocks.\n\n` +
                       'Bands show the 10th–90th percentile range (faint) and 25th–75th range (stronger). Lines show the 5 key percentiles.\n\n' +
                       'Click and hold on a data point to isolate the single trial closest to that percentile at that age. Release to return to the full fan.\n\n' +
                       'Shortfall labels (▼ with age) on the x-axis show when each percentile path runs out of money. Hover to see pot detail from that path.'
@@ -2839,7 +2912,7 @@ export default function App() {
                     percentileData={mcResults.percentileData}
                     portfolioMatrix={mcResults.portfolioMatrix}
                     allPotData={mcResults.allPotData}
-                    potSeries={series.filter((s) => ['pension', 'isa', 'gia'].includes(s.key))}
+                    potSeries={series}
                     repPaths={mcResults.repPaths}
                     realTerms={realTerms}
                     inflRate={inflRate}

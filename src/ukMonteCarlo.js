@@ -100,10 +100,25 @@ export function runMonteCarlo(profile, baseRates, pots, retirementOpts, opts = {
     trials = 200,
     volatility = 1.0,
     seed = 0xdeadbeef,
-    bearFreq = 12, // years between bear markets (on average)
+    bearFreq = 12,       // years between bear markets (on average)
     bearSeverity = 0.15, // return penalty during bear (positive fraction)
     crisisPersistence = 0.6, // φ for vol AR(1): 0.3 short · 0.6 medium · 0.8 long
+    // Asset allocation: fraction in equities pre/post retirement (0–1).
+    // These drive two things:
+    //   1. The volatility ratio applied to retirementRate vs savingsRate shocks.
+    //   2. The bear-severity ratio for retirementRate.
+    // Default 0.5/0.8 → ratio ≈ 0.625 (close to the old hardcoded 0.75 at 0.6/0.8).
+    preRetirementEquity = 0.8,
+    postRetirementEquity = 0.4,
   } = opts;
+
+  // Volatility reduction factor for the retirement-phase rate relative to the
+  // accumulation-phase rate.  Reflects the lower equity weight in a de-risked
+  // portfolio; derived directly from the allocation split rather than hardcoded.
+  // Clamped so it never exceeds 1 (no leverage) and never goes below 0.
+  const volRatio = preRetirementEquity > 0
+    ? Math.min(1, Math.max(0, postRetirementEquity / preRetirementEquity))
+    : 0;
 
   const σ_mkt = volatility * 0.08;
   const σ_mac = volatility * 0.008;
@@ -149,9 +164,11 @@ export function runMonteCarlo(profile, baseRates, pots, retirementOpts, opts = {
       const Δ = inBear ? bearSeverity : 0;
 
       yearlyRatesOverride.push({
-        // Investment rates: no floor (see module docstring)
+        // Investment rates: no floor (see module docstring).
+        // retirementRate shock is scaled by volRatio — a de-risked (lower-equity)
+        // portfolio suffers less volatility and a smaller bear-market drag.
         savingsRate: baseRates.savingsRate - Δ + z1 * σ_eff,
-        retirementRate: baseRates.retirementRate - Δ * 0.75 + z1 * σ_eff * 0.75,
+        retirementRate: baseRates.retirementRate - Δ * volRatio + z1 * σ_eff * volRatio,
         // Macro rates: mild reflation during crises; floor at −5%
         inflationRate: Math.max(-0.05, baseRates.inflationRate + Δ * 0.15 + z2 * σ_mac),
         boeRate: Math.max(-0.05, baseRates.boeRate + Δ * 0.1 + z2 * σ_mac),
@@ -229,12 +246,17 @@ export function runMonteCarlo(profile, baseRates, pots, retirementOpts, opts = {
   }
 
   // Per-trial pot balances — lightweight snapshot used by the locked-trial
-  // stacked view in FanChart (pension / ISA / GIA closing balances only).
+  // stacked view in FanChart.  Assets stored as positive values; debts stored
+  // as positive balances (the canvas draws them below zero).
   const allPotData = successful.map((r) =>
     r.yearlyBreakdown.map((row) => ({
       pension: Math.max(0, row.pension?.closingBalance ?? 0),
       isa: Math.max(0, row.isa?.closingBalance ?? 0),
       gia: Math.max(0, row.gia?.closingBalance ?? 0),
+      mortgage: row.mortgage?.closingBalance ?? 0,
+      unsecuredDebt:
+        row.unsecuredDebts?.reduce((s, d) => s + (d.closingBalance ?? 0), 0) ?? 0,
+      studentLoan: row.studentLoan?.closingBalance ?? 0,
     }))
   );
 

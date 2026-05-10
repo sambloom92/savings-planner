@@ -69,6 +69,10 @@ function cssVar(name) {
 // Matches the stacking order used in the deterministic Recharts AreaChart.
 const POT_STACK_ORDER = ['pension', 'isa', 'gia'];
 
+// ── Debt drawing order: mortgage nearest zero, then unsecured, then student ───
+// Drawn below the zero axis (negative side).
+const DEBT_STACK_ORDER = ['mortgage', 'unsecuredDebt', 'studentLoan'];
+
 // ── Core draw function ────────────────────────────────────────────────────────
 // lockedPath:    number[] | null — real-terms total portfolio per year (fallback)
 // lockedPctKey:  string | null
@@ -121,13 +125,28 @@ function drawFanChart(
     : lockedPath
       ? Math.max(...lockedPath, 1)
       : Math.max(...adjData.map((d) => d.p90), 1);
-  const maxVal = rawMax * 1.08;
+
+  // Negative extent — only meaningful in locked mode when debts are present.
+  const rawMin = lockedPotData
+    ? -Math.max(
+        ...lockedPotData.map(
+          (d) => (d.mortgage ?? 0) + (d.unsecuredDebt ?? 0) + (d.studentLoan ?? 0)
+        ),
+        0
+      )
+    : 0;
+
+  // Total range with 8% headroom above, 4% below the debt baseline.
+  const totalRange = rawMax - rawMin;
+  const maxVal = rawMax + totalRange * 0.08;
+  const minVal = rawMin < 0 ? rawMin - totalRange * 0.04 : 0;
+  const fullRange = maxVal - minVal;
 
   function xOf(age) {
     return PAD.left + ((age - minAge) / Math.max(1, maxAgeVal - minAge)) * cW;
   }
   function yOf(val) {
-    return PAD.top + cH - (Math.max(0, val) / maxVal) * cH;
+    return PAD.top + cH - ((val - minVal) / fullRange) * cH;
   }
 
   // ── Grid lines (horizontal) ───────────────────────────────────────────────
@@ -135,13 +154,26 @@ function drawFanChart(
   ctx.strokeStyle = borderCol;
   ctx.lineWidth = 1;
   ctx.setLineDash([]);
+  // Positive grid ticks
   for (let i = 0; i <= nGridY; i++) {
-    const v = (rawMax * i) / nGridY;
+    const v = rawMin + (totalRange * i) / nGridY;
     const y = yOf(v);
     ctx.beginPath();
     ctx.moveTo(PAD.left, y);
     ctx.lineTo(PAD.left + cW, y);
     ctx.stroke();
+  }
+  // Zero reference line — draw prominently when there are debts
+  if (rawMin < 0) {
+    const zy = yOf(0);
+    ctx.strokeStyle = 'rgba(255,255,255,0.18)';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(PAD.left, zy);
+    ctx.lineTo(PAD.left + cW, zy);
+    ctx.stroke();
+    ctx.strokeStyle = borderCol;
+    ctx.lineWidth = 1;
   }
 
   // ── Reference lines ───────────────────────────────────────────────────────
@@ -249,6 +281,7 @@ function drawFanChart(
     // Build a colour lookup from potSeries
     const potColor = Object.fromEntries(potSeries.map((s) => [s.key, s.color]));
 
+    // ── Asset stacks (above zero) ─────────────────────────────────────────────
     // Precompute cumulative sums per year: [0, pension, pension+isa, total]
     const cumData = lockedPotData.map((d) => {
       const vals = [0];
@@ -256,7 +289,7 @@ function drawFanChart(
       return vals;
     });
 
-    // Draw each pot as a filled band, bottom-to-top
+    // Draw each asset pot as a filled band, bottom-to-top
     for (let pi = 0; pi < POT_STACK_ORDER.length; pi++) {
       const key = POT_STACK_ORDER[pi];
       const color = potColor[key];
@@ -283,6 +316,58 @@ function drawFanChart(
         const x = xOf(adjData[i].age);
         if (i === 0) ctx.moveTo(x, yOf(cumData[i][pi + 1]));
         else ctx.lineTo(x, yOf(cumData[i][pi + 1]));
+      }
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([]);
+      ctx.globalAlpha = 0.9;
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+
+    // ── Debt stacks (below zero) ──────────────────────────────────────────────
+    // Cumulative debt depths per year: [0, mortgage, mortgage+unsecured, total]
+    // Each value is the downward extent from zero (positive magnitude).
+    const cumDebt = lockedPotData.map((d) => {
+      const vals = [0];
+      for (const k of DEBT_STACK_ORDER)
+        vals.push(vals[vals.length - 1] + Math.max(0, d[k] ?? 0));
+      return vals;
+    });
+
+    for (let pi = 0; pi < DEBT_STACK_ORDER.length; pi++) {
+      const key = DEBT_STACK_ORDER[pi];
+      const color = potColor[key];
+      if (!color) continue;
+
+      // Check if this debt has any non-zero values; skip if absent
+      const hasDebt = lockedPotData.some((d) => (d[key] ?? 0) > 0);
+      if (!hasDebt) continue;
+
+      // Top edge of this debt band = -(cumDebt[pi])   (0 for first slice)
+      // Bottom edge              = -(cumDebt[pi+1])
+      ctx.beginPath();
+      for (let i = 0; i < adjData.length; i++) {
+        const x = xOf(adjData[i].age);
+        const y = yOf(-cumDebt[i][pi]); // top edge (closer to zero)
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      }
+      for (let i = adjData.length - 1; i >= 0; i--) {
+        ctx.lineTo(xOf(adjData[i].age), yOf(-cumDebt[i][pi + 1])); // bottom edge
+      }
+      ctx.closePath();
+      ctx.globalAlpha = 0.55;
+      ctx.fillStyle = color;
+      ctx.fill();
+      ctx.globalAlpha = 1;
+
+      // Bottom-edge stroke line
+      ctx.beginPath();
+      for (let i = 0; i < adjData.length; i++) {
+        const x = xOf(adjData[i].age);
+        if (i === 0) ctx.moveTo(x, yOf(-cumDebt[i][pi + 1]));
+        else ctx.lineTo(x, yOf(-cumDebt[i][pi + 1]));
       }
       ctx.strokeStyle = color;
       ctx.lineWidth = 1.5;
@@ -349,7 +434,7 @@ function drawFanChart(
   // ── Y-axis tick labels (always) ───────────────────────────────────────────
   ctx.textAlign = 'right';
   for (let i = 0; i <= nGridY; i++) {
-    const v = (rawMax * i) / nGridY;
+    const v = rawMin + (totalRange * i) / nGridY;
     ctx.fillText(yTickFmt(v), PAD.left - 8, yOf(v) + 4);
   }
 
@@ -613,9 +698,14 @@ export function FanChart({
     return trialPots.map((pots, i) => {
       const f = realTerms ? Math.pow(1 / (1 + inflRate), percentileData[i].age - currentAge) : 1;
       return {
-        pension: Math.max(0, pots.pension * f),
-        isa: Math.max(0, pots.isa * f),
-        gia: Math.max(0, pots.gia * f),
+        // Assets (clamped to ≥0; debt side handled separately)
+        pension: Math.max(0, (pots.pension ?? 0) * f),
+        isa: Math.max(0, (pots.isa ?? 0) * f),
+        gia: Math.max(0, (pots.gia ?? 0) * f),
+        // Debts (positive magnitudes; drawn below zero axis)
+        mortgage: Math.max(0, (pots.mortgage ?? 0) * f),
+        unsecuredDebt: Math.max(0, (pots.unsecuredDebt ?? 0) * f),
+        studentLoan: Math.max(0, (pots.studentLoan ?? 0) * f),
       };
     });
   }, [lockedTrial, allPotData, percentileData, realTerms, inflRate, currentAge]);
@@ -774,28 +864,57 @@ export function FanChart({
         {/* In locked mode show pot legend; otherwise show percentile band legend */}
         {isLocked && potSeries ? (
           <div style={{ display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap' }}>
-            {[...potSeries].reverse().map((s) => (
-              <div key={s.key} style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
-                <div
-                  style={{
-                    width: 20,
-                    height: 10,
-                    background: s.color,
-                    opacity: 0.65,
-                    borderRadius: 2,
-                  }}
-                />
-                <span
-                  style={{
-                    fontSize: 10,
-                    color: 'var(--text-muted)',
-                    fontFamily: 'var(--font-mono)',
-                  }}
-                >
-                  {s.name}
-                </span>
-              </div>
-            ))}
+            {/* Assets: GIA → ISA → Pension (top-to-bottom stacking order) */}
+            {[...potSeries]
+              .filter((s) => POT_STACK_ORDER.includes(s.key))
+              .sort((a, b) => POT_STACK_ORDER.indexOf(b.key) - POT_STACK_ORDER.indexOf(a.key))
+              .map((s) => (
+                <div key={s.key} style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+                  <div
+                    style={{
+                      width: 20,
+                      height: 10,
+                      background: s.color,
+                      opacity: 0.65,
+                      borderRadius: 2,
+                    }}
+                  />
+                  <span
+                    style={{
+                      fontSize: 10,
+                      color: 'var(--text-muted)',
+                      fontFamily: 'var(--font-mono)',
+                    }}
+                  >
+                    {s.name}
+                  </span>
+                </div>
+              ))}
+            {/* Debts (only show if any debt series present in potSeries) */}
+            {potSeries
+              .filter((s) => DEBT_STACK_ORDER.includes(s.key))
+              .map((s) => (
+                <div key={s.key} style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+                  <div
+                    style={{
+                      width: 20,
+                      height: 10,
+                      background: s.color,
+                      opacity: 0.65,
+                      borderRadius: 2,
+                    }}
+                  />
+                  <span
+                    style={{
+                      fontSize: 10,
+                      color: 'var(--text-muted)',
+                      fontFamily: 'var(--font-mono)',
+                    }}
+                  >
+                    {s.name}
+                  </span>
+                </div>
+              ))}
           </div>
         ) : (
           <FanLegend />

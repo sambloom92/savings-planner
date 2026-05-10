@@ -125,19 +125,24 @@ function amortiseYear(balance, monthlyRate, monthlyPayment, monthlyOverpayment =
 
 // ── Return-tapering ─────────────────────────────────────────────────────────
 
-const TAPER_BEFORE_YEARS = 10; // start de-risking this many years before retirement
-const TAPER_AFTER_YEARS = 5; // fully de-risked this many years after retirement
-
 /**
  * Returns the interpolated investment return rate for a given age.
  * Linearly tapers from accRate to retRate over the window
- * [retirementAge - TAPER_BEFORE_YEARS, retirementAge + TAPER_AFTER_YEARS].
+ * [retirementAge - taperBeforeYrs, retirementAge + taperAfterYrs].
  * Outside that window the rate is clamped to accRate or retRate respectively.
+ *
+ * Edge cases:
+ *   • taperBeforeYrs = taperAfterYrs = 0 → instant step at retirementAge
+ *   • taperBeforeYrs so large that taperStart < currentAge → taper already
+ *     in progress; the formula still works (t > 0 at currentAge)
+ *   • taperBeforeYrs = 0, taperAfterYrs > 0 → taper starts at retirement
  */
-function getRateForAge(age, retirementAge, accRate, retRate) {
+function getRateForAge(age, retirementAge, accRate, retRate, taperBeforeYrs = 10, taperAfterYrs = 5) {
   if (accRate === retRate) return accRate;
-  const taperStart = retirementAge - TAPER_BEFORE_YEARS;
-  const taperEnd = retirementAge + TAPER_AFTER_YEARS;
+  const taperStart = retirementAge - taperBeforeYrs;
+  const taperEnd = retirementAge + taperAfterYrs;
+  // Guard against zero-width window (both params = 0): step at retirementAge
+  if (taperEnd === taperStart) return age >= taperStart ? retRate : accRate;
   const t = Math.max(0, Math.min(1, (age - taperStart) / (taperEnd - taperStart)));
   return accRate + t * (retRate - accRate);
 }
@@ -301,6 +306,8 @@ function applyGIAWithdrawal(bal, costBasis, gross) {
  *   maxAge?:                 number,  - Project retirement to this age (default 90)
  *   takePCLS?:               boolean, - Take pension commencement lump sum (default false)
  *   pclsPercentage?:         number,  - Fraction of pension to take as PCLS (0–0.25, default 0.25)
+ *   glideStartYears?:        number,  - Years before retirement to begin de-risking (default 10)
+ *   glideEndYears?:          number,  - Years after retirement to finish de-risking (default 5)
  * } | null} [retirementOptions]
  *
  * @returns {{
@@ -481,6 +488,16 @@ export function projectLifecycle(
   let niYears = niContributionYears;
 
   const yearlyBreakdown = [];
+
+  // ── Glide path configuration ──────────────────────────────────────────────
+  // Extracted here (before the accumulation loop) so both the accumulation
+  // and retirement phases can share the same values.
+  const {
+    glideStartYears: _glideStart = 10,
+    glideEndYears: _glideEnd = 5,
+  } = retirementOptions ?? {};
+  const glideBeforeYrs = Math.max(0, _glideStart);
+  const glideAfterYrs  = Math.max(0, _glideEnd);
 
   // Running cumulative factors for year-by-year rate variation.
   // When yearlyRatesOverride is null these reproduce the same values as Math.pow().
@@ -711,7 +728,7 @@ export function projectLifecycle(
 
     // ── Pot growth ──────────────────────────────────────────────────────
     // Balances are floored at 0; negative growth (falling markets) cannot produce a negative pot.
-    const yearRate = getRateForAge(age, retirementAge, yr.savingsRate, yr.retirementRate);
+    const yearRate = getRateForAge(age, retirementAge, yr.savingsRate, yr.retirementRate, glideBeforeYrs, glideAfterYrs);
 
     const openingPension = pensionBal;
     const penAfterC = round2(pensionBal + employeeContrib + employerContrib);
@@ -1125,7 +1142,9 @@ export function projectLifecycle(
         rAge,
         retirementAge,
         yrRet.savingsRate,
-        yrRet.retirementRate
+        yrRet.retirementRate,
+        glideBeforeYrs,
+        glideAfterYrs
       );
       const pensionGrow = round2(pensionBal * retYearRate);
       pensionBal = Math.max(0, round2(pensionBal + pensionGrow));
