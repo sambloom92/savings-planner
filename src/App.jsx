@@ -3013,6 +3013,33 @@ export default function App() {
           )}
         </main>
       </div>
+      <footer
+        style={{
+          padding: '10px 28px',
+          borderTop: '1px solid var(--border)',
+          background: 'var(--bg-panel)',
+          display: 'flex',
+          justifyContent: 'center',
+          flexShrink: 0,
+        }}
+      >
+        <a
+          href="https://github.com/sambloom92/savings-planner"
+          target="_blank"
+          rel="noopener noreferrer"
+          style={{
+            color: 'var(--text-muted)',
+            fontFamily: 'var(--font-mono)',
+            fontSize: 11,
+            textDecoration: 'none',
+            letterSpacing: '0.06em',
+          }}
+          onMouseEnter={(e) => (e.currentTarget.style.color = 'var(--text-secondary)')}
+          onMouseLeave={(e) => (e.currentTarget.style.color = 'var(--text-muted)')}
+        >
+          github.com/sambloom92/savings-planner
+        </a>
+      </footer>
     </div>
   );
 }
