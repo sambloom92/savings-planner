@@ -1,19 +1,9 @@
 import { useState, useMemo, useRef, useEffect } from 'react';
 import { createPortal } from 'react-dom';
-import {
-  AreaChart,
-  Area,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  Tooltip,
-  ReferenceLine,
-  ResponsiveContainer,
-} from 'recharts';
 import { projectLifecycle } from './ukLifecycle.js';
 import { runMonteCarlo } from './ukMonteCarlo.js';
 import { FanChart } from './FanChart.jsx';
-import { fmtGBPLarge, yTickFmt } from './formatters.js';
+import { fmtGBPLarge } from './formatters.js';
 
 // ── Formatters ────────────────────────────────────────────────────────────────
 const fmtGBP = (n) => `£${Math.round(Math.abs(n)).toLocaleString('en-GB')}`;
@@ -1280,129 +1270,6 @@ function TabContent({ tab, p, set }) {
   }
 }
 
-// ── Tooltip ───────────────────────────────────────────────────────────────────
-function ChartTooltip({ active, payload, label, series = SERIES_DEFAULT }) {
-  if (!active || !payload?.length) return null;
-
-  const totalAssets = ['pension', 'isa', 'gia'].reduce((s, k) => {
-    const e = payload.find((p) => p.dataKey === k);
-    return s + (e?.value ?? 0);
-  }, 0);
-  const totalDebts = ['mortgage', 'unsecuredDebt', 'studentLoan'].reduce((s, k) => {
-    const e = payload.find((p) => p.dataKey === k);
-    return s + Math.abs(e?.value ?? 0);
-  }, 0);
-
-  return (
-    <div
-      style={{
-        background: 'var(--bg-card)',
-        border: '1px solid var(--border-bright)',
-        borderRadius: 8,
-        padding: '12px 16px',
-        fontFamily: 'var(--font-mono)',
-        fontSize: 12,
-        boxShadow: 'var(--shadow-chart)',
-        minWidth: 210,
-      }}
-    >
-      <div
-        style={{
-          color: 'var(--text-secondary)',
-          marginBottom: 8,
-          fontSize: 11,
-          letterSpacing: '0.1em',
-        }}
-      >
-        AGE {label}
-      </div>
-
-      {series.map((s) => {
-        const entry = payload.find((p) => p.dataKey === s.key);
-        const val = entry?.value ?? 0;
-        if (val === 0) return null;
-        return (
-          <div
-            key={s.key}
-            style={{ display: 'flex', justifyContent: 'space-between', gap: 20, marginBottom: 3 }}
-          >
-            <span style={{ color: s.color }}>{s.name}</span>
-            <span style={{ color: 'var(--text-primary)' }}>{fmtGBPLarge(val)}</span>
-          </div>
-        );
-      })}
-
-      <div style={{ borderTop: '1px solid var(--border)', marginTop: 8, paddingTop: 8 }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', gap: 20, marginBottom: 2 }}>
-          <span style={{ color: 'var(--text-secondary)' }}>Assets</span>
-          <span style={{ color: '#34d399' }}>{fmtGBPLarge(totalAssets)}</span>
-        </div>
-        {totalDebts > 0 && (
-          <div
-            style={{ display: 'flex', justifyContent: 'space-between', gap: 20, marginBottom: 2 }}
-          >
-            <span style={{ color: 'var(--text-secondary)' }}>Debts</span>
-            <span style={{ color: '#f43f5e' }}>-{fmtGBPLarge(totalDebts)}</span>
-          </div>
-        )}
-        <div
-          style={{
-            display: 'flex',
-            justifyContent: 'space-between',
-            gap: 20,
-            marginTop: 4,
-            fontWeight: 600,
-          }}
-        >
-          <span style={{ color: 'var(--accent-gold)' }}>Net Worth</span>
-          <span style={{ color: 'var(--accent-gold)' }}>
-            {fmtGBPLarge(totalAssets - totalDebts)}
-          </span>
-        </div>
-        {payload[0]?.payload?.investmentRate != null && (
-          <div
-            style={{
-              display: 'flex',
-              justifyContent: 'space-between',
-              gap: 20,
-              marginTop: 6,
-              paddingTop: 6,
-              borderTop: '1px solid var(--border)',
-            }}
-          >
-            <span style={{ color: 'var(--text-muted)', fontSize: 10 }}>Growth rate</span>
-            <span
-              style={{ color: 'var(--text-muted)', fontSize: 10, fontFamily: 'var(--font-mono)' }}
-            >
-              {fmtPct(payload[0].payload.investmentRate * 100)}
-            </span>
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-// ── Legend strip ──────────────────────────────────────────────────────────────
-function LegendStrip({ series = SERIES_DEFAULT }) {
-  return (
-    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px 14px', justifyContent: 'flex-end' }}>
-      {series.map((s) => (
-        <div key={s.key} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-          <div
-            style={{ width: 9, height: 9, borderRadius: 2, background: s.color, opacity: 0.85 }}
-          />
-          <span
-            style={{ fontSize: 11, color: 'var(--text-secondary)', fontFamily: 'var(--font-body)' }}
-          >
-            {s.name}
-          </span>
-        </div>
-      ))}
-    </div>
-  );
-}
-
 // ── Year Detail Panel ─────────────────────────────────────────────────────────
 
 function DetailLine({ label, value, color, indent = 0, bold = false, dim = false }) {
@@ -1946,7 +1813,6 @@ export default function App() {
   const [realTerms, setRealTerms] = useState(false);
   const [logScale, setLogScale] = useState(false);
   const [hoveredRow, setHoveredRow] = useState(null);
-  const hoveredAgeRef = useRef(null);
   const [copyMsg, setCopyMsg] = useState(null);
   const [pasteMsg, setPasteMsg] = useState(null);
   const [colorMode, setColorMode] = useState(() => localStorage.getItem('colorMode') ?? 'dark');
@@ -2882,7 +2748,6 @@ export default function App() {
                     }
                   />
                 )}
-                {chartTab === 'det' && <LegendStrip series={series} />}
               </div>
             </div>
 
@@ -2943,159 +2808,21 @@ export default function App() {
 
             {/* ── Deterministic tab ── */}
             {chartTab === 'det' &&
-              (displayData.length > 0 ? (
-                <ResponsiveContainer width="100%" height={mobile ? 260 : 390}>
-                  <AreaChart
-                    data={displayData}
-                    margin={{ top: 10, right: 16, left: 10, bottom: 0 }}
-                    onMouseMove={(chartEvt) => {
-                      if (!chartEvt?.activePayload?.[0]?.payload) return;
-                      const pl = chartEvt.activePayload[0].payload;
-                      if (hoveredAgeRef.current !== pl.age) {
-                        hoveredAgeRef.current = pl.age;
-                        setHoveredRow(pl._detail ?? null);
-                      }
-                    }}
-                    onMouseLeave={() => {
-                      hoveredAgeRef.current = null;
-                      setHoveredRow(null);
-                    }}
-                  >
-                    <defs>
-                      {series.map((s) => (
-                        <linearGradient
-                          key={s.key}
-                          id={`grad-${s.key}`}
-                          x1="0"
-                          y1={s.stackId === 'neg' ? '1' : '0'}
-                          x2="0"
-                          y2={s.stackId === 'neg' ? '0' : '1'}
-                        >
-                          <stop offset="5%" stopColor={s.color} stopOpacity={0.45} />
-                          <stop offset="95%" stopColor={s.color} stopOpacity={0.05} />
-                        </linearGradient>
-                      ))}
-                    </defs>
-
-                    <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
-
-                    <XAxis
-                      dataKey="age"
-                      tick={{
-                        fill: 'var(--text-muted)',
-                        fontSize: 11,
-                        fontFamily: 'var(--font-mono)',
-                      }}
-                      axisLine={{ stroke: 'var(--border)' }}
-                      tickLine={false}
-                      label={{
-                        value: 'Age',
-                        position: 'insideBottom',
-                        offset: -2,
-                        fill: 'var(--text-muted)',
-                        fontSize: 11,
-                      }}
-                    />
-
-                    <YAxis
-                      scale={logScale ? 'log' : 'linear'}
-                      tickFormatter={yTickFmt}
-                      domain={
-                        logScale
-                          ? [1, (dataMax) => Math.max(dataMax, fourPctTarget * 1.04)]
-                          : [
-                              (dataMin) => dataMin,
-                              (dataMax) => Math.max(dataMax, fourPctTarget * 1.04),
-                            ]
-                      }
-                      allowDataOverflow={logScale}
-                      tick={{
-                        fill: 'var(--text-muted)',
-                        fontSize: 11,
-                        fontFamily: 'var(--font-mono)',
-                      }}
-                      axisLine={false}
-                      tickLine={false}
-                      width={72}
-                    />
-
-                    <Tooltip
-                      content={<ChartTooltip series={series} />}
-                      cursor={{
-                        stroke: 'var(--accent-gold)',
-                        strokeWidth: 1,
-                        strokeDasharray: '4 2',
-                        opacity: 0.4,
-                      }}
-                    />
-
-                    <ReferenceLine y={0} stroke="var(--border-bright)" strokeWidth={1} />
-
-                    <ReferenceLine
-                      y={fourPctTarget}
-                      stroke="#6ee7b7"
-                      strokeDasharray="6 3"
-                      strokeOpacity={0.55}
-                      strokeWidth={1.5}
-                      label={{
-                        value: '4% rule',
-                        position: 'insideTopRight',
-                        fill: '#6ee7b7',
-                        fillOpacity: 0.75,
-                        fontSize: 9,
-                        fontFamily: 'var(--font-mono)',
-                        letterSpacing: '0.06em',
-                      }}
-                    />
-
-                    <ReferenceLine
-                      x={p.retirementAge}
-                      stroke="var(--accent-gold)"
-                      strokeDasharray="5 3"
-                      strokeOpacity={0.6}
-                      label={{
-                        value: 'Retire',
-                        position: 'top',
-                        fill: 'var(--accent-gold)',
-                        fontSize: 10,
-                        fontFamily: 'var(--font-mono)',
-                        letterSpacing: '0.08em',
-                      }}
-                    />
-                    {p.statePensionAge !== p.retirementAge &&
-                      p.statePensionAge <= p.maxAge &&
-                      p.statePensionAge > p.currentAge && (
-                        <ReferenceLine
-                          x={p.statePensionAge}
-                          stroke="#a78bfa"
-                          strokeDasharray="4 3"
-                          strokeOpacity={0.5}
-                          label={{
-                            value: 'State Pension',
-                            position: 'top',
-                            fill: '#a78bfa',
-                            fontSize: 10,
-                            fontFamily: 'var(--font-mono)',
-                            letterSpacing: '0.08em',
-                          }}
-                        />
-                      )}
-
-                    {series.map((s) => (
-                      <Area
-                        key={s.key}
-                        type="monotone"
-                        dataKey={s.key}
-                        name={s.name}
-                        stackId={s.stackId}
-                        stroke={s.color}
-                        strokeWidth={1.5}
-                        fill={`url(#grad-${s.key})`}
-                        baseValue={0}
-                      />
-                    ))}
-                  </AreaChart>
-                </ResponsiveContainer>
+              (chartData.length > 0 ? (
+                <FanChart
+                  deterministicData={chartData}
+                  potSeries={series}
+                  realTerms={realTerms}
+                  inflRate={inflRate}
+                  currentAge={p.currentAge}
+                  retirementAge={p.retirementAge}
+                  statePensionAge={p.statePensionAge}
+                  onHoverRow={(row) => setHoveredRow(row ?? null)}
+                  fourPctTarget={fourPctTarget}
+                  colorMode={colorMode}
+                  logScale={logScale}
+                  height={mobile ? 260 : 390}
+                />
               ) : (
                 <div
                   style={{
