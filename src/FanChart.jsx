@@ -13,6 +13,7 @@
  */
 
 import { useRef, useEffect, useState, useCallback, useMemo } from 'react';
+import { fmtGBPLarge, yTickFmt } from './formatters.js';
 
 // ── Percentile line configuration ─────────────────────────────────────────────
 // Ordered bottom-to-top (worst → best) so bands paint correctly.
@@ -28,22 +29,6 @@ export const PCT_CFG = {
 
 // ── Canvas layout ─────────────────────────────────────────────────────────────
 const PAD = { top: 28, right: 24, bottom: 54, left: 76 };
-
-// ── Formatters (self-contained — no dependency on App) ────────────────────────
-function fmtGBPLarge(n) {
-  const abs = Math.abs(n);
-  const sign = n < 0 ? '-' : '';
-  if (abs >= 1_000_000) return `${sign}£${(abs / 1_000_000).toFixed(2)}m`;
-  return `${sign}£${Math.round(abs).toLocaleString('en-GB')}`;
-}
-
-function yTickFmt(v) {
-  const a = Math.abs(v);
-  const s = v < 0 ? '-' : '';
-  if (a >= 1_000_000) return `${s}£${(a / 1_000_000).toFixed(1)}m`;
-  if (a >= 1_000) return `${s}£${(a / 1_000).toFixed(0)}k`;
-  return `${s}£${Math.round(a)}`;
-}
 
 // ── Rounded-rect helper (avoids ctx.roundRect browser compat issues) ──────────
 function roundRectPath(ctx, x, y, w, h, r) {
@@ -189,7 +174,7 @@ function drawFanChart(
   ctx.stroke();
 
   // State pension
-  if (statePensionAge > retirementAge && statePensionAge <= maxAgeVal) {
+  if (statePensionAge !== retirementAge && statePensionAge >= minAge && statePensionAge <= maxAgeVal) {
     const spX = xOf(statePensionAge);
     ctx.strokeStyle = 'rgba(167,139,250,0.45)';
     ctx.beginPath();
@@ -281,100 +266,66 @@ function drawFanChart(
     // Build a colour lookup from potSeries
     const potColor = Object.fromEntries(potSeries.map((s) => [s.key, s.color]));
 
-    // ── Asset stacks (above zero) ─────────────────────────────────────────────
-    // Precompute cumulative sums per year: [0, pension, pension+isa, total]
-    const cumData = lockedPotData.map((d) => {
-      const vals = [0];
-      for (const k of POT_STACK_ORDER) vals.push(vals[vals.length - 1] + Math.max(0, d[k] ?? 0));
-      return vals;
-    });
+    /**
+     * Draws a set of stacked area bands along the time axis.
+     *
+     * @param {string[]} order    - Keys to stack, innermost first
+     * @param {number}   sign     - +1 draws above zero, -1 draws below zero
+     * @param {boolean}  skipEmpty - Skip slices where all values are zero
+     */
+    function drawStackedBands(order, sign, skipEmpty = false) {
+      // Cumulative sums per year: [0, first, first+second, …]
+      const cum = lockedPotData.map((d) => {
+        const vals = [0];
+        for (const k of order) vals.push(vals[vals.length - 1] + Math.max(0, d[k] ?? 0));
+        return vals;
+      });
 
-    // Draw each asset pot as a filled band, bottom-to-top
-    for (let pi = 0; pi < POT_STACK_ORDER.length; pi++) {
-      const key = POT_STACK_ORDER[pi];
-      const color = potColor[key];
-      if (!color) continue;
+      for (let pi = 0; pi < order.length; pi++) {
+        const key = order[pi];
+        const color = potColor[key];
+        if (!color) continue;
+        if (skipEmpty && !lockedPotData.some((d) => (d[key] ?? 0) > 0)) continue;
 
-      ctx.beginPath();
-      for (let i = 0; i < adjData.length; i++) {
-        const x = xOf(adjData[i].age);
-        if (i === 0) ctx.moveTo(x, yOf(cumData[i][pi + 1]));
-        else ctx.lineTo(x, yOf(cumData[i][pi + 1]));
-      }
-      for (let i = adjData.length - 1; i >= 0; i--) {
-        ctx.lineTo(xOf(adjData[i].age), yOf(cumData[i][pi]));
-      }
-      ctx.closePath();
-      ctx.globalAlpha = 0.55;
-      ctx.fillStyle = color;
-      ctx.fill();
-      ctx.globalAlpha = 1;
+        const outerEdge = (ci) => sign * cum[ci][pi + 1]; // further from zero
+        const innerEdge = (ci) => sign * cum[ci][pi]; // closer to zero
 
-      // Top-edge stroke line
-      ctx.beginPath();
-      for (let i = 0; i < adjData.length; i++) {
-        const x = xOf(adjData[i].age);
-        if (i === 0) ctx.moveTo(x, yOf(cumData[i][pi + 1]));
-        else ctx.lineTo(x, yOf(cumData[i][pi + 1]));
+        // Filled band
+        ctx.beginPath();
+        for (let i = 0; i < adjData.length; i++) {
+          const x = xOf(adjData[i].age);
+          if (i === 0) ctx.moveTo(x, yOf(outerEdge(i)));
+          else ctx.lineTo(x, yOf(outerEdge(i)));
+        }
+        for (let i = adjData.length - 1; i >= 0; i--) {
+          ctx.lineTo(xOf(adjData[i].age), yOf(innerEdge(i)));
+        }
+        ctx.closePath();
+        ctx.globalAlpha = 0.55;
+        ctx.fillStyle = color;
+        ctx.fill();
+        ctx.globalAlpha = 1;
+
+        // Outer-edge stroke
+        ctx.beginPath();
+        for (let i = 0; i < adjData.length; i++) {
+          const x = xOf(adjData[i].age);
+          if (i === 0) ctx.moveTo(x, yOf(outerEdge(i)));
+          else ctx.lineTo(x, yOf(outerEdge(i)));
+        }
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([]);
+        ctx.globalAlpha = 0.9;
+        ctx.stroke();
+        ctx.globalAlpha = 1;
       }
-      ctx.strokeStyle = color;
-      ctx.lineWidth = 1.5;
-      ctx.setLineDash([]);
-      ctx.globalAlpha = 0.9;
-      ctx.stroke();
-      ctx.globalAlpha = 1;
+
+      return cum;
     }
 
-    // ── Debt stacks (below zero) ──────────────────────────────────────────────
-    // Cumulative debt depths per year: [0, mortgage, mortgage+unsecured, total]
-    // Each value is the downward extent from zero (positive magnitude).
-    const cumDebt = lockedPotData.map((d) => {
-      const vals = [0];
-      for (const k of DEBT_STACK_ORDER) vals.push(vals[vals.length - 1] + Math.max(0, d[k] ?? 0));
-      return vals;
-    });
-
-    for (let pi = 0; pi < DEBT_STACK_ORDER.length; pi++) {
-      const key = DEBT_STACK_ORDER[pi];
-      const color = potColor[key];
-      if (!color) continue;
-
-      // Check if this debt has any non-zero values; skip if absent
-      const hasDebt = lockedPotData.some((d) => (d[key] ?? 0) > 0);
-      if (!hasDebt) continue;
-
-      // Top edge of this debt band = -(cumDebt[pi])   (0 for first slice)
-      // Bottom edge              = -(cumDebt[pi+1])
-      ctx.beginPath();
-      for (let i = 0; i < adjData.length; i++) {
-        const x = xOf(adjData[i].age);
-        const y = yOf(-cumDebt[i][pi]); // top edge (closer to zero)
-        if (i === 0) ctx.moveTo(x, y);
-        else ctx.lineTo(x, y);
-      }
-      for (let i = adjData.length - 1; i >= 0; i--) {
-        ctx.lineTo(xOf(adjData[i].age), yOf(-cumDebt[i][pi + 1])); // bottom edge
-      }
-      ctx.closePath();
-      ctx.globalAlpha = 0.55;
-      ctx.fillStyle = color;
-      ctx.fill();
-      ctx.globalAlpha = 1;
-
-      // Bottom-edge stroke line
-      ctx.beginPath();
-      for (let i = 0; i < adjData.length; i++) {
-        const x = xOf(adjData[i].age);
-        if (i === 0) ctx.moveTo(x, yOf(-cumDebt[i][pi + 1]));
-        else ctx.lineTo(x, yOf(-cumDebt[i][pi + 1]));
-      }
-      ctx.strokeStyle = color;
-      ctx.lineWidth = 1.5;
-      ctx.setLineDash([]);
-      ctx.globalAlpha = 0.9;
-      ctx.stroke();
-      ctx.globalAlpha = 1;
-    }
+    const cumData = drawStackedBands(POT_STACK_ORDER, +1);
+    drawStackedBands(DEBT_STACK_ORDER, -1, true);
 
     // Shortfall marker (when total portfolio hits zero)
     for (let i = 1; i < lockedPotData.length; i++) {
@@ -443,7 +394,7 @@ function drawFanChart(
   ctx.fillStyle = 'rgba(232,184,75,0.85)';
   ctx.fillText('Retire', xOf(retirementAge), PAD.top - 8);
 
-  if (statePensionAge > retirementAge && statePensionAge <= maxAgeVal) {
+  if (statePensionAge !== retirementAge && statePensionAge >= minAge && statePensionAge <= maxAgeVal) {
     ctx.fillStyle = 'rgba(167,139,250,0.85)';
     ctx.fillText('State Pension', xOf(statePensionAge), PAD.top - 8);
   }
@@ -652,30 +603,40 @@ export function FanChart({
     if (!el) return;
     const initial = el.getBoundingClientRect().width;
     if (initial > 0) setContainerWidth(initial);
+    let rafId = null;
     const obs = new ResizeObserver(([entry]) => {
-      const w = entry.contentRect.width || el.getBoundingClientRect().width;
-      if (w > 0) setContainerWidth(w);
+      // Coalesce rapid resize events to one update per animation frame.
+      cancelAnimationFrame(rafId);
+      rafId = requestAnimationFrame(() => {
+        const w = entry.contentRect.width || el.getBoundingClientRect().width;
+        if (w > 0) setContainerWidth(w);
+      });
     });
     obs.observe(el);
-    return () => obs.disconnect();
+    return () => {
+      cancelAnimationFrame(rafId);
+      obs.disconnect();
+    };
   }, []);
 
-  // Real-terms adjusted percentile data
-  const adjData = percentileData
-    ? realTerms
-      ? percentileData.map((row) => {
-          const f = Math.pow(1 / (1 + inflRate), row.age - currentAge);
-          return {
-            age: row.age,
-            p10: row.p10 * f,
-            p25: row.p25 * f,
-            p50: row.p50 * f,
-            p75: row.p75 * f,
-            p90: row.p90 * f,
-          };
-        })
-      : percentileData
-    : null;
+  // Real-terms adjusted percentile data — memoised so the canvas useEffect
+  // only re-fires when the underlying data or real-terms settings actually change,
+  // not on every parent render.
+  const adjData = useMemo(() => {
+    if (!percentileData) return null;
+    if (!realTerms) return percentileData;
+    return percentileData.map((row) => {
+      const f = Math.pow(1 / (1 + inflRate), row.age - currentAge);
+      return {
+        age: row.age,
+        p10: row.p10 * f,
+        p25: row.p25 * f,
+        p50: row.p50 * f,
+        p75: row.p75 * f,
+        p90: row.p90 * f,
+      };
+    });
+  }, [percentileData, realTerms, inflRate, currentAge]);
 
   // Real-terms adjusted path for the locked trial, aligned with adjData by index.
   const adjLockedPath = useMemo(() => {

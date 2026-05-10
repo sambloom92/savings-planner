@@ -23,12 +23,13 @@
  *      (bearSeverity stored as a positive fraction, e.g. 0.15 = −15 pp to returns)
  *
  *   5. Year t rates:
- *        savingsRate    = base − Δ          + z1 × σ_eff
- *        retirementRate = base − Δ × 0.75   + z1 × σ_eff × 0.75
+ *        savingsRate    = base − Δ             + z1 × σ_eff
+ *        retirementRate = base − Δ × volRatio  + z1 × σ_eff × volRatio
  *        inflationRate  = max(−0.05, base + Δ × 0.15 + z2 × σ_mac)
  *        boeRate        = max(−0.05, base + Δ × 0.10 + z2 × σ_mac)
- *        wageGrowthRate = base − Δ × 0.25   + z2 × σ_mac × 0.5
+ *        wageGrowthRate = base − Δ × 0.25      + z2 × σ_mac × 0.5
  *
+ *      volRatio   = postRetirementEquity / preRetirementEquity  (≤ 1)
  *      σ_eff      = σ_mkt × volState        (vol clustering)
  *      σ_mkt      = volatility × 0.08
  *      σ_mac      = volatility × 0.008

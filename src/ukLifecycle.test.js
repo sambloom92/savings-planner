@@ -622,6 +622,111 @@ describe('return shape', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Glide path (getRateForAge via retirementOptions)
+// ---------------------------------------------------------------------------
+
+describe('glide path', () => {
+  // Helper: project 1 accumulation year then immediately retire (retirementAge = currentAge + 1)
+  // with a very short post-retirement window so we can inspect investmentRate in each phase.
+  const glideProfile = { ...baseProfile, currentAge: 50, retirementAge: 60 };
+  const glideRates = {
+    savingsRate: 0.08,
+    retirementRate: 0.02,
+    wageGrowthRate: 0,
+    inflationRate: 0,
+  };
+  const glideOpts = { targetNetAnnualExpenses: 0, maxAge: 70 };
+
+  it('uses savingsRate before taper window starts (age < retirementAge − glideStartYears)', () => {
+    // glideStartYears=5 → taper starts at age 55; at age 50 we should have full savingsRate (0.08)
+    const r = projectLifecycle(
+      glideProfile,
+      glideRates,
+      {},
+      {
+        ...glideOpts,
+        glideStartYears: 5,
+        glideEndYears: 5,
+      }
+    );
+    const y50 = r.yearlyBreakdown.find((y) => y.age === 50);
+    assertApprox(y50.investmentRate, 0.08, 'rate at age 50 (before taper)');
+  });
+
+  it('uses retirementRate after taper window ends (age > retirementAge + glideEndYears)', () => {
+    // glideEndYears=5 → taper ends at age 65; at age 65+ we should have full retirementRate (0.02)
+    const r = projectLifecycle(
+      glideProfile,
+      glideRates,
+      {},
+      {
+        ...glideOpts,
+        glideStartYears: 5,
+        glideEndYears: 5,
+      }
+    );
+    const y65 = r.yearlyBreakdown.find((y) => y.age === 65);
+    assertApprox(y65.investmentRate, 0.02, 'rate at age 65 (after taper)');
+  });
+
+  it('interpolates linearly at the midpoint of the taper window', () => {
+    // taper: age 50→70 (glideStartYears=10, glideEndYears=10); midpoint = age 60 → t=0.5
+    // expected rate = 0.08 + 0.5*(0.02-0.08) = 0.05
+    const r = projectLifecycle(
+      glideProfile,
+      glideRates,
+      {},
+      {
+        ...glideOpts,
+        glideStartYears: 10,
+        glideEndYears: 10,
+      }
+    );
+    const y60 = r.yearlyBreakdown.find((y) => y.age === 60);
+    assertApprox(y60.investmentRate, 0.05, 'rate at taper midpoint (age 60)');
+  });
+
+  it('glideStartYears=0 and glideEndYears=0 gives instant step at retirement', () => {
+    // No taper: savingsRate before retirement, retirementRate at and after
+    const r = projectLifecycle(
+      glideProfile,
+      glideRates,
+      {},
+      {
+        ...glideOpts,
+        glideStartYears: 0,
+        glideEndYears: 0,
+      }
+    );
+    const y59 = r.yearlyBreakdown.find((y) => y.age === 59);
+    const y60 = r.yearlyBreakdown.find((y) => y.age === 60);
+    assertApprox(y59.investmentRate, 0.08, 'full savingsRate one year before retirement');
+    assertApprox(
+      y60.investmentRate,
+      0.02,
+      'full retirementRate at retirement with zero-width taper'
+    );
+  });
+
+  it('large glideStartYears (taper starts before currentAge) still works', () => {
+    // glideStartYears=20 → taper starts at age 40, before currentAge=50
+    // At age 50: t = (50-40)/(60+5-40) = 10/25 = 0.4 → rate = 0.08 + 0.4*(0.02-0.08) = 0.056
+    const r = projectLifecycle(
+      glideProfile,
+      glideRates,
+      {},
+      {
+        ...glideOpts,
+        glideStartYears: 20,
+        glideEndYears: 5,
+      }
+    );
+    const y50 = r.yearlyBreakdown.find((y) => y.age === 50);
+    assertApprox(y50.investmentRate, 0.056, 'rate at age 50 when taper already in progress');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Summary
 // ---------------------------------------------------------------------------
 
