@@ -100,7 +100,7 @@ export function runMonteCarlo(profile, baseRates, pots, retirementOpts, opts = {
     trials = 200,
     volatility = 1.0,
     seed = 0xdeadbeef,
-    bearFreq = 12,       // years between bear markets (on average)
+    bearFreq = 12, // years between bear markets (on average)
     bearSeverity = 0.15, // return penalty during bear (positive fraction)
     crisisPersistence = 0.6, // φ for vol AR(1): 0.3 short · 0.6 medium · 0.8 long
     // Asset allocation: fraction in equities pre/post retirement (0–1).
@@ -116,9 +116,10 @@ export function runMonteCarlo(profile, baseRates, pots, retirementOpts, opts = {
   // accumulation-phase rate.  Reflects the lower equity weight in a de-risked
   // portfolio; derived directly from the allocation split rather than hardcoded.
   // Clamped so it never exceeds 1 (no leverage) and never goes below 0.
-  const volRatio = preRetirementEquity > 0
-    ? Math.min(1, Math.max(0, postRetirementEquity / preRetirementEquity))
-    : 0;
+  const volRatio =
+    preRetirementEquity > 0
+      ? Math.min(1, Math.max(0, postRetirementEquity / preRetirementEquity))
+      : 0;
 
   const σ_mkt = volatility * 0.08;
   const σ_mac = volatility * 0.008;
@@ -254,8 +255,7 @@ export function runMonteCarlo(profile, baseRates, pots, retirementOpts, opts = {
       isa: Math.max(0, row.isa?.closingBalance ?? 0),
       gia: Math.max(0, row.gia?.closingBalance ?? 0),
       mortgage: row.mortgage?.closingBalance ?? 0,
-      unsecuredDebt:
-        row.unsecuredDebts?.reduce((s, d) => s + (d.closingBalance ?? 0), 0) ?? 0,
+      unsecuredDebt: row.unsecuredDebts?.reduce((s, d) => s + (d.closingBalance ?? 0), 0) ?? 0,
       studentLoan: row.studentLoan?.closingBalance ?? 0,
     }))
   );

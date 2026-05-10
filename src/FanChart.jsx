@@ -330,8 +330,7 @@ function drawFanChart(
     // Each value is the downward extent from zero (positive magnitude).
     const cumDebt = lockedPotData.map((d) => {
       const vals = [0];
-      for (const k of DEBT_STACK_ORDER)
-        vals.push(vals[vals.length - 1] + Math.max(0, d[k] ?? 0));
+      for (const k of DEBT_STACK_ORDER) vals.push(vals[vals.length - 1] + Math.max(0, d[k] ?? 0));
       return vals;
     });
 

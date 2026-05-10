@@ -137,7 +137,14 @@ function amortiseYear(balance, monthlyRate, monthlyPayment, monthlyOverpayment =
  *     in progress; the formula still works (t > 0 at currentAge)
  *   • taperBeforeYrs = 0, taperAfterYrs > 0 → taper starts at retirement
  */
-function getRateForAge(age, retirementAge, accRate, retRate, taperBeforeYrs = 10, taperAfterYrs = 5) {
+function getRateForAge(
+  age,
+  retirementAge,
+  accRate,
+  retRate,
+  taperBeforeYrs = 10,
+  taperAfterYrs = 5
+) {
   if (accRate === retRate) return accRate;
   const taperStart = retirementAge - taperBeforeYrs;
   const taperEnd = retirementAge + taperAfterYrs;
@@ -492,12 +499,10 @@ export function projectLifecycle(
   // ── Glide path configuration ──────────────────────────────────────────────
   // Extracted here (before the accumulation loop) so both the accumulation
   // and retirement phases can share the same values.
-  const {
-    glideStartYears: _glideStart = 10,
-    glideEndYears: _glideEnd = 5,
-  } = retirementOptions ?? {};
+  const { glideStartYears: _glideStart = 10, glideEndYears: _glideEnd = 5 } =
+    retirementOptions ?? {};
   const glideBeforeYrs = Math.max(0, _glideStart);
-  const glideAfterYrs  = Math.max(0, _glideEnd);
+  const glideAfterYrs = Math.max(0, _glideEnd);
 
   // Running cumulative factors for year-by-year rate variation.
   // When yearlyRatesOverride is null these reproduce the same values as Math.pow().
@@ -728,7 +733,14 @@ export function projectLifecycle(
 
     // ── Pot growth ──────────────────────────────────────────────────────
     // Balances are floored at 0; negative growth (falling markets) cannot produce a negative pot.
-    const yearRate = getRateForAge(age, retirementAge, yr.savingsRate, yr.retirementRate, glideBeforeYrs, glideAfterYrs);
+    const yearRate = getRateForAge(
+      age,
+      retirementAge,
+      yr.savingsRate,
+      yr.retirementRate,
+      glideBeforeYrs,
+      glideAfterYrs
+    );
 
     const openingPension = pensionBal;
     const penAfterC = round2(pensionBal + employeeContrib + employerContrib);

@@ -2043,12 +2043,12 @@ export default function App() {
         p.unsecuredRateType === 'boe'
           ? (p.boePct + p.unsecuredSpreadPct) / 100
           : p.unsecuredRatePct / 100;
-      const preEq  = p.preRetirementEquityPct  / 100;
+      const preEq = p.preRetirementEquityPct / 100;
       const postEq = p.postRetirementEquityPct / 100;
-      const eqRet  = p.equityReturnPct / 100;
-      const bdRet  = p.bondReturnPct   / 100;
+      const eqRet = p.equityReturnPct / 100;
+      const bdRet = p.bondReturnPct / 100;
       const rates = {
-        savingsRate:    preEq  * eqRet + (1 - preEq)  * bdRet,
+        savingsRate: preEq * eqRet + (1 - preEq) * bdRet,
         retirementRate: postEq * eqRet + (1 - postEq) * bdRet,
         wageGrowthRate: p.wageGrowthPct / 100,
         mortgageRate,
@@ -2166,12 +2166,12 @@ export default function App() {
           statePensionAge: p.statePensionAge,
           studentLoanPlan: p.studentLoanPlan || null,
         };
-        const mcPreEq  = p.preRetirementEquityPct  / 100;
+        const mcPreEq = p.preRetirementEquityPct / 100;
         const mcPostEq = p.postRetirementEquityPct / 100;
-        const mcEqRet  = p.equityReturnPct / 100;
-        const mcBdRet  = p.bondReturnPct   / 100;
+        const mcEqRet = p.equityReturnPct / 100;
+        const mcBdRet = p.bondReturnPct / 100;
         const mcRates = {
-          savingsRate:    mcPreEq  * mcEqRet + (1 - mcPreEq)  * mcBdRet,
+          savingsRate: mcPreEq * mcEqRet + (1 - mcPreEq) * mcBdRet,
           retirementRate: mcPostEq * mcEqRet + (1 - mcPostEq) * mcBdRet,
           wageGrowthRate: p.wageGrowthPct / 100,
           mortgageRate,
@@ -2220,7 +2220,7 @@ export default function App() {
             bearFreq: p.mcBearFreq,
             bearSeverity: p.mcBearSeverity,
             crisisPersistence: p.mcCrisisPersistence,
-            preRetirementEquity:  p.preRetirementEquityPct  / 100,
+            preRetirementEquity: p.preRetirementEquityPct / 100,
             postRetirementEquity: p.postRetirementEquityPct / 100,
           })
         );
@@ -2414,7 +2414,8 @@ export default function App() {
             <span
               style={{ color: 'var(--text-muted)', fontSize: 11, fontFamily: 'var(--font-mono)' }}
             >
-              ⚠ Illustrative only — not financial advice
+              ⚠ Illustrative only — not financial advice. England, Wales &amp; Northern Ireland
+              residents only.
             </span>
           )}
         </div>
