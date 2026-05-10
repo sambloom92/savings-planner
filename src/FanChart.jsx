@@ -77,7 +77,8 @@ function drawFanChart(
   lockedPctKey,
   lockedPotData,
   potSeries,
-  fourPctTarget
+  fourPctTarget,
+  logScale
 ) {
   const ctx = canvas.getContext('2d');
 
@@ -130,26 +131,58 @@ function drawFanChart(
   function xOf(age) {
     return PAD.left + ((age - minAge) / Math.max(1, maxAgeVal - minAge)) * cW;
   }
+
+  // ── Scale helpers ─────────────────────────────────────────────────────────
+  // In log mode: values ≤ 0 are floored at 1 (can't take log of non-positive).
+  // The debt region is therefore not shown when logScale is active.
+  const logMin = Math.log10(Math.max(1, minVal > 0 ? minVal : 1));
+  const logMax = Math.log10(Math.max(2, maxVal));
+  const logRange = logMax - logMin;
+
   function yOf(val) {
+    if (logScale) {
+      const lv = Math.log10(Math.max(1, val));
+      return PAD.top + cH - ((lv - logMin) / logRange) * cH;
+    }
     return PAD.top + cH - ((val - minVal) / fullRange) * cH;
   }
 
   // ── Grid lines (horizontal) ───────────────────────────────────────────────
-  const nGridY = 5;
   ctx.strokeStyle = borderCol;
   ctx.lineWidth = 1;
   ctx.setLineDash([]);
-  // Positive grid ticks
-  for (let i = 0; i <= nGridY; i++) {
-    const v = rawMin + (totalRange * i) / nGridY;
-    const y = yOf(v);
-    ctx.beginPath();
-    ctx.moveTo(PAD.left, y);
-    ctx.lineTo(PAD.left + cW, y);
-    ctx.stroke();
+
+  if (logScale) {
+    // Log-spaced ticks at 1×, 2×, 5× per decade
+    const lo = Math.floor(logMin);
+    const hi = Math.ceil(logMax);
+    for (let exp = lo; exp <= hi; exp++) {
+      for (const mult of [1, 2, 5]) {
+        const v = mult * Math.pow(10, exp);
+        if (v < 1 || v > maxVal * 1.05) continue;
+        const y = yOf(v);
+        if (y < PAD.top - 2 || y > PAD.top + cH + 2) continue;
+        ctx.beginPath();
+        ctx.moveTo(PAD.left, y);
+        ctx.lineTo(PAD.left + cW, y);
+        ctx.stroke();
+      }
+    }
+  } else {
+    // Linear grid ticks
+    const nGridY = 5;
+    for (let i = 0; i <= nGridY; i++) {
+      const v = rawMin + (totalRange * i) / nGridY;
+      const y = yOf(v);
+      ctx.beginPath();
+      ctx.moveTo(PAD.left, y);
+      ctx.lineTo(PAD.left + cW, y);
+      ctx.stroke();
+    }
   }
-  // Zero reference line — draw prominently when there are debts
-  if (rawMin < 0) {
+
+  // Zero reference line — draw prominently when there are debts (linear only)
+  if (!logScale && rawMin < 0) {
     const zy = yOf(0);
     ctx.strokeStyle = 'rgba(255,255,255,0.18)';
     ctx.lineWidth = 1.5;
@@ -387,9 +420,24 @@ function drawFanChart(
 
   // ── Y-axis tick labels (always) ───────────────────────────────────────────
   ctx.textAlign = 'right';
-  for (let i = 0; i <= nGridY; i++) {
-    const v = rawMin + (totalRange * i) / nGridY;
-    ctx.fillText(yTickFmt(v), PAD.left - 8, yOf(v) + 4);
+  if (logScale) {
+    const lo = Math.floor(logMin);
+    const hi = Math.ceil(logMax);
+    for (let exp = lo; exp <= hi; exp++) {
+      for (const mult of [1, 2, 5]) {
+        const v = mult * Math.pow(10, exp);
+        if (v < 1 || v > maxVal * 1.05) continue;
+        const y = yOf(v);
+        if (y < PAD.top - 2 || y > PAD.top + cH + 2) continue;
+        ctx.fillText(yTickFmt(v), PAD.left - 8, y + 4);
+      }
+    }
+  } else {
+    const nGridY = 5;
+    for (let i = 0; i <= nGridY; i++) {
+      const v = rawMin + (totalRange * i) / nGridY;
+      ctx.fillText(yTickFmt(v), PAD.left - 8, yOf(v) + 4);
+    }
   }
 
   // ── Reference line labels (always) ───────────────────────────────────────
@@ -594,6 +642,7 @@ export function FanChart({
   fourPctTarget = null,
   showDetails,
   colorMode = 'dark',
+  logScale = false,
   height = 390,
 }) {
   const canvasRef = useRef(null);
@@ -696,7 +745,8 @@ export function FanChart({
       lockedTrial?.pctKey ?? null,
       adjLockedPotData,
       potSeries ?? null,
-      fourPctTarget
+      fourPctTarget,
+      logScale
     );
     coordRef.current = { ...coords, adjData };
     // colorMode in deps: theme change re-reads CSS vars via cssVar() at draw time
@@ -713,6 +763,7 @@ export function FanChart({
     lockedTrial,
     potSeries,
     fourPctTarget,
+    logScale,
   ]);
 
   // Mousemove: update hover; frozen while a trial is locked
