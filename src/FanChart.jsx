@@ -78,7 +78,8 @@ function drawFanChart(
   lockedPotData,
   potSeries,
   fourPctTarget,
-  logScale
+  logScale,
+  deterministicMode
 ) {
   const ctx = canvas.getContext('2d');
 
@@ -369,20 +370,23 @@ function drawFanChart(
       const total = cumData[i][POT_STACK_ORDER.length];
       const prevTotal = cumData[i - 1][POT_STACK_ORDER.length];
       if (total <= 0 && prevTotal > 0) {
-        drawShortfallMarker(adjData[i].age, PCT_CFG[lockedPctKey]);
+        const markerCfg = PCT_CFG[lockedPctKey] ?? { color: mutedCol };
+        drawShortfallMarker(adjData[i].age, markerCfg);
         break;
       }
     }
 
-    // In-chart label
-    const cfg = PCT_CFG[lockedPctKey];
-    ctx.font = `bold 10px ${mono}`;
-    ctx.fillStyle = cfg.color;
-    ctx.textAlign = 'left';
-    ctx.fillText(`${cfg.label} · single trial`, PAD.left + 8, PAD.top + 14);
-    ctx.font = `9px ${mono}`;
-    ctx.fillStyle = mutedCol;
-    ctx.fillText('Release to return to fan chart', PAD.left + 8, PAD.top + 27);
+    // In-chart label (MC locked-trial only; suppressed in deterministic mode)
+    if (!deterministicMode && lockedPctKey) {
+      const cfg = PCT_CFG[lockedPctKey];
+      ctx.font = `bold 10px ${mono}`;
+      ctx.fillStyle = cfg.color;
+      ctx.textAlign = 'left';
+      ctx.fillText(`${cfg.label} · single trial`, PAD.left + 8, PAD.top + 14);
+      ctx.font = `9px ${mono}`;
+      ctx.fillStyle = mutedCol;
+      ctx.fillText('Release to return to fan chart', PAD.left + 8, PAD.top + 27);
+    }
   } else {
     // Normal fan mode —————————————————————————————————————————————————————
 
@@ -455,8 +459,19 @@ function drawFanChart(
     ctx.fillText('State Pension', xOf(statePensionAge), PAD.top - 8);
   }
 
-  // ── Hover overlay (fan mode only) ─────────────────────────────────────────
-  if (!lockedPath && hoverState && hoverState.age != null) {
+  // ── Hover overlay: cursor line in det mode, dots-on-lines in fan mode ────
+  if (deterministicMode && hoverState?.age != null) {
+    const hx = xOf(hoverState.age);
+    ctx.setLineDash([3, 2]);
+    ctx.strokeStyle = 'rgba(232,184,75,0.45)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(hx, PAD.top);
+    ctx.lineTo(hx, PAD.top + cH);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+  if (!lockedPath && !deterministicMode && hoverState && hoverState.age != null) {
     const hx = xOf(hoverState.age);
 
     // Vertical cursor line
@@ -643,6 +658,7 @@ export function FanChart({
   showDetails,
   colorMode = 'dark',
   logScale = false,
+  deterministicData = null,
   height = 390,
 }) {
   const canvasRef = useRef(null);
@@ -727,31 +743,84 @@ export function FanChart({
     });
   }, [lockedTrial, allPotData, percentileData, realTerms, inflRate, currentAge]);
 
+  // ── Deterministic-mode derived data ──────────────────────────────────────
+  // Real-terms adjusted det data. Debts remain signed negative (as in chartData).
+  const adjDetData = useMemo(() => {
+    if (!deterministicData) return null;
+    if (!realTerms) return deterministicData;
+    return deterministicData.map((row) => {
+      const f = Math.pow(1 / (1 + inflRate), row.age - currentAge);
+      return {
+        ...row,
+        pension: row.pension * f,
+        isa: row.isa * f,
+        gia: row.gia * f,
+        mortgage: row.mortgage * f,
+        unsecuredDebt: row.unsecuredDebt * f,
+        studentLoan: row.studentLoan * f,
+      };
+    });
+  }, [deterministicData, realTerms, inflRate, currentAge]);
+
+  // adjData-shaped array (ages + totals) for x-axis extent and hover hit-testing.
+  const detAdjPercentiles = useMemo(() => {
+    if (!adjDetData) return null;
+    return adjDetData.map((row) => {
+      const total = Math.max(0, row.pension + row.isa + row.gia);
+      return { age: row.age, p10: total, p25: total, p50: total, p75: total, p90: total };
+    });
+  }, [adjDetData]);
+
+  // lockedPotData-shaped array: debts flipped to positive magnitudes.
+  const detLockedPotData = useMemo(() => {
+    if (!adjDetData) return null;
+    return adjDetData.map((row) => ({
+      pension: Math.max(0, row.pension),
+      isa: Math.max(0, row.isa),
+      gia: Math.max(0, row.gia),
+      mortgage: Math.max(0, -row.mortgage),
+      unsecuredDebt: Math.max(0, -row.unsecuredDebt),
+      studentLoan: Math.max(0, -row.studentLoan),
+    }));
+  }, [adjDetData]);
+
   // Redraw whenever data, hover, lock state, or container size changes
   useEffect(() => {
     const canvas = canvasRef.current;
-    if (!canvas || !containerWidth || !adjData) return;
+    if (!canvas || !containerWidth) return;
     const dpr = window.devicePixelRatio || 1;
+    // In det mode: use derived structures; lockedPath=null suppresses the MC
+    // single-trial line (stacked bands already show the full breakdown).
+    const effectiveAdjData = deterministicData ? detAdjPercentiles : adjData;
+    const effectiveLockedPath = deterministicData ? null : adjLockedPath;
+    const effectiveLockedPctKey = deterministicData ? null : (lockedTrial?.pctKey ?? null);
+    const effectiveLockedPotData = deterministicData ? detLockedPotData : adjLockedPotData;
+    if (!effectiveAdjData) return;
     const coords = drawFanChart(
       canvas,
       containerWidth,
       height,
       dpr,
-      adjData,
+      effectiveAdjData,
       hoverState,
       retirementAge,
       statePensionAge,
-      adjLockedPath,
-      lockedTrial?.pctKey ?? null,
-      adjLockedPotData,
+      effectiveLockedPath,
+      effectiveLockedPctKey,
+      effectiveLockedPotData,
       potSeries ?? null,
       fourPctTarget,
-      logScale
+      logScale,
+      !!deterministicData
     );
-    coordRef.current = { ...coords, adjData };
+    coordRef.current = { ...coords, adjData: effectiveAdjData };
     // colorMode in deps: theme change re-reads CSS vars via cssVar() at draw time
   }, [
     adjData,
+    adjDetData,
+    detAdjPercentiles,
+    detLockedPotData,
+    deterministicData,
     hoverState,
     containerWidth,
     height,
@@ -769,7 +838,7 @@ export function FanChart({
   // Mousemove: update hover; frozen while a trial is locked
   const handleMouseMove = useCallback(
     (e) => {
-      if (lockedTrial) return; // keep the locked view stable
+      if (lockedTrial && !deterministicData) return; // keep MC locked view stable
       const info = coordRef.current;
       if (!info || !info.xOf) return;
 
@@ -809,20 +878,26 @@ export function FanChart({
 
       if (!hoverState || hoverState.age !== age || hoverState.pctKey !== nearestKey) {
         setHoverState({ age, pctKey: nearestKey, ageRow });
-        if (onHoverRow && repPaths) {
-          const pctNum = PCT_CFG[nearestKey].pct;
-          const pathRow = (repPaths[pctNum] ?? []).find((r) => r.age === age) ?? null;
-          onHoverRow(pathRow);
+        if (onHoverRow) {
+          if (deterministicData) {
+            const detRow = adjDetData?.find((r) => r.age === age)?._detail ?? null;
+            onHoverRow(detRow);
+          } else if (repPaths) {
+            const pctNum = PCT_CFG[nearestKey].pct;
+            const pathRow = (repPaths[pctNum] ?? []).find((r) => r.age === age) ?? null;
+            onHoverRow(pathRow);
+          }
         }
       }
     },
-    [lockedTrial, hoverState, repPaths, onHoverRow]
+    [lockedTrial, hoverState, repPaths, onHoverRow, deterministicData, adjDetData]
   );
 
   // Mousedown: find the trial closest to the hovered percentile at the hovered
   // age and lock to it.
   const handleMouseDown = useCallback(
     (e) => {
+      if (deterministicData) return; // no trial locking in deterministic mode
       if (e.button !== 0) return;
       if (!hoverState?.ageRow || !portfolioMatrix) return;
       const info = coordRef.current;
@@ -851,7 +926,7 @@ export function FanChart({
       setLockedTrial({ trialIdx: bestIdx, pctKey });
       if (onHoverRow) onHoverRow(null); // clear detail panel while locked
     },
-    [hoverState, portfolioMatrix, realTerms, inflRate, currentAge, onHoverRow]
+    [hoverState, portfolioMatrix, realTerms, inflRate, currentAge, onHoverRow, deterministicData]
   );
 
   const handleMouseUp = useCallback(() => {
@@ -880,8 +955,8 @@ export function FanChart({
           gap: 8,
         }}
       >
-        {/* In locked mode show pot legend; otherwise show percentile band legend */}
-        {isLocked && potSeries ? (
+        {/* In locked mode or det mode show pot legend; otherwise show percentile band legend */}
+        {(isLocked || deterministicData) && potSeries ? (
           <div style={{ display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap' }}>
             {/* Assets: GIA → ISA → Pension (top-to-bottom stacking order) */}
             {[...potSeries]
@@ -949,20 +1024,18 @@ export function FanChart({
           >
             {PCT_CFG[lockedTrial.pctKey].label} · single trial · hold to inspect
           </span>
-        ) : (
-          hoverState && (
-            <span
-              style={{
-                fontSize: 10,
-                fontFamily: 'var(--font-mono)',
-                color: PCT_CFG[hoverState.pctKey].color,
-                letterSpacing: '0.04em',
-              }}
-            >
-              {PCT_CFG[hoverState.pctKey].label} · Age {hoverState.age}
-            </span>
-          )
-        )}
+        ) : hoverState ? (
+          <span
+            style={{
+              fontSize: 10,
+              fontFamily: 'var(--font-mono)',
+              color: deterministicData ? 'var(--text-muted)' : PCT_CFG[hoverState.pctKey].color,
+              letterSpacing: '0.04em',
+            }}
+          >
+            {deterministicData ? '' : `${PCT_CFG[hoverState.pctKey].label} · `}Age {hoverState.age}
+          </span>
+        ) : null}
       </div>
 
       {/* Canvas */}
@@ -989,7 +1062,9 @@ export function FanChart({
             letterSpacing: '0.04em',
           }}
         >
-          Hover to inspect · click and hold to view a single trial
+          {deterministicData
+            ? 'Hover to inspect year-by-year detail'
+            : 'Hover to inspect · click and hold to view a single trial'}
         </div>
       )}
     </div>
