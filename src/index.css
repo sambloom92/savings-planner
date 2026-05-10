@@ -5,9 +5,31 @@
   --font-mono: 'JetBrains Mono', monospace;
 }
 
-/* ── Dark theme (default) ────────────────────────────────────────────────────── */
-:root,
-[data-theme='dark'] {
+/* ── Dark theme — default fallback via :root (specificity 0,1,0) ─────────────── */
+/* Each explicit theme uses html[data-theme='x'] (specificity 0,1,1) so it       */
+/* unambiguously wins over this :root fallback regardless of cascade order.       */
+:root {
+  --bg-base: #080c14;
+  --bg-panel: #0f1521;
+  --bg-card: #141c2e;
+  --bg-input: #1a2236;
+  --border: #1f2d47;
+  --border-bright: #2a3f5f;
+
+  --text-primary: #e8edf5;
+  --text-secondary: #8b9ab5;
+  --text-muted: #4a5a78;
+
+  --accent-gold: #e8b84b;
+  --accent-gold-d: #c49a2d;
+  --accent-gold-text: #080c14;
+
+  --shadow-tooltip: 0 6px 24px rgba(0, 0, 0, 0.55);
+  --shadow-chart: 0 8px 32px rgba(0, 0, 0, 0.6);
+}
+
+/* ── Explicit dark theme ─────────────────────────────────────────────────────── */
+html[data-theme='dark'] {
   --bg-base: #080c14;
   --bg-panel: #0f1521;
   --bg-card: #141c2e;
@@ -29,7 +51,7 @@
 
 /* ── High contrast / colourblind-friendly theme ──────────────────────────────── */
 /* Chart series use the Wong (2011) colourblind-safe palette.                    */
-[data-theme='hc'] {
+html[data-theme='hc'] {
   --bg-base: #000000;
   --bg-panel: #0d0d0d;
   --bg-card: #141414;
@@ -50,7 +72,7 @@
 }
 
 /* ── Light theme ─────────────────────────────────────────────────────────────── */
-[data-theme='light'] {
+html[data-theme='light'] {
   --bg-base: #f0f3f8;
   --bg-panel: #ffffff;
   --bg-card: #f7f9fc;

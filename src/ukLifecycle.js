@@ -125,19 +125,31 @@ function amortiseYear(balance, monthlyRate, monthlyPayment, monthlyOverpayment =
 
 // ── Return-tapering ─────────────────────────────────────────────────────────
 
-const TAPER_BEFORE_YEARS = 10; // start de-risking this many years before retirement
-const TAPER_AFTER_YEARS = 5; // fully de-risked this many years after retirement
-
 /**
  * Returns the interpolated investment return rate for a given age.
  * Linearly tapers from accRate to retRate over the window
- * [retirementAge - TAPER_BEFORE_YEARS, retirementAge + TAPER_AFTER_YEARS].
+ * [retirementAge - taperBeforeYrs, retirementAge + taperAfterYrs].
  * Outside that window the rate is clamped to accRate or retRate respectively.
+ *
+ * Edge cases:
+ *   • taperBeforeYrs = taperAfterYrs = 0 → instant step at retirementAge
+ *   • taperBeforeYrs so large that taperStart < currentAge → taper already
+ *     in progress; the formula still works (t > 0 at currentAge)
+ *   • taperBeforeYrs = 0, taperAfterYrs > 0 → taper starts at retirement
  */
-function getRateForAge(age, retirementAge, accRate, retRate) {
+function getRateForAge(
+  age,
+  retirementAge,
+  accRate,
+  retRate,
+  taperBeforeYrs = 10,
+  taperAfterYrs = 5
+) {
   if (accRate === retRate) return accRate;
-  const taperStart = retirementAge - TAPER_BEFORE_YEARS;
-  const taperEnd = retirementAge + TAPER_AFTER_YEARS;
+  const taperStart = retirementAge - taperBeforeYrs;
+  const taperEnd = retirementAge + taperAfterYrs;
+  // Guard against zero-width window (both params = 0): step at retirementAge
+  if (taperEnd === taperStart) return age >= taperStart ? retRate : accRate;
   const t = Math.max(0, Math.min(1, (age - taperStart) / (taperEnd - taperStart)));
   return accRate + t * (retRate - accRate);
 }
@@ -301,6 +313,8 @@ function applyGIAWithdrawal(bal, costBasis, gross) {
  *   maxAge?:                 number,  - Project retirement to this age (default 90)
  *   takePCLS?:               boolean, - Take pension commencement lump sum (default false)
  *   pclsPercentage?:         number,  - Fraction of pension to take as PCLS (0–0.25, default 0.25)
+ *   glideStartYears?:        number,  - Years before retirement to begin de-risking (default 10)
+ *   glideEndYears?:          number,  - Years after retirement to finish de-risking (default 5)
  * } | null} [retirementOptions]
  *
  * @returns {{
@@ -312,7 +326,13 @@ function applyGIAWithdrawal(bal, costBasis, gross) {
  *   taxYear:            string
  * }}
  */
-export function projectLifecycle(profile, rates, pots = {}, retirementOptions = null) {
+export function projectLifecycle(
+  profile,
+  rates,
+  pots = {},
+  retirementOptions = null,
+  yearlyRatesOverride = null
+) {
   // ── Validate profile ────────────────────────────────────────────────────
   const {
     currentAge,
@@ -370,10 +390,6 @@ export function projectLifecycle(profile, rates, pots = {}, retirementOptions = 
   assertFinite(inflationRate, 'inflationRate');
   assertFinite(boeRate, 'boeRate');
   assertFinite(fiscalDragRate, 'fiscalDragRate');
-
-  // Triple lock: state pension grows by max(wage growth, CPI, 2.5%) each year.
-  // Floor at 2.5% even when both wage growth and inflation are below that.
-  const triplelock = Math.max(wageGrowthRate, inflationRate, 0.025);
 
   // ── Validate and initialise pots ─────────────────────────────────────────
   const {
@@ -480,13 +496,48 @@ export function projectLifecycle(profile, rates, pots = {}, retirementOptions = 
 
   const yearlyBreakdown = [];
 
+  // ── Glide path configuration ──────────────────────────────────────────────
+  // Extracted here (before the accumulation loop) so both the accumulation
+  // and retirement phases can share the same values.
+  const { glideStartYears: _glideStart = 10, glideEndYears: _glideEnd = 5 } =
+    retirementOptions ?? {};
+  const glideBeforeYrs = Math.max(0, _glideStart);
+  const glideAfterYrs = Math.max(0, _glideEnd);
+
+  // Running cumulative factors for year-by-year rate variation.
+  // When yearlyRatesOverride is null these reproduce the same values as Math.pow().
+  let cumulInflation = 1; // product of (1 + inflRate) from year 1..i
+  let thresholdScale = 1; // product of (1 + inflRate - fiscalDragRate) from year 1..i
+  let cumulTriplelock = 1; // product of (1 + max(wages,CPI,2.5%)) from year 1..i
+
   // ── Annual loop ──────────────────────────────────────────────────────────
   for (let i = 0; i < yearsToRetirement; i++) {
     const year = currentYear + i;
     const age = currentAge + i;
 
+    // Per-year rates (merge base + optional override for year i)
+    const yr =
+      yearlyRatesOverride?.[i] != null
+        ? {
+            savingsRate,
+            retirementRate,
+            wageGrowthRate,
+            inflationRate,
+            boeRate,
+            ...yearlyRatesOverride[i],
+          }
+        : { savingsRate, retirementRate, wageGrowthRate, inflationRate, boeRate };
+    const yrTriplelock = Math.max(yr.wageGrowthRate, yr.inflationRate, 0.025);
+
+    // Update running products (i=0 leaves them at 1, matching Math.pow(..., 0)=1)
+    if (i > 0) {
+      cumulInflation *= 1 + yr.inflationRate;
+      thresholdScale *= 1 + yr.inflationRate - fiscalDragRate;
+      cumulTriplelock *= 1 + yrTriplelock;
+    }
+
     // Wage growth applies from year 1 onwards; floor at 0 (salary cannot go negative)
-    if (i > 0) income = Math.max(0, round2(income * (1 + wageGrowthRate)));
+    if (i > 0) income = Math.max(0, round2(income * (1 + yr.wageGrowthRate)));
 
     // ── Pension (salary sacrifice) ──────────────────────────────────────
     const employeeContrib = round2(income * employeePensionRate);
@@ -499,7 +550,6 @@ export function projectLifecycle(profile, rates, pots = {}, retirementOptions = 
 
     // ── Tax and NI (on adjustedGross, with fiscal-drag-adjusted thresholds) ──
     // thresholdScale > 1 means bands have grown (less drag); < 1 means compressed (more drag).
-    const thresholdScale = Math.pow(1 + inflationRate - fiscalDragRate, i);
     const taxResult = calculateIncomeTax(adjustedGross, thresholdScale);
     const niResult = calculateNationalInsurance(adjustedGross, thresholdScale);
     const incomeTax = taxResult.totalTax;
@@ -534,8 +584,8 @@ export function projectLifecycle(profile, rates, pots = {}, retirementOptions = 
         const slInterestRate = calculateAnnualInterestRate(
           studentLoanPlan,
           adjustedGross,
-          inflationRate,
-          boeRate
+          yr.inflationRate,
+          yr.boeRate
         );
         const interestCharged = round2(slBalance * slInterestRate);
         const balanceAfterInt = round2(slBalance + interestCharged);
@@ -641,7 +691,7 @@ export function projectLifecycle(profile, rates, pots = {}, retirementOptions = 
     // derive available savings from net take-home minus debt payments (legacy behaviour).
     let availableForSavings;
     if (annualSavings !== null) {
-      availableForSavings = round2(annualSavings * Math.pow(1 + inflationRate, i));
+      availableForSavings = round2(annualSavings * cumulInflation);
     } else {
       availableForSavings = round2(netTakeHome - totalDebtPayments);
     }
@@ -683,7 +733,14 @@ export function projectLifecycle(profile, rates, pots = {}, retirementOptions = 
 
     // ── Pot growth ──────────────────────────────────────────────────────
     // Balances are floored at 0; negative growth (falling markets) cannot produce a negative pot.
-    const yearRate = getRateForAge(age, retirementAge, savingsRate, retirementRate);
+    const yearRate = getRateForAge(
+      age,
+      retirementAge,
+      yr.savingsRate,
+      yr.retirementRate,
+      glideBeforeYrs,
+      glideAfterYrs
+    );
 
     const openingPension = pensionBal;
     const penAfterC = round2(pensionBal + employeeContrib + employerContrib);
@@ -835,24 +892,39 @@ export function projectLifecycle(profile, rates, pots = {}, retirementOptions = 
       const openISA = isaBal;
       const openGIA = giaBal;
 
+      // Per-year rates for this retirement year
+      const retYearIdx = yearsToRetirement + yearsRetired;
+      const yrRet =
+        yearlyRatesOverride?.[retYearIdx] != null
+          ? {
+              savingsRate,
+              retirementRate,
+              wageGrowthRate,
+              inflationRate,
+              boeRate,
+              ...yearlyRatesOverride[retYearIdx],
+            }
+          : { savingsRate, retirementRate, wageGrowthRate, inflationRate, boeRate };
+      const yrRetTriplelock = Math.max(yrRet.wageGrowthRate, yrRet.inflationRate, 0.025);
+
+      // Update running products for this retirement year
+      cumulInflation *= 1 + yrRet.inflationRate;
+      thresholdScale *= 1 + yrRet.inflationRate - fiscalDragRate;
+      cumulTriplelock *= 1 + yrRetTriplelock;
+
       // Inflation-adjusted target net expenses — inflated from today (currentAge),
       // not from retirement date, so the input figure represents today's purchasing power.
-      const targetExpenses = round2(
-        targetNetAnnualExpenses * Math.pow(1 + inflationRate, yearsToRetirement + yearsRetired)
-      );
+      const targetExpenses = round2(targetNetAnnualExpenses * cumulInflation);
 
       // Fiscal-drag-adjusted threshold scale for this retirement year.
-      const retThresholdScale = Math.pow(
-        1 + inflationRate - fiscalDragRate,
-        yearsToRetirement + yearsRetired
-      );
+      const retThresholdScale = thresholdScale;
 
       // State pension — triple-lock-adjusted nominal amount at this retirement year.
       // Grows from the 2025/26 base by max(wageGrowth, CPI, 2.5%) for each year elapsed.
       const spGross =
         rAge >= statePensionAge &&
         niYears >= LIFECYCLE_CONSTANTS.statePension.minimumQualifyingYears
-          ? round2(computeStatePension(niYears) * Math.pow(1 + triplelock, rAge - currentAge))
+          ? round2(computeStatePension(niYears) * cumulTriplelock)
           : 0;
       const spTax = round2(calculateIncomeTax(spGross, retThresholdScale).totalTax);
       const spNet = round2(spGross - spTax);
@@ -1078,7 +1150,14 @@ export function projectLifecycle(profile, rates, pots = {}, retirementOptions = 
       }
 
       // ── Growth on remaining balances ───────────────────────────────────────
-      const retYearRate = getRateForAge(rAge, retirementAge, savingsRate, retirementRate);
+      const retYearRate = getRateForAge(
+        rAge,
+        retirementAge,
+        yrRet.savingsRate,
+        yrRet.retirementRate,
+        glideBeforeYrs,
+        glideAfterYrs
+      );
       const pensionGrow = round2(pensionBal * retYearRate);
       pensionBal = Math.max(0, round2(pensionBal + pensionGrow));
       const isaGrow = round2(isaBal * retYearRate);
@@ -1163,9 +1242,11 @@ export function projectLifecycle(profile, rates, pots = {}, retirementOptions = 
       ? retEntryUnsecured
       : round2(debts.reduce((s, d) => s + d.balance, 0));
   // Nominal state pension at the age it first becomes payable, triple-lock grown from today.
+  // Uses the base-rate triplelock for the summary figure (independent of yearlyRatesOverride).
+  const baseTriplelockForSummary = Math.max(wageGrowthRate, inflationRate, 0.025);
   const projectedStatePension = round2(
     computeStatePension(niYears) *
-      Math.pow(1 + triplelock, Math.max(0, statePensionAge - currentAge))
+      Math.pow(1 + baseTriplelockForSummary, Math.max(0, statePensionAge - currentAge))
   );
   const totalSavings = round2(sumPension + sumISA + sumGIA);
   const totalDebt = round2(sumMortgage + sumUnsecured + slBalance);
