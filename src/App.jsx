@@ -974,7 +974,7 @@ function TabContent({ tab, p, set }) {
             format={fmtPct}
             onChange={set('equityReturnPct')}
             allowInput
-            help="Expected annual nominal return on the equity portion of your portfolio (e.g. a global index fund). Long-run UK/global equity average is roughly 7–8% nominal. Combined with your equity allocation below to give an effective blended rate."
+            help="Expected long-run annualised return on the equity portion of your portfolio (e.g. a global index fund), expressed as a geometric mean (CAGR) across a full economic cycle — the same figure you would find in historical data covering booms and recessions. Long-run UK/global equity average is roughly 7–8% nominal. Combined with your equity allocation below to give an effective blended rate used in both the deterministic and Monte Carlo projections."
           />
           <Slider
             label="Bond / cash return"
@@ -985,7 +985,7 @@ function TabContent({ tab, p, set }) {
             format={fmtPct}
             onChange={set('bondReturnPct')}
             allowInput
-            help="Expected annual nominal return on the bond or cash portion of your portfolio (e.g. gilts, money-market funds). UK gilt yields have historically been 2–4% nominal. Combined with your equity allocation below to give an effective blended rate."
+            help="Expected long-run annualised return on the bond or cash portion of your portfolio (e.g. gilts, money-market funds), expressed as a geometric mean (CAGR) across a full economic cycle. UK gilt yields have historically been 2–4% nominal. Combined with your equity allocation below to give an effective blended rate used in both the deterministic and Monte Carlo projections."
           />
           <Slider
             label="Pre-retirement equity allocation"
@@ -1118,7 +1118,7 @@ function TabContent({ tab, p, set }) {
             help={
               'Average number of years between bear markets (market downturns lasting 1–3 years).\n\n' +
               'At 12 years (default): roughly matches post-war UK/US history. At 4–6 years: more crisis-prone, similar to the 1970s or emerging markets. At 20–30 years: unusually calm conditions.\n\n' +
-              'Each bear market shifts investment returns down by the Bear Market Severity amount for its duration.'
+              'Changing this setting does not alter the long-run expected return — the simulation compensates so the median trial still tracks your chosen return rates. What it does affect is the shape of the fan: more frequent bear markets means more sequence-of-returns risk and a wider spread between p10 and p90.'
             }
           />
           <Slider
@@ -1132,7 +1132,8 @@ function TabContent({ tab, p, set }) {
             allowInput
             help={
               'How much a bear market cuts annual investment returns during the downturn.\n\n' +
-              'At −15 pp (default): a portfolio earning 7% in normal years earns −8% during a bear — consistent with a moderate recession. At −30 pp: severe crash conditions (2008-style). At −5 pp: a mild correction only.'
+              'At −15 pp (default): a moderate recession where returns drop roughly 15 pp below the long-run average for 1–2 years. At −30 pp: severe crash conditions (2008-style). At −5 pp: a mild correction only.\n\n' +
+              'Like frequency, changing severity does not shift the long-run expected return — the simulation compensates so the median remains anchored to your return rate sliders. Higher severity widens the fan and increases the chance of a bad sequence of returns early in retirement.'
             }
           />
           {/* Crisis persistence toggle */}
@@ -2700,7 +2701,7 @@ export default function App() {
                 <HelpTip
                   text={
                     'Deterministic: one fixed projection using the exact rates you set in the Rates tab. Useful for understanding how the plan works and stress-testing specific assumptions. Because it uses a single unchanging set of assumptions, it is inherently optimistic — there is no mechanism for things to go wrong beyond what you explicitly model.\n\n' +
-                    'Monte Carlo: runs hundreds of simulations, each with a different random sequence of market returns and economic conditions. The fan chart shows the spread of outcomes — the wide band is the 10th–90th percentile range, the narrow band is 25th–75th, and the centre line is the median. Because it models bear markets, volatility clustering, and sequences of bad returns, the median Monte Carlo outcome tends to be more pessimistic than the deterministic projection — this is the realistic cost of uncertainty.\n\n' +
+                    'Monte Carlo: runs hundreds of simulations, each with a different random sequence of market returns and economic conditions. The fan chart shows the spread of outcomes — the wide band is the 10th–90th percentile range, the narrow band is 25th–75th, and the centre line is the median. The simulation is calibrated so the median trial tracks the deterministic projection — your return rate sliders represent full-cycle expected returns, already inclusive of bear markets. The fan shows what happens when bad years cluster unluckily (p10) or conditions are unusually favourable (p90).\n\n' +
                     'Use Monte Carlo to understand retirement risk — specifically, whether your plan survives bad luck, not just average conditions.'
                   }
                 />
