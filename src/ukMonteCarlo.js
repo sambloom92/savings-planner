@@ -139,20 +139,20 @@ export function runMonteCarlo(profile, baseRates, pots, retirementOpts, opts = {
       ? Math.min(1, Math.max(0, postRetirementEquity / preRetirementEquity))
       : 0;
 
-  // Steady-state fraction of years spent in a bear regime.
-  // Used to pre-shift base rates so E[simulatedRate] ≈ sliderValue (see docstring).
-  const pBearSS = pEnter / (pEnter + pExit);
-  const compSavings     = pBearSS * bearSeverity;
-  const compRetirement  = pBearSS * bearSeverity * volRatio;
-  const compWage        = pBearSS * bearSeverity * 0.25;
-  const compInfl        = pBearSS * bearSeverity * 0.15;
-  const compBoe         = pBearSS * bearSeverity * 0.10;
-
   const σ_mkt = volatility * 0.08;
   const σ_mac = volatility * 0.008;
   const φ = Math.max(0, Math.min(0.99, crisisPersistence));
   const pEnter = 1 / Math.max(1, bearFreq); // P(normal → bear) per year
   const pExit = 0.5; // P(bear → normal) per year ≈ 2-yr avg bear
+
+  // Steady-state fraction of years spent in a bear regime.
+  // Used to pre-shift base rates so E[simulatedRate] ≈ sliderValue (see docstring).
+  const pBearSS = pEnter / (pEnter + pExit);
+  const compSavings = pBearSS * bearSeverity;
+  const compRetirement = pBearSS * bearSeverity * volRatio;
+  const compWage = pBearSS * bearSeverity * 0.25;
+  const compInfl = pBearSS * bearSeverity * 0.15;
+  const compBoe = pBearSS * bearSeverity * 0.1;
 
   const totalYears = retirementOpts.maxAge - profile.currentAge + 1;
   const rand = makePRNG(seed);
@@ -197,7 +197,8 @@ export function runMonteCarlo(profile, baseRates, pots, retirementOpts, opts = {
         // portfolio suffers less volatility and a smaller bear-market drag.
         // comp* offsets ensure E[rate] ≈ slider value across the full cycle.
         savingsRate: baseRates.savingsRate + compSavings - Δ + z1 * σ_eff,
-        retirementRate: baseRates.retirementRate + compRetirement - Δ * volRatio + z1 * σ_eff * volRatio,
+        retirementRate:
+          baseRates.retirementRate + compRetirement - Δ * volRatio + z1 * σ_eff * volRatio,
         // Macro rates: bear pushes inflation/BoE up, so compensation subtracts.
         inflationRate: Math.max(-0.05, baseRates.inflationRate - compInfl + Δ * 0.15 + z2 * σ_mac),
         boeRate: Math.max(-0.05, baseRates.boeRate - compBoe + Δ * 0.1 + z2 * σ_mac),
