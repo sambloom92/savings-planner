@@ -2017,7 +2017,7 @@ export default function App() {
           currentAge: p.currentAge,
           retirementAge: p.retirementAge,
           grossIncome: p.grossIncome,
-          annualSavings: p.annualSavings,
+          annualLivingExpenses: p.annualLivingExpenses,
           employeePensionRate: p.employeePensionPct / 100,
           employerPensionRate: p.employerPensionPct / 100,
           niContributionYears: p.niContributionYears,
