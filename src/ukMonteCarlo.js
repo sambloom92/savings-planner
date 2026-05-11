@@ -22,12 +22,29 @@
  *   4. Bear shift: Δ = bearSeverity when inBear, else 0
  *      (bearSeverity stored as a positive fraction, e.g. 0.15 = −15 pp to returns)
  *
- *   5. Year t rates:
- *        savingsRate    = base − Δ             + z1 × σ_eff
- *        retirementRate = base − Δ × volRatio  + z1 × σ_eff × volRatio
- *        inflationRate  = max(−0.05, base + Δ × 0.15 + z2 × σ_mac)
- *        boeRate        = max(−0.05, base + Δ × 0.10 + z2 × σ_mac)
- *        wageGrowthRate = base − Δ × 0.25      + z2 × σ_mac × 0.5
+ *   5. Bear-drag compensation:
+ *      Users set slider values as full-cycle geometric means (e.g. "7% equity
+ *      return" already includes historical crashes).  Without correction the
+ *      model would double-count bear-market penalties.  Each base rate is
+ *      shifted up/down by its expected bear drag before shocks are applied:
+ *        pBearSS = pEnter / (pEnter + pExit)   (steady-state bear fraction)
+ *        compensation_i = pBearSS × bearSeverity × bearCoeff_i
+ *      so that E[simulatedRate_i] ≈ sliderValue_i across the full cycle.
+ *      A small residual volatility drag (≈ σ²/2) is left uncorrected — it is
+ *      second-order and real (compounding really does penalise variance).
+ *
+ *   6. Year t rates (after compensation):
+ *        savingsRate    = base + comp_s − Δ             + z1 × σ_eff
+ *        retirementRate = base + comp_r − Δ × volRatio  + z1 × σ_eff × volRatio
+ *        inflationRate  = max(−0.05, base − comp_i + Δ × 0.15 + z2 × σ_mac)
+ *        boeRate        = max(−0.05, base − comp_b + Δ × 0.10 + z2 × σ_mac)
+ *        wageGrowthRate = base + comp_w − Δ × 0.25      + z2 × σ_mac × 0.5
+ *
+ *      comp_s = pBearSS × bearSeverity           (investment, pre-retirement)
+ *      comp_r = pBearSS × bearSeverity × volRatio (investment, post-retirement)
+ *      comp_w = pBearSS × bearSeverity × 0.25    (wages — bear coefficient)
+ *      comp_i = pBearSS × bearSeverity × 0.15    (inflation — bear pushes up)
+ *      comp_b = pBearSS × bearSeverity × 0.10    (BoE rate — bear pushes up)
  *
  *      volRatio   = postRetirementEquity / preRetirementEquity  (≤ 1)
  *      σ_eff      = σ_mkt × volState        (vol clustering)
@@ -122,6 +139,15 @@ export function runMonteCarlo(profile, baseRates, pots, retirementOpts, opts = {
       ? Math.min(1, Math.max(0, postRetirementEquity / preRetirementEquity))
       : 0;
 
+  // Steady-state fraction of years spent in a bear regime.
+  // Used to pre-shift base rates so E[simulatedRate] ≈ sliderValue (see docstring).
+  const pBearSS = pEnter / (pEnter + pExit);
+  const compSavings     = pBearSS * bearSeverity;
+  const compRetirement  = pBearSS * bearSeverity * volRatio;
+  const compWage        = pBearSS * bearSeverity * 0.25;
+  const compInfl        = pBearSS * bearSeverity * 0.15;
+  const compBoe         = pBearSS * bearSeverity * 0.10;
+
   const σ_mkt = volatility * 0.08;
   const σ_mac = volatility * 0.008;
   const φ = Math.max(0, Math.min(0.99, crisisPersistence));
@@ -169,12 +195,13 @@ export function runMonteCarlo(profile, baseRates, pots, retirementOpts, opts = {
         // Investment rates: no floor (see module docstring).
         // retirementRate shock is scaled by volRatio — a de-risked (lower-equity)
         // portfolio suffers less volatility and a smaller bear-market drag.
-        savingsRate: baseRates.savingsRate - Δ + z1 * σ_eff,
-        retirementRate: baseRates.retirementRate - Δ * volRatio + z1 * σ_eff * volRatio,
-        // Macro rates: mild reflation during crises; floor at −5%
-        inflationRate: Math.max(-0.05, baseRates.inflationRate + Δ * 0.15 + z2 * σ_mac),
-        boeRate: Math.max(-0.05, baseRates.boeRate + Δ * 0.1 + z2 * σ_mac),
-        wageGrowthRate: baseRates.wageGrowthRate - Δ * 0.25 + z2 * σ_mac * 0.5,
+        // comp* offsets ensure E[rate] ≈ slider value across the full cycle.
+        savingsRate: baseRates.savingsRate + compSavings - Δ + z1 * σ_eff,
+        retirementRate: baseRates.retirementRate + compRetirement - Δ * volRatio + z1 * σ_eff * volRatio,
+        // Macro rates: bear pushes inflation/BoE up, so compensation subtracts.
+        inflationRate: Math.max(-0.05, baseRates.inflationRate - compInfl + Δ * 0.15 + z2 * σ_mac),
+        boeRate: Math.max(-0.05, baseRates.boeRate - compBoe + Δ * 0.1 + z2 * σ_mac),
+        wageGrowthRate: baseRates.wageGrowthRate + compWage - Δ * 0.25 + z2 * σ_mac * 0.5,
       });
     }
 
