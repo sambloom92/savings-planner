@@ -265,15 +265,17 @@ function applyGIAWithdrawal(bal, costBasis, gross) {
  * from the current year to their nominated retirement age.
  *
  * @param {{
- *   currentAge:           number,         - Current age in whole years
- *   retirementAge:        number,         - Target retirement age (> currentAge)
- *   currentYear?:         number,         - Starting calendar year (default 2025)
- *   grossIncome:          number,         - Current annual gross employment income (£)
- *   employeePensionRate:  number,         - Employee pension as fraction of gross (0–1)
- *   employerPensionRate:  number,         - Employer pension as fraction of gross (0–1)
- *   niContributionYears:  number,         - Existing NI qualifying years already accrued
- *   statePensionAge?:     number,         - State pension age (default 67)
- *   studentLoanPlan?:     string | null   - 'plan1'|'plan2'|'plan4'|'plan5'|'postgrad'|null
+ *   currentAge:             number,         - Current age in whole years
+ *   retirementAge:          number,         - Target retirement age (> currentAge)
+ *   currentYear?:           number,         - Starting calendar year (default 2025)
+ *   grossIncome:            number,         - Current annual gross employment income (£)
+ *   annualLivingExpenses?:  number,         - Non-debt living costs at today's prices (£, default 0)
+ *                                             Inflated each year; savings = disposable − living expenses.
+ *   employeePensionRate:    number,         - Employee pension as fraction of gross (0–1)
+ *   employerPensionRate:    number,         - Employer pension as fraction of gross (0–1)
+ *   niContributionYears:    number,         - Existing NI qualifying years already accrued
+ *   statePensionAge?:       number,         - State pension age (default 67)
+ *   studentLoanPlan?:       string | null   - 'plan1'|'plan2'|'plan4'|'plan5'|'postgrad'|null
  * }} profile
  *
  * @param {{
@@ -339,7 +341,7 @@ export function projectLifecycle(
     retirementAge,
     currentYear = 2025,
     grossIncome,
-    annualSavings = null, // fixed annual ISA+GIA savings in £ (real terms); if null, derived from salary
+    annualLivingExpenses = 0, // non-debt living costs in today's £; inflated each year
     employeePensionRate,
     employerPensionRate,
     niContributionYears,
@@ -687,14 +689,13 @@ export function projectLifecycle(
 
     // ── Savings allocation (ISA first, then GIA) ────────────────────────
     const totalDebtPayments = round2(mortgagePaymentThisYear + unsecuredPaymentsThisYear);
-    // If a fixed annualSavings amount is supplied, use it (inflation-adjusted); otherwise
-    // derive available savings from net take-home minus debt payments (legacy behaviour).
-    let availableForSavings;
-    if (annualSavings !== null) {
-      availableForSavings = round2(annualSavings * cumulInflation);
-    } else {
-      availableForSavings = round2(netTakeHome - totalDebtPayments);
-    }
+    // Living expenses scale with inflation from their today's-money baseline.
+    const livingExpenses = round2(annualLivingExpenses * cumulInflation);
+    // Savings = what's left of take-home after debts and living costs.
+    // Floored at 0 — overspend is not modelled; the user should adjust inputs.
+    const availableForSavings = round2(
+      Math.max(0, netTakeHome - totalDebtPayments - livingExpenses)
+    );
     const isaContrib = round2(Math.min(Math.max(0, availableForSavings), ISA_LIMIT));
     const giaContrib = round2(Math.max(0, availableForSavings - isaContrib));
 
@@ -783,6 +784,7 @@ export function projectLifecycle(
 
       mortgagePayment: mortgagePaymentThisYear,
       unsecuredDebtPayments: unsecuredPaymentsThisYear,
+      livingExpenses,
       availableForSavings,
 
       isaContribution: isaContrib,

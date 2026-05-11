@@ -58,12 +58,12 @@ const DEFAULTS = {
   currentAge: 28,
   retirementAge: 65,
   grossIncome: 45_000,
+  annualLivingExpenses: 20_000,
   niContributionYears: 3,
   statePensionAge: 67,
   employeePensionPct: 5,
   employerPensionPct: 3,
   pensionBalance: 10_000,
-  annualSavings: 12_000,
   equityReturnPct: 7,
   bondReturnPct: 3,
   preRetirementEquityPct: 80,
@@ -591,6 +591,17 @@ function TabContent({ tab, p, set }) {
             help="Your pre-tax annual salary. Used to calculate pension contributions (employee and employer). Wage growth applies annually."
           />
           <Slider
+            label="Pre-Retirement Living Expenses"
+            value={p.annualLivingExpenses}
+            min={0}
+            max={80_000}
+            step={500}
+            format={fmtGBP}
+            onChange={set('annualLivingExpenses')}
+            allowInput
+            help="Your annual non-debt living costs during the working years, in today's money — food, utilities, transport, insurance, leisure, etc. Do not include mortgage or debt repayments; those are entered separately. This amount is inflated each year to keep real purchasing power constant. Annual savings are derived automatically as: net take-home − debt payments − living expenses. Retirement spending is a separate parameter in the Retire tab."
+          />
+          <Slider
             label="NI Qualifying Years"
             value={p.niContributionYears}
             min={0}
@@ -662,17 +673,6 @@ function TabContent({ tab, p, set }) {
     case 'Savings':
       return (
         <>
-          <Slider
-            label="Annual Savings"
-            value={p.annualSavings}
-            min={0}
-            max={60_000}
-            step={500}
-            format={fmtGBP}
-            onChange={set('annualSavings')}
-            allowInput
-            help="How much you save per year, in today's money. This amount grows with inflation each year so the real (purchasing-power) value stays constant. Savings fill your ISA first (up to £20,000/yr), with any excess going into your GIA."
-          />
           <SecHead>ISA</SecHead>
           <Slider
             label="Starting ISA Balance"
@@ -1434,6 +1434,13 @@ function YearDetailPanel({ row, mobile = false }) {
               color="#fb923c"
             />
           )}
+          {row.livingExpenses != null && row.livingExpenses > 0 && (
+            <DetailLine
+              label="− Living expenses"
+              value={fmtGBP(row.livingExpenses)}
+              color="var(--text-muted)"
+            />
+          )}
           <DetailLine label="→ ISA" value={fmtGBP(row.isaContribution)} color="#34d399" />
           <DetailLine label="→ GIA" value={fmtGBP(row.giaContribution)} color="#e8b84b" />
           <Divider />
@@ -1931,7 +1938,7 @@ export default function App() {
         currentAge: p.currentAge,
         retirementAge: p.retirementAge,
         grossIncome: p.grossIncome,
-        annualSavings: p.annualSavings,
+        annualLivingExpenses: p.annualLivingExpenses,
         employeePensionRate: p.employeePensionPct / 100,
         employerPensionRate: p.employerPensionPct / 100,
         niContributionYears: p.niContributionYears,
