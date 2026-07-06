@@ -61,6 +61,7 @@ const DEFAULTS = {
   annualLivingExpenses: 20_000,
   niContributionYears: 3,
   statePensionAge: 67,
+  statePensionDeferralYears: 0,
   employeePensionPct: 5,
   employerPensionPct: 3,
   pensionBalance: 10_000,
@@ -609,7 +610,7 @@ function TabContent({ tab, p, set }) {
             step={1}
             format={fmtYrs}
             onChange={set('niContributionYears')}
-            help="National Insurance qualifying years already accrued before the projection starts. Each working year above the Lower Earnings Limit (£6,396) adds one year. Full state pension requires 35 qualifying years; at least 10 are needed for any entitlement."
+            help="National Insurance qualifying years already accrued before the projection starts. Each working year above the Lower Earnings Limit (£6,500 in 2025/26) adds one year. Full state pension requires 35 qualifying years; at least 10 are needed for any entitlement. If you plan to buy voluntary Class 3 top-ups for missing years, include those years here — each year currently costs around £900 and adds 1/35th of the full pension for life."
           />
           <Slider
             label="State Pension Age"
@@ -620,6 +621,16 @@ function TabContent({ tab, p, set }) {
             format={fmtAge}
             onChange={set('statePensionAge')}
             help="Age at which your state pension begins. Currently 66 for most people, rising to 67 by 2028. If you retire earlier, state pension income starts later in the drawdown phase."
+          />
+          <Slider
+            label="State Pension Deferral"
+            value={p.statePensionDeferralYears}
+            min={0}
+            max={10}
+            step={1}
+            format={fmtYrs}
+            onChange={set('statePensionDeferralYears')}
+            help="Years to defer claiming your state pension past state pension age. Each deferred year permanently increases the amount by about 5.8% (1% per 9 weeks, new state pension rules). Deferring means more income later at the cost of drawing more from your pots in the gap years."
           />
         </>
       );
@@ -1944,6 +1955,7 @@ export default function App() {
         employerPensionRate: p.employerPensionPct / 100,
         niContributionYears: p.niContributionYears,
         statePensionAge: p.statePensionAge,
+        statePensionDeferralYears: p.statePensionDeferralYears,
         studentLoanPlan: p.studentLoanPlan || null,
       };
       const rates = buildRates(p);
@@ -2023,6 +2035,7 @@ export default function App() {
           employerPensionRate: p.employerPensionPct / 100,
           niContributionYears: p.niContributionYears,
           statePensionAge: p.statePensionAge,
+          statePensionDeferralYears: p.statePensionDeferralYears,
           studentLoanPlan: p.studentLoanPlan || null,
         };
         const mcRates = buildRates(p);
@@ -2081,7 +2094,10 @@ export default function App() {
     if (!realTerms || !summary) return summary;
     const retF = Math.pow(1 / (1 + inflRate), p.retirementAge - p.currentAge);
     // State pension is nominal at statePensionAge, so use that age for its real-terms factor
-    const spF = Math.pow(1 / (1 + inflRate), Math.max(0, summary.statePensionAge - p.currentAge));
+    const spF = Math.pow(
+      1 / (1 + inflRate),
+      Math.max(0, (summary.statePensionStartAge ?? summary.statePensionAge) - p.currentAge)
+    );
     return {
       ...summary,
       pensionPot: summary.pensionPot * retF,
@@ -2581,8 +2597,8 @@ export default function App() {
                     subtitle={
                       displaySummary.projectedStatePension > 0
                         ? displaySummary.statePensionEligibleAtRetirement
-                          ? `From age ${displaySummary.statePensionAge} · ${displaySummary.niYearsAccrued} NI yrs`
-                          : `Starts age ${displaySummary.statePensionAge} · ${displaySummary.niYearsAccrued} NI yrs`
+                          ? `From age ${displaySummary.statePensionStartAge ?? displaySummary.statePensionAge} · ${displaySummary.niYearsAccrued} NI yrs`
+                          : `Starts age ${displaySummary.statePensionStartAge ?? displaySummary.statePensionAge} · ${displaySummary.niYearsAccrued} NI yrs`
                         : `Only ${displaySummary.niYearsAccrued} qualifying NI yrs — need 10`
                     }
                     help="Your projected state pension, based on total NI qualifying years accrued by retirement. This is a real government entitlement (inflation-linked via triple lock), not an investment return. It offsets retirement expenses before drawing from personal pots."

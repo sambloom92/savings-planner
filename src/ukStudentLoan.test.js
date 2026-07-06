@@ -241,8 +241,11 @@ describe('calculateAnnualInterestRate — plan 2', () => {
 // ---------------------------------------------------------------------------
 
 describe('calculateAnnualInterestRate — plans 4, 5, postgrad', () => {
-  it('plan4: returns RPI', () => {
+  it('plan4: returns min(RPI, BoE+1%) — same rule as plan 1', () => {
+    // RPI below the cap → RPI applies
     assertApprox(calculateAnnualInterestRate('plan4', 50_000, 0.031), 0.031);
+    // RPI above BoE+1% → capped at BoE+1%
+    assertApprox(calculateAnnualInterestRate('plan4', 50_000, 0.09, 0.05), 0.06);
   });
 
   it('plan5: returns RPI (no income-based addition)', () => {

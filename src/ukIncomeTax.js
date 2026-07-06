@@ -31,11 +31,33 @@ function round2(n) {
   return Math.round(n * 100) / 100;
 }
 
+function round4(n) {
+  return Math.round(n * 10_000) / 10_000;
+}
+
 // Returns the effective personal allowance given gross income and scaled thresholds.
 function effectivePersonalAllowance(grossIncome, pa, taperThreshold) {
   if (grossIncome <= taperThreshold) return pa;
   const reduction = Math.floor((grossIncome - taperThreshold) / 2);
   return Math.max(0, pa - reduction);
+}
+
+/**
+ * Returns the taxable income (gross minus the effective personal allowance,
+ * including the £100k taper) for a given gross income. Exposed so other
+ * modules — e.g. the CGT calculation, whose basic-rate room depends on
+ * taxable income rather than gross — can share the exact same PA logic.
+ *
+ * @param {number} grossIncome - Gross annual income in GBP (>= 0)
+ * @param {number} [scaleFactor=1] - Threshold scale factor (fiscal drag)
+ * @returns {number} Taxable income in GBP
+ */
+export function calculateTaxableIncome(grossIncome, scaleFactor = 1) {
+  if (typeof grossIncome !== 'number' || !isFinite(grossIncome) || grossIncome < 0)
+    throw new TypeError('grossIncome must be a non-negative finite number');
+  const pa = round2(PERSONAL_ALLOWANCE * scaleFactor);
+  const tt = round2(TAPER_THRESHOLD * scaleFactor);
+  return Math.max(0, grossIncome - effectivePersonalAllowance(grossIncome, pa, tt));
 }
 
 /**
@@ -74,17 +96,18 @@ export function calculateIncomeTax(grossIncome, scaleFactor = 1) {
   const personalAllowance = effectivePersonalAllowance(grossIncome, pa, tt);
   const taxableIncome = Math.max(0, grossIncome - personalAllowance);
 
-  const basicRateBand = Math.max(0, brl - personalAllowance);
+  // Bands are fixed widths of *taxable* income (independent of any PA taper):
+  //   basic:      first £37,700 of taxable income
+  //   higher:     £37,700 – £125,140 of taxable income
+  //   additional: above £125,140 of taxable income
+  // This is what produces the 60% effective marginal rate between £100,000
+  // and £125,140 — the tapered allowance pushes income into the higher band.
+  const basicRateBand = Math.max(0, brl - pa);
   const basicRateTax = Math.min(taxableIncome, basicRateBand) * BASIC_RATE;
 
-  const higherRateBand = Math.max(0, art - brl);
-  const incomeInHigherBand = Math.max(
-    0,
-    Math.min(taxableIncome, art - personalAllowance) - basicRateBand
-  );
-  const higherRateTax = Math.min(incomeInHigherBand, higherRateBand) * HIGHER_RATE;
+  const higherRateTax = Math.max(0, Math.min(taxableIncome, art) - basicRateBand) * HIGHER_RATE;
 
-  const additionalRateTax = Math.max(0, grossIncome - art) * ADDITIONAL_RATE;
+  const additionalRateTax = Math.max(0, taxableIncome - art) * ADDITIONAL_RATE;
 
   const totalTax = basicRateTax + higherRateTax + additionalRateTax;
   const effectiveRate = grossIncome > 0 ? totalTax / grossIncome : 0;
@@ -97,7 +120,7 @@ export function calculateIncomeTax(grossIncome, scaleFactor = 1) {
     higherRateTax: round2(higherRateTax),
     additionalRateTax: round2(additionalRateTax),
     totalTax: round2(totalTax),
-    effectiveRate: round2(effectiveRate),
+    effectiveRate: round4(effectiveRate),
     netIncome: round2(grossIncome - totalTax),
     taxYear: TAX_YEAR,
   };

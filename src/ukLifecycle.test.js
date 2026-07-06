@@ -71,12 +71,12 @@ function run(profile = baseProfile, rates = baseRates, pots = {}) {
 //   isa:     (0+20,000)×1.07                  = 21,400
 //   gia:     (0+10,879.60)×1.07               = 11,641.17  (growth=761.57)
 //   niYears: 10+1                             = 11
-//   statePension: (11/35)×11,502.40           = 3,615.04
+//   statePension: (11/35)×11,973              = 3,762.94
 // ---------------------------------------------------------------------------
 
 describe('LIFECYCLE_CONSTANTS', () => {
-  it('state pension full annual amount is £11,502.40', () => {
-    assert.equal(LIFECYCLE_CONSTANTS.statePension.fullAnnualAmount, 11_502.4);
+  it('state pension full annual amount is £11,973 (2025/26: £230.25/week)', () => {
+    assert.equal(LIFECYCLE_CONSTANTS.statePension.fullAnnualAmount, 11_973);
   });
 
   it('requires 35 qualifying years for full state pension, minimum 10', () => {
@@ -201,6 +201,56 @@ describe('baseline one-year income and tax calculation', () => {
     // With 5% sacrifice: tax on 38,000 = 5,086 → saving = 400 (= 2,000×0.20)
     const y = run().yearlyBreakdown[0];
     assert.ok(y.incomeTax < 5_486, 'tax reduced by salary sacrifice');
+  });
+});
+
+describe('high earner above the additional-rate threshold', () => {
+  it('income tax on £142,500 adjusted gross reflects PA taper and fixed bands', () => {
+    // £150k gross, 5% sacrifice → adjustedGross = 142,500; PA fully tapered.
+    // taxable = 142,500: basic 37,700×20% = 7,540; higher 87,440×40% = 34,976;
+    // additional (142,500−125,140)×45% = 7,812 → 50,328
+    const r = run({ ...baseProfile, grossIncome: 150_000 });
+    const y = r.yearlyBreakdown[0];
+    assertApprox(y.adjustedGrossIncome, 142_500, 'adjustedGross');
+    assertApprox(y.incomeTax, 50_328, 'incomeTax');
+  });
+
+  it('netTakeHome for £150k gross is gross − sacrifice − tax − NI', () => {
+    // NI on 142,500: (50,270−12,570)×8% + (142,500−50,270)×2% = 3,016 + 1,844.60
+    const y = run({ ...baseProfile, grossIncome: 150_000 }).yearlyBreakdown[0];
+    assertApprox(y.employeeNI, 4_860.6, 'employeeNI');
+    assertApprox(y.netTakeHome, 150_000 - 7_500 - 50_328 - 4_860.6, 'netTakeHome');
+  });
+});
+
+describe('living expenses', () => {
+  const expProfile = { ...baseProfile, retirementAge: 33, annualLivingExpenses: 20_000 };
+
+  it('year 1 living expenses equal the today-money input', () => {
+    const y = run(expProfile).yearlyBreakdown[0];
+    assertApprox(y.livingExpenses, 20_000, 'livingExpenses year 1');
+  });
+
+  it('living expenses scale with inflation in later years', () => {
+    const rows = run(expProfile).yearlyBreakdown;
+    assertApprox(rows[1].livingExpenses, 20_600, 'year 2 = 20,000 × 1.03');
+    assertApprox(rows[2].livingExpenses, 21_218, 'year 3 = 20,000 × 1.03²');
+  });
+
+  it('availableForSavings = netTakeHome − debt payments − living expenses', () => {
+    const y = run(expProfile).yearlyBreakdown[0];
+    assertApprox(
+      y.availableForSavings,
+      y.netTakeHome - y.mortgagePayment - y.unsecuredDebtPayments - y.livingExpenses,
+      'availableForSavings'
+    );
+  });
+
+  it('availableForSavings floors at zero when expenses exceed take-home', () => {
+    const y = run({ ...expProfile, annualLivingExpenses: 100_000 }).yearlyBreakdown[0];
+    assert.equal(y.availableForSavings, 0);
+    assert.equal(y.isaContribution, 0);
+    assert.equal(y.giaContribution, 0);
   });
 });
 
@@ -472,18 +522,18 @@ describe('NI qualifying years and state pension', () => {
   it('state pension pro-rated: 11 qualifying years, triple-lock grown to statePensionAge', () => {
     // baseProfile: niContributionYears=10, 1 year → 11 NI years
     // triplelock = max(wageGrowth=0.03, inflation=0.03, 0.025) = 0.03
-    // base = (11/35)*11502.40 = 3615.04; grown by 1.03^(67-30) = 2.9852 → 10791.71
+    // base = (11/35)*11973 = 3762.94; grown by 1.03^(67-30) = 2.9852 → 11233.23
     assertApprox(
       run().summary.projectedStatePension,
-      10_791.71,
+      11_233.23,
       'state pension 11 years triple-locked'
     );
   });
 
   it('state pension capped at full amount when ≥35 qualifying years, triple-lock grown', () => {
     const r = run({ ...baseProfile, niContributionYears: 34, retirementAge: 32 });
-    // 34 + 2 years = 36 qualifying, capped at 35; 11502.40 * 1.03^37 → 34337.27
-    assertApprox(r.summary.projectedStatePension, 34_337.27, 'full state pension triple-locked');
+    // 34 + 2 years = 36 qualifying, capped at 35; 11973 * 1.03^37 → 35742.12
+    assertApprox(r.summary.projectedStatePension, 35_742.12, 'full state pension triple-locked');
   });
 
   it('no state pension entitlement when fewer than 10 qualifying years', () => {
@@ -503,6 +553,87 @@ describe('NI qualifying years and state pension', () => {
     const r = run({ ...baseProfile, retirementAge: 65, statePensionAge: 65 });
     assert.equal(r.summary.statePensionEligibleAtRetirement, true);
     assert.equal(r.summary.statePensionAge, 65);
+  });
+});
+
+describe('state pension deferral', () => {
+  const retOpts = { targetNetAnnualExpenses: 10_000, maxAge: 72 };
+  const spProfile = {
+    ...baseProfile,
+    currentAge: 60,
+    retirementAge: 61,
+    niContributionYears: 35,
+    statePensionAge: 63,
+  };
+
+  it('no deferral: payments start at statePensionAge', () => {
+    const r = projectLifecycle(spProfile, baseRates, {}, retOpts);
+    const rows = r.yearlyBreakdown.filter((row) => row.phase === 'retirement');
+    const at62 = rows.find((row) => row.age === 62);
+    const at63 = rows.find((row) => row.age === 63);
+    assert.equal(at62.statePensionGross, 0);
+    assert.ok(at63.statePensionGross > 0);
+  });
+
+  it('deferral delays the start age', () => {
+    const r = projectLifecycle(
+      { ...spProfile, statePensionDeferralYears: 2 },
+      baseRates,
+      {},
+      retOpts
+    );
+    const rows = r.yearlyBreakdown.filter((row) => row.phase === 'retirement');
+    assert.equal(rows.find((row) => row.age === 64).statePensionGross, 0);
+    assert.ok(rows.find((row) => row.age === 65).statePensionGross > 0);
+  });
+
+  it('each deferred year uplifts the amount by ~5.78% (linear)', () => {
+    const base = projectLifecycle(spProfile, baseRates, {}, retOpts);
+    const deferred = projectLifecycle(
+      { ...spProfile, statePensionDeferralYears: 2 },
+      baseRates,
+      {},
+      retOpts
+    );
+    const baseAt66 = base.yearlyBreakdown.find((row) => row.age === 66).statePensionGross;
+    const defAt66 = deferred.yearlyBreakdown.find((row) => row.age === 66).statePensionGross;
+    // Same year, same triple-lock growth — only the uplift differs
+    const upliftObserved = defAt66 / baseAt66;
+    assert.ok(
+      Math.abs(upliftObserved - 1.1156) < 0.001,
+      `expected ×1.1156 uplift, got ×${upliftObserved.toFixed(4)}`
+    );
+  });
+
+  it('summary projectedStatePension reflects deferral start age and uplift', () => {
+    const base = projectLifecycle(spProfile, baseRates, {}, retOpts);
+    const deferred = projectLifecycle(
+      { ...spProfile, statePensionDeferralYears: 2 },
+      baseRates,
+      {},
+      retOpts
+    );
+    assert.equal(base.summary.statePensionStartAge, 63);
+    assert.equal(deferred.summary.statePensionStartAge, 65);
+    assert.ok(deferred.summary.projectedStatePension > base.summary.projectedStatePension);
+  });
+});
+
+describe('tapered annual allowance for high earners', () => {
+  it('annualAllowance is £60,000 for ordinary incomes', () => {
+    const y = run().yearlyBreakdown[0];
+    assert.equal(y.annualAllowance, 60_000);
+    assert.equal(y.annualAllowanceBreached, false);
+  });
+
+  it('annualAllowance tapers for very high earners', () => {
+    // £400k gross, 5% sacrifice → threshold income 380k, adjusted 412k
+    // reduction = (412,000 − 260,000)/2 = 76,000 → floored at £10,000
+    const r = run({ ...baseProfile, grossIncome: 400_000 });
+    const y = r.yearlyBreakdown[0];
+    assert.equal(y.annualAllowance, 10_000);
+    // contributions = 8% of 400k = 32,000 > 10,000 → breach flagged
+    assert.equal(y.annualAllowanceBreached, true);
   });
 });
 

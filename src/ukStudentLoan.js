@@ -11,7 +11,7 @@
  * Interest rates (2025/26):
  *   Plan 1    : min(RPI, Bank of England base rate + 1%)
  *   Plan 2    : RPI + sliding 0–3% on income between £28,470 and £49,130
- *   Plan 4    : RPI
+ *   Plan 4    : min(RPI, Bank of England base rate + 1%) — same rule as Plan 1
  *   Plan 5    : RPI
  *   Postgrad  : RPI + 3%
  */
@@ -108,7 +108,7 @@ function round4(n) {
  *
  *   Plan 1   : min(RPI, BoE base rate + 1%)
  *   Plan 2   : RPI + 0–3% sliding with income between £28,470 and £49,130
- *   Plan 4   : RPI
+ *   Plan 4   : min(RPI, BoE base rate + 1%) — same rule as Plan 1
  *   Plan 5   : RPI
  *   Postgrad : RPI + 3%
  *
@@ -124,6 +124,7 @@ export function calculateAnnualInterestRate(planKey, grossIncome, rpi, boeRate =
   switch (planKey) {
     // UK rules: student loan interest cannot be negative, floored at 0%
     case 'plan1':
+    case 'plan4':
       return round4(Math.max(0, Math.min(rpi, boeRate + 0.01)));
 
     case 'plan2': {
@@ -135,7 +136,6 @@ export function calculateAnnualInterestRate(planKey, grossIncome, rpi, boeRate =
       return round4(Math.max(0, rpi + fraction * 0.03));
     }
 
-    case 'plan4':
     case 'plan5':
       return round4(Math.max(0, rpi));
 
@@ -190,6 +190,11 @@ export function calculateStudentLoan(grossIncome, planKey) {
  *
  * Write-off occurs in the year equal to repaymentStartYear + writeOffYears;
  * repayments are still made in all prior years.
+ *
+ * Note on granularity: the statutory rule cancels the loan in the April
+ * following the Nth anniversary of the first repayment. This annual model
+ * approximates that as a whole calendar year, so the write-off can differ
+ * from the statutory date by up to one year.
  *
  * @param {string} planKey
  * @param {number} initialBalance       - Opening loan balance in GBP

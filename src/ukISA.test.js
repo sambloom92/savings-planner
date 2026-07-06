@@ -69,8 +69,14 @@ describe('input validation — projectISA', () => {
     assert.throws(() => isa(10_000, proj, { startYear: '2025' }), RangeError);
   });
 
-  it('throws TypeError for negative growthRate', () => {
-    assert.throws(() => isa(10_000, [{ growthRate: -0.01 }]), TypeError);
+  it('accepts negative growthRate (falling markets), rejects below −100%', () => {
+    assert.doesNotThrow(() => isa(10_000, [{ growthRate: -0.2 }]));
+    assert.throws(() => isa(10_000, [{ growthRate: -1.5 }]), TypeError);
+  });
+
+  it('negative growth reduces the balance', () => {
+    const r = isa(10_000, [{ growthRate: -0.25 }]);
+    assertApprox(r.finalBalance, 7_500, 'balance after −25%');
   });
 
   it('throws TypeError for negative contributions', () => {
