@@ -29,7 +29,7 @@
  *   gov.uk/new-state-pension
  */
 
-import { calculateIncomeTax } from './ukIncomeTax.js';
+import { calculateIncomeTax, calculateTaxableIncome } from './ukIncomeTax.js';
 import { calculateNationalInsurance } from './ukNationalInsurance.js';
 import {
   calculateStudentLoan,
@@ -38,7 +38,7 @@ import {
 } from './ukStudentLoan.js';
 import { calculateMonthlyMortgagePayment } from './ukDebt.js';
 import { ISA_CONSTANTS } from './ukISA.js';
-import { PENSION_CONSTANTS, calculatePCLS } from './ukPension.js';
+import { PENSION_CONSTANTS, calculatePCLS, taperedAnnualAllowance } from './ukPension.js';
 import { GIA_CGT_CONSTANTS } from './ukGIA.js';
 
 const TAX_YEAR = '2025/26';
@@ -49,10 +49,13 @@ const TAX_YEAR = '2025/26';
 
 export const LIFECYCLE_CONSTANTS = {
   statePension: {
-    fullAnnualAmount: 11_502.4, // 2025/26: £221.20/week × 52
+    fullAnnualAmount: 11_973, // 2025/26: £230.25/week × 52
     qualifyingYearsForFull: 35,
     minimumQualifyingYears: 10,
     defaultStatePensionAge: 67,
+    // New state pension deferral: +1% per 9 weeks deferred ≈ 5.78%/year (linear,
+    // non-compounding). Source: gov.uk/deferring-state-pension
+    deferralUpliftPerYear: 0.0578,
   },
 };
 
@@ -165,8 +168,10 @@ const PERSONAL_ALLOWANCE = 12_570;
  */
 function pensionGrossForNet(netTarget, maxBalance, otherIncome, scaleFactor = 1) {
   if (netTarget <= 0 || maxBalance <= 0) return 0;
+  // Upper bound: the average income tax rate never reaches 50%, so the gross
+  // needed is always under 2× the net target (plus slack for banding).
   let lo = 0,
-    hi = Math.min(maxBalance, netTarget + 300_000);
+    hi = Math.min(maxBalance, netTarget * 2 + 100_000);
   for (let i = 0; i < 64; i++) {
     const mid = (lo + hi) / 2;
     const margTax =
@@ -192,8 +197,9 @@ function ufplsGrossForNet(
   lsaRemaining = Infinity
 ) {
   if (netTarget <= 0 || maxBalance <= 0) return 0;
+  // Same headroom logic as pensionGrossForNet: gross < 2 × net + slack.
   let lo = 0,
-    hi = Math.min(maxBalance, netTarget + 300_000);
+    hi = Math.min(maxBalance, netTarget * 2 + 100_000);
   for (let i = 0; i < 64; i++) {
     const mid = (lo + hi) / 2;
     const taxFree = Math.min(0.25 * mid, lsaRemaining);
@@ -212,19 +218,24 @@ function ufplsGrossForNet(
  * annualExempt defaults to the published annual exempt amount; pass a lower
  * value (including 0) when part of the exemption has already been used
  * elsewhere in the same tax year.
+ * Gains stack on top of taxable income (gross income minus the personal
+ * allowance, including the £100k taper): the unused part of the £37,700
+ * basic-rate band is taxed at 18%, the remainder at 24%.
  */
 function computeGIACGT(
   gross,
   bal,
   costBasis,
   otherIncome,
-  annualExempt = GIA_CGT_CONSTANTS.annualExemptAmount
+  annualExempt = GIA_CGT_CONSTANTS.annualExemptAmount,
+  scaleFactor = 1
 ) {
   if (gross <= 0 || bal <= 0) return 0;
   const gainFrac = Math.max(0, (bal - costBasis) / bal);
   const totalGain = gross * gainFrac; // keep unrounded — intermediate value used in subtraction
   const taxable = Math.max(0, totalGain - annualExempt);
-  const basicRoom = Math.max(0, GIA_CGT_CONSTANTS.basicRateLimit - otherIncome);
+  const taxableIncome = calculateTaxableIncome(Math.max(0, otherIncome), scaleFactor);
+  const basicRoom = Math.max(0, GIA_CGT_CONSTANTS.basicRateBandWidth * scaleFactor - taxableIncome);
   const atBasic = Math.min(taxable, basicRoom);
   const atHigher = taxable - atBasic;
   return round2(atBasic * GIA_CGT_CONSTANTS.basicRate + atHigher * GIA_CGT_CONSTANTS.higherRate);
@@ -234,7 +245,7 @@ function computeGIACGT(
  * Binary-search for the gross GIA withdrawal that, after CGT, yields
  * exactly netTarget net.
  */
-function giaGrossForNet(netTarget, bal, costBasis, otherIncome, annualExempt = 0) {
+function giaGrossForNet(netTarget, bal, costBasis, otherIncome, annualExempt = 0, scaleFactor = 1) {
   if (netTarget <= 0 || bal <= 0) return 0;
   // When there are no gains, net equals gross
   if (costBasis >= bal) return Math.min(netTarget, bal);
@@ -242,7 +253,7 @@ function giaGrossForNet(netTarget, bal, costBasis, otherIncome, annualExempt = 0
     hi = bal;
   for (let i = 0; i < 64; i++) {
     const mid = (lo + hi) / 2;
-    const cgt = computeGIACGT(mid, bal, costBasis, otherIncome, annualExempt);
+    const cgt = computeGIACGT(mid, bal, costBasis, otherIncome, annualExempt, scaleFactor);
     if (mid - cgt < netTarget) lo = mid;
     else hi = mid;
   }
@@ -275,6 +286,10 @@ function applyGIAWithdrawal(bal, costBasis, gross) {
  *   employerPensionRate:    number,         - Employer pension as fraction of gross (0–1)
  *   niContributionYears:    number,         - Existing NI qualifying years already accrued
  *   statePensionAge?:       number,         - State pension age (default 67)
+ *   statePensionDeferralYears?: number,     - Years to defer the state pension past
+ *                                             statePensionAge (default 0). Each deferred
+ *                                             year raises the weekly amount by 1% per
+ *                                             9 weeks ≈ 5.8% (new state pension rules).
  *   studentLoanPlan?:       string | null   - 'plan1'|'plan2'|'plan4'|'plan5'|'postgrad'|null
  * }} profile
  *
@@ -346,6 +361,7 @@ export function projectLifecycle(
     employerPensionRate,
     niContributionYears,
     statePensionAge = LIFECYCLE_CONSTANTS.statePension.defaultStatePensionAge,
+    statePensionDeferralYears = 0,
     studentLoanPlan = null,
   } = profile;
 
@@ -364,6 +380,7 @@ export function projectLifecycle(
 
   assertNonNegativeInteger(niContributionYears, 'niContributionYears');
   assertPositiveInteger(statePensionAge, 'statePensionAge');
+  assertNonNegativeInteger(statePensionDeferralYears, 'statePensionDeferralYears');
 
   if (studentLoanPlan !== null && !STUDENT_LOAN_PLANS[studentLoanPlan])
     throw new TypeError(`studentLoanPlan '${studentLoanPlan}' is not a recognised plan`);
@@ -545,10 +562,17 @@ export function projectLifecycle(
     const employeeContrib = round2(income * employeePensionRate);
     const employerContrib = round2(income * employerPensionRate);
     const totalPensionContrib = round2(employeeContrib + employerContrib);
-    const annualAllowanceBreached = totalPensionContrib > PENSION_CONSTANTS.annualAllowance;
 
     // Adjusted gross income after salary sacrifice
     const adjustedGross = round2(income - employeeContrib);
+
+    // High earners: annual allowance tapers when threshold income > £200k and
+    // adjusted income (threshold income + all pension contributions) > £260k.
+    const annualAllowance = taperedAnnualAllowance(
+      adjustedGross,
+      round2(adjustedGross + totalPensionContrib)
+    );
+    const annualAllowanceBreached = totalPensionContrib > annualAllowance;
 
     // ── Tax and NI (on adjustedGross, with fiscal-drag-adjusted thresholds) ──
     // thresholdScale > 1 means bands have grown (less drag); < 1 means compressed (more drag).
@@ -715,7 +739,8 @@ export function projectLifecycle(
         giaBal,
         costBasis,
         adjustedGross,
-        GIA_CGT_CONSTANTS.annualExemptAmount
+        GIA_CGT_CONSTANTS.annualExemptAmount,
+        thresholdScale
       );
       accBedIsaGross = round2(Math.min(giaBal, accGrossNeeded));
       accBedIsaCGT = computeGIACGT(
@@ -723,7 +748,8 @@ export function projectLifecycle(
         giaBal,
         costBasis,
         adjustedGross,
-        GIA_CGT_CONSTANTS.annualExemptAmount
+        GIA_CGT_CONSTANTS.annualExemptAmount,
+        thresholdScale
       );
       accBedIsaNet = round2(accBedIsaGross - accBedIsaCGT);
       const after = applyGIAWithdrawal(giaBal, costBasis, accBedIsaGross);
@@ -775,6 +801,7 @@ export function projectLifecycle(
       employeeContribution: employeeContrib,
       employerContribution: employerContrib,
       adjustedGrossIncome: adjustedGross,
+      annualAllowance,
       annualAllowanceBreached,
       incomeTax,
       employeeNI,
@@ -923,10 +950,13 @@ export function projectLifecycle(
 
       // State pension — triple-lock-adjusted nominal amount at this retirement year.
       // Grows from the 2025/26 base by max(wageGrowth, CPI, 2.5%) for each year elapsed.
+      // Deferral delays the start age and applies a linear uplift (~5.78%/deferred year).
+      const spStartAge = statePensionAge + statePensionDeferralYears;
+      const spDeferralUplift =
+        1 + LIFECYCLE_CONSTANTS.statePension.deferralUpliftPerYear * statePensionDeferralYears;
       const spGross =
-        rAge >= statePensionAge &&
-        niYears >= LIFECYCLE_CONSTANTS.statePension.minimumQualifyingYears
-          ? round2(computeStatePension(niYears) * cumulTriplelock)
+        rAge >= spStartAge && niYears >= LIFECYCLE_CONSTANTS.statePension.minimumQualifyingYears
+          ? round2(computeStatePension(niYears) * cumulTriplelock * spDeferralUplift)
           : 0;
       const spTax = round2(calculateIncomeTax(spGross, retThresholdScale).totalTax);
       const spNet = round2(spGross - spTax);
@@ -1046,7 +1076,14 @@ export function projectLifecycle(
         const grossForExempt =
           gainFrac > 0 ? GIA_CGT_CONSTANTS.annualExemptAmount / gainFrac : giaBal; // unrounded — used only in Math.min
         const draw = round2(Math.min(remaining, Math.min(grossForExempt, giaBal)));
-        giaExemptCGT = computeGIACGT(draw, giaBal, costBasis, incomeForCGT);
+        giaExemptCGT = computeGIACGT(
+          draw,
+          giaBal,
+          costBasis,
+          incomeForCGT,
+          GIA_CGT_CONSTANTS.annualExemptAmount,
+          retThresholdScale
+        );
         const net = round2(draw - giaExemptCGT);
         const after = applyGIAWithdrawal(giaBal, costBasis, draw);
         giaBal = after.bal;
@@ -1065,8 +1102,15 @@ export function projectLifecycle(
       let giaTaxableCGT = 0;
       if (remaining > 0 && giaBal > 0) {
         // annualExemptAmount already consumed in step 2; pass 0 so gains are fully taxed
-        const gross = giaGrossForNet(remaining, giaBal, costBasis, incomeForCGT, 0);
-        giaTaxableCGT = computeGIACGT(gross, giaBal, costBasis, incomeForCGT, 0);
+        const gross = giaGrossForNet(
+          remaining,
+          giaBal,
+          costBasis,
+          incomeForCGT,
+          0,
+          retThresholdScale
+        );
+        giaTaxableCGT = computeGIACGT(gross, giaBal, costBasis, incomeForCGT, 0, retThresholdScale);
         const net = round2(gross - giaTaxableCGT);
         const after = applyGIAWithdrawal(giaBal, costBasis, gross);
         giaBal = after.bal;
@@ -1134,7 +1178,8 @@ export function projectLifecycle(
           giaBal,
           costBasis,
           retIncomeForCGT,
-          retExemptRemaining
+          retExemptRemaining,
+          retThresholdScale
         );
         retBedIsaGross = round2(Math.min(giaBal, retGrossNeeded));
         retBedIsaCGT = computeGIACGT(
@@ -1142,7 +1187,8 @@ export function projectLifecycle(
           giaBal,
           costBasis,
           retIncomeForCGT,
-          retExemptRemaining
+          retExemptRemaining,
+          retThresholdScale
         );
         retBedIsaNet = round2(retBedIsaGross - retBedIsaCGT);
         const after = applyGIAWithdrawal(giaBal, costBasis, retBedIsaGross);
@@ -1246,9 +1292,13 @@ export function projectLifecycle(
   // Nominal state pension at the age it first becomes payable, triple-lock grown from today.
   // Uses the base-rate triplelock for the summary figure (independent of yearlyRatesOverride).
   const baseTriplelockForSummary = Math.max(wageGrowthRate, inflationRate, 0.025);
+  const summaryStartAge = statePensionAge + statePensionDeferralYears;
+  const summaryDeferralUplift =
+    1 + LIFECYCLE_CONSTANTS.statePension.deferralUpliftPerYear * statePensionDeferralYears;
   const projectedStatePension = round2(
     computeStatePension(niYears) *
-      Math.pow(1 + baseTriplelockForSummary, Math.max(0, statePensionAge - currentAge))
+      Math.pow(1 + baseTriplelockForSummary, Math.max(0, summaryStartAge - currentAge)) *
+      summaryDeferralUplift
   );
   const totalSavings = round2(sumPension + sumISA + sumGIA);
   const totalDebt = round2(sumMortgage + sumUnsecured + slBalance);
@@ -1275,6 +1325,7 @@ export function projectLifecycle(
       niYearsAccrued: niYears,
       projectedStatePension,
       statePensionAge,
+      statePensionStartAge: summaryStartAge,
       statePensionEligibleAtRetirement: retirementAge >= statePensionAge,
     },
     taxYear: TAX_YEAR,

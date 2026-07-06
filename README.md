@@ -18,6 +18,8 @@ A browser-based retirement savings projection dashboard for residents of England
 
 Income tax bands and NI thresholds are based on **2025/26 rates** for **England, Wales & Northern Ireland**. Scottish income tax rates are not modelled.
 
+Note for Plan 4 student loan users: Plan 4 loans are held by Scottish students, who typically pay **Scottish income tax** — which this model does not implement. Plan 4 repayments themselves (9% above the threshold) and interest are modelled correctly since they do not depend on income tax bands, but the income tax figures will follow rUK bands rather than Scottish ones.
+
 ## Getting started
 
 **Requirements:** Node 20+

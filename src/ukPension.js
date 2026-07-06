@@ -8,6 +8,12 @@
  *      deposited into the pension (inclusive of any tax relief already applied).
  *      Total contributions per year must not exceed the annual allowance (£60,000).
  *      Carry-forward of unused allowance is not modelled.
+ *      For high earners the allowance tapers — see taperedAnnualAllowance().
+ *
+ *      Money Purchase Annual Allowance (MPAA, £10,000): NOT modelled. The MPAA
+ *      applies once a pension is flexibly accessed while still contributing;
+ *      in this module the accumulation and drawdown phases never overlap, so
+ *      the restriction can never bind.
  *
  * 2. RETIREMENT EVENT — optional tax-free lump sum (PCLS)
  *      Up to 25% of the pot may be taken as a Pension Commencement Lump Sum,
@@ -47,7 +53,43 @@ export const PENSION_CONSTANTS = {
   annualAllowance: 60_000, // max total (employee + employer) per tax year
   lumpSumAllowance: 268_275, // max tax-free PCLS (pension commencement lump sum)
   maxPCLSPercentage: 0.25, // maximum percentage of pot taken as PCLS
+  // Tapered annual allowance (2025/26): for adjusted income above £260,000
+  // (and threshold income above £200,000) the allowance reduces by £1 for
+  // every £2 of excess, down to a floor of £10,000 at £360,000+.
+  taperAdjustedIncomeLimit: 260_000,
+  taperThresholdIncomeLimit: 200_000,
+  minAnnualAllowance: 10_000,
 };
+
+/**
+ * Returns the annual allowance after the high-income taper.
+ *
+ * HMRC definitions (simplified — salary sacrifice already reduces threshold
+ * income, and sacrificed amounts count back into adjusted income):
+ *   threshold income = taxable earnings after salary-sacrifice contributions
+ *   adjusted income  = threshold income + ALL pension contributions
+ *
+ * The taper applies only when BOTH limits are exceeded; the allowance then
+ * falls by £1 per £2 of adjusted income above £260,000, floored at £10,000.
+ *
+ * @param {number} thresholdIncome - Income after salary sacrifice (>= 0)
+ * @param {number} adjustedIncome  - thresholdIncome + total pension contributions (>= 0)
+ * @returns {number} Annual allowance in GBP for the year
+ */
+export function taperedAnnualAllowance(thresholdIncome, adjustedIncome) {
+  assertNonNegativeFinite(thresholdIncome, 'thresholdIncome');
+  assertNonNegativeFinite(adjustedIncome, 'adjustedIncome');
+  const {
+    annualAllowance,
+    taperAdjustedIncomeLimit,
+    taperThresholdIncomeLimit,
+    minAnnualAllowance,
+  } = PENSION_CONSTANTS;
+  if (thresholdIncome <= taperThresholdIncomeLimit || adjustedIncome <= taperAdjustedIncomeLimit)
+    return annualAllowance;
+  const reduction = Math.floor((adjustedIncome - taperAdjustedIncomeLimit) / 2);
+  return Math.max(minAnnualAllowance, annualAllowance - reduction);
+}
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -72,7 +114,8 @@ function assertNonNegativeFinite(value, name) {
  *
  * @param {number} initialBalance - Opening pot value in GBP (>= 0)
  * @param {Array<{
- *   growthRate:              number,   - Annual growth as a decimal (e.g. 0.06 = 6%)
+ *   growthRate:              number,   - Annual growth as a decimal (e.g. 0.06 = 6%).
+ *                                        May be negative (falling markets), min −1.
  *   employeeContributions?:  number,   - Gross employee deposits this year (default 0)
  *   employerContributions?:  number,   - Employer deposits this year (default 0)
  * }>} annualProjections
@@ -125,7 +168,8 @@ export function projectPensionAccumulation(initialBalance, annualProjections, op
 
     const { growthRate, employeeContributions = 0, employerContributions = 0 } = proj;
 
-    assertNonNegativeFinite(growthRate, `year ${year} growthRate`);
+    if (typeof growthRate !== 'number' || !isFinite(growthRate) || growthRate < -1)
+      throw new TypeError(`year ${year} growthRate must be a finite number >= -1`);
     assertNonNegativeFinite(employeeContributions, `year ${year} employeeContributions`);
     assertNonNegativeFinite(employerContributions, `year ${year} employerContributions`);
 
@@ -245,7 +289,7 @@ export function calculatePCLS(pensionPot, options = {}) {
  *
  * @param {number} initialFund - Crystallised fund value in GBP (>= 0)
  * @param {Array<{
- *   growthRate:     number,          - Annual growth as a decimal (>= 0)
+ *   growthRate:     number,          - Annual growth as a decimal (>= −1; may be negative)
  *   annualDrawdown: number,          - Gross amount taken from the pot this year (>= 0)
  *   otherIncome?:   number           - Other taxable income this year (state pension,
  *                                      part-time work, etc.) — used to calculate the
@@ -299,7 +343,8 @@ export function projectPensionDrawdown(initialFund, annualProjections, options =
 
     const { growthRate, annualDrawdown, otherIncome = 0 } = proj;
 
-    assertNonNegativeFinite(growthRate, `year ${year} growthRate`);
+    if (typeof growthRate !== 'number' || !isFinite(growthRate) || growthRate < -1)
+      throw new TypeError(`year ${year} growthRate must be a finite number >= -1`);
     assertNonNegativeFinite(annualDrawdown, `year ${year} annualDrawdown`);
     assertNonNegativeFinite(otherIncome, `year ${year} otherIncome`);
 

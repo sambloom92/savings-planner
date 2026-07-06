@@ -141,35 +141,65 @@ describe('personal allowance taper (£100,001 – £125,140)', () => {
     assert.equal(tax(200_000).personalAllowance, 0);
   });
 
-  it('applies effective 50% marginal rate in the taper zone (£100k–£125,140)', () => {
-    // Extra £10k gross: £10k taxed at 40% (£4k) + PA drops by £5k → £5k
-    // previously tax-free now taxed at basic rate 20% (£1k) = £5k total (50%)
+  it('applies effective 60% marginal rate in the taper zone (£100k–£125,140)', () => {
+    // Extra £10k gross: £10k taxed at 40% (£4k) + PA drops by £5k → £5k of
+    // previously tax-free income now taxed at the HIGHER rate 40% (£2k),
+    // because the taper shifts the whole income stack up. Total £6k (60%).
     const diff = tax(110_000).totalTax - tax(100_000).totalTax;
-    assertApprox(diff, 5_000, '50% effective marginal rate');
+    assertApprox(diff, 6_000, '60% effective marginal rate');
+  });
+
+  it('calculates the well-known HMRC value for £110,000', () => {
+    // PA = 12,570 − 5,000 = 7,570; taxable = 102,430
+    // basic: 37,700 × 20% = 7,540; higher: 64,730 × 40% = 25,892 → 33,432
+    assertApprox(tax(110_000).totalTax, 33_432, '£110,000');
   });
 });
 
 describe('additional rate (above £125,140)', () => {
   it('calculates tax correctly for £150,000', () => {
-    // PA = 0 (above £125,140), so basic rate covers £0–£50,270
-    // basic:      50270 × 20% = 10054
-    // higher:     74870 × 40% = 29948
+    // PA = 0 (above £125,140); taxable = 150,000. Bands are fixed widths of
+    // taxable income — the basic band is always £37,700, even with PA tapered.
+    // basic:      37700 × 20% = 7540
+    // higher:     (125140 - 37700) × 40% = 87440 × 40% = 34976
     // additional: (150000 - 125140) × 45% = 11187
     const result = tax(150_000);
-    assertApprox(result.basicRateTax, 10_054, 'basic');
-    assertApprox(result.higherRateTax, 29_948, 'higher');
+    assertApprox(result.basicRateTax, 7_540, 'basic');
+    assertApprox(result.higherRateTax, 34_976, 'higher');
     assertApprox(result.additionalRateTax, 11_187, 'additional');
-    assertApprox(result.totalTax, 51_189, 'total');
+    assertApprox(result.totalTax, 53_703, 'total');
   });
 
   it('calculates tax correctly for £200,000', () => {
     // PA = 0; additional: (200000 - 125140) × 45% = 74860 × 45% = 33687
-    // total: 10054 + 29948 + 33687 = 73689
+    // total: 7540 + 34976 + 33687 = 76203
     const result = tax(200_000);
-    assertApprox(result.basicRateTax, 10_054, 'basic');
-    assertApprox(result.higherRateTax, 29_948, 'higher');
+    assertApprox(result.basicRateTax, 7_540, 'basic');
+    assertApprox(result.higherRateTax, 34_976, 'higher');
     assertApprox(result.additionalRateTax, 33_687, 'additional');
-    assertApprox(result.totalTax, 73_689, 'total');
+    assertApprox(result.totalTax, 76_203, 'total');
+  });
+});
+
+describe('taper boundary and scale factor', () => {
+  it('calculates the exact PA-exhaustion boundary at £125,140', () => {
+    // PA = 0; taxable = 125,140
+    // basic: 37700 × 20% = 7540; higher: 87440 × 40% = 34976 → 42516
+    assertApprox(tax(125_140).totalTax, 42_516, '£125,140');
+  });
+
+  it('taper reduces PA by £1 for every full £2 (floor behaviour)', () => {
+    assert.equal(tax(100_001).personalAllowance, 12_570); // £1 over → floor(0.5) = 0
+    assert.equal(tax(100_002).personalAllowance, 12_569); // £2 over → £1 reduction
+  });
+
+  it('scaleFactor scales all bands linearly: tax(k·g, k) = k·tax(g, 1)', () => {
+    for (const gross of [30_000, 60_000, 110_000, 150_000]) {
+      const k = 1.2;
+      const scaled = calculateIncomeTax(gross * k, k).totalTax;
+      const unscaled = tax(gross).totalTax * k;
+      assert.ok(Math.abs(scaled - unscaled) <= 1, `£${gross}: ${scaled} vs ${unscaled}`);
+    }
   });
 });
 

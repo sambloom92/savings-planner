@@ -9,9 +9,11 @@
  *
  * CGT calculation (2025/26):
  *   Annual exempt amount : £3,000
- *   Basic rate           : 18%  (income + net gains within basic rate band)
+ *   Basic rate           : 18%  (gains within the remaining basic rate band)
  *   Higher/addl rate     : 24%
- *   Basic rate band limit: £50,270 (income above this → all gains at 24%)
+ *   Basic rate band      : £37,700 of taxable income. Gains are stacked on
+ *     top of taxable income (gross minus personal allowance, including the
+ *     £100k taper); the portion within the unused band is taxed at 18%.
  *
  *   Gain on a withdrawal is determined proportionally:
  *     gainFraction = max(0, portfolioGain) / balanceBeforeWithdrawal
@@ -34,6 +36,8 @@
  * Source: gov.uk/capital-gains-tax/rates
  */
 
+import { calculateTaxableIncome } from './ukIncomeTax.js';
+
 const TAX_YEAR = '2025/26';
 
 // ---------------------------------------------------------------------------
@@ -44,8 +48,23 @@ export const GIA_CGT_CONSTANTS = {
   annualExemptAmount: 3_000, // annual CGT allowance (£)
   basicRate: 0.18, // 18% on gains within remaining basic rate band
   higherRate: 0.24, // 24% on gains above basic rate band
-  basicRateLimit: 50_270, // income threshold; gains above this are at higher rate
+  basicRateBandWidth: 37_700, // basic rate band width in taxable income terms
 };
+
+/**
+ * Remaining basic-rate band available for capital gains, given gross income.
+ * Gains stack on top of taxable income; the unused portion of the £37,700
+ * basic band is taxed at 18%, the rest at 24%.
+ *
+ * @param {number|null} grossIncome - Gross annual income; null → no room (24% assumed)
+ * @param {number} [scaleFactor=1] - Threshold scale factor (fiscal drag)
+ * @returns {number} Remaining basic-rate room in GBP
+ */
+export function cgtBasicRateRoom(grossIncome, scaleFactor = 1) {
+  if (grossIncome == null || !isFinite(grossIncome)) return 0;
+  const taxable = calculateTaxableIncome(Math.max(0, grossIncome), scaleFactor);
+  return Math.max(0, GIA_CGT_CONSTANTS.basicRateBandWidth * scaleFactor - taxable);
+}
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -81,7 +100,8 @@ function assertNonNegativeFiniteOrNull(value, name) {
  *                                    May be less than initialBalance (unrealised gain)
  *                                    or more (unrealised loss).
  * @param {Array<{
- *   growthRate:     number,          - Annual growth as a decimal (e.g. 0.07 = 7%). May be 0.
+ *   growthRate:     number,          - Annual growth as a decimal (e.g. 0.07 = 7%).
+ *                                      May be negative (falling markets), min −1.
  *   contributions?: number,          - Deposits made this year (default 0)
  *   withdrawals?:   number,          - Amount withdrawn this year (default 0)
  *   grossIncome?:   number | null    - Gross annual income used to determine CGT rate.
@@ -132,7 +152,7 @@ export function projectGIA(initialBalance, initialCostBasis, annualProjections, 
     throw new RangeError('startYear must be an integer >= 1990');
   }
 
-  const { annualExemptAmount, basicRate, higherRate, basicRateLimit } = GIA_CGT_CONSTANTS;
+  const { annualExemptAmount, basicRate, higherRate } = GIA_CGT_CONSTANTS;
 
   let balance = round2(initialBalance);
   let costBasis = round2(initialCostBasis);
@@ -150,7 +170,8 @@ export function projectGIA(initialBalance, initialCostBasis, annualProjections, 
 
     const { growthRate, contributions = 0, withdrawals = 0, grossIncome = null } = proj;
 
-    assertNonNegativeFinite(growthRate, `year ${year} growthRate`);
+    if (typeof growthRate !== 'number' || !isFinite(growthRate) || growthRate < -1)
+      throw new TypeError(`year ${year} growthRate must be a finite number >= -1`);
     assertNonNegativeFinite(contributions, `year ${year} contributions`);
     assertNonNegativeFinite(withdrawals, `year ${year} withdrawals`);
     assertNonNegativeFiniteOrNull(grossIncome, `year ${year} grossIncome`);
@@ -194,8 +215,7 @@ export function projectGIA(initialBalance, initialCostBasis, annualProjections, 
         const taxableGain = round2(gainOnWithdrawal - cgtAllowanceUsed);
 
         if (taxableGain > 0) {
-          const effectiveIncome = grossIncome ?? Infinity;
-          const basicBandRemaining = Math.max(0, basicRateLimit - effectiveIncome);
+          const basicBandRemaining = cgtBasicRateRoom(grossIncome);
           const gainAtBasicRate = Math.min(taxableGain, basicBandRemaining);
           const gainAtHigherRate = taxableGain - gainAtBasicRate;
 

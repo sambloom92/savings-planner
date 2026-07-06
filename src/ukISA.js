@@ -54,7 +54,8 @@ function assertNonNegativeFinite(value, name) {
  * @param {number} initialBalance - Opening market value in GBP (>= 0).
  *                                  May represent an existing ISA portfolio.
  * @param {Array<{
- *   growthRate:     number,   - Annual growth as a decimal (e.g. 0.07 = 7%). May be 0.
+ *   growthRate:     number,   - Annual growth as a decimal (e.g. 0.07 = 7%).
+ *                               May be negative (falling markets), min −1.
  *   contributions?: number,   - New money paid in this year (default 0, max £20,000)
  *   withdrawals?:   number    - Amount withdrawn this year (default 0, tax-free)
  * }>} annualProjections
@@ -107,7 +108,8 @@ export function projectISA(initialBalance, annualProjections, options = {}) {
 
     const { growthRate, contributions = 0, withdrawals = 0 } = proj;
 
-    assertNonNegativeFinite(growthRate, `year ${year} growthRate`);
+    if (typeof growthRate !== 'number' || !isFinite(growthRate) || growthRate < -1)
+      throw new TypeError(`year ${year} growthRate must be a finite number >= -1`);
     assertNonNegativeFinite(contributions, `year ${year} contributions`);
     assertNonNegativeFinite(withdrawals, `year ${year} withdrawals`);
 

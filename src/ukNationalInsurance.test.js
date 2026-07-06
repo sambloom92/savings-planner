@@ -40,7 +40,7 @@ function ni(gross) {
 describe('NI_THRESHOLDS constants', () => {
   it('employee thresholds are correct for 2025/26', () => {
     const emp = NI_THRESHOLDS.employee;
-    assert.equal(emp.lowerEarningsLimit, 6_725);
+    assert.equal(emp.lowerEarningsLimit, 6_500); // £125/week × 52
     assert.equal(emp.primaryThreshold, 12_570);
     assert.equal(emp.upperEarningsLimit, 50_270);
     assert.equal(emp.mainRate, 0.08);
@@ -89,7 +89,7 @@ describe('zero income', () => {
   });
 });
 
-describe('below LEL (£6,725) — employee pays nothing, employer pays on income above ST', () => {
+describe('below LEL (£6,500) — employee pays nothing, employer pays on income above ST', () => {
   it('grossIncome=5,000 — at secondary threshold, employer NI is zero', () => {
     const result = ni(5_000);
     assert.equal(result.employeeNI.total, 0);
@@ -104,14 +104,14 @@ describe('below LEL (£6,725) — employee pays nothing, employer pays on income
     assertApprox(result.totalNI, 150, 'totalNI');
   });
 
-  it('grossIncome=6,725 — at LEL, employee still pays nothing', () => {
-    const result = ni(6_725);
+  it('grossIncome=6,500 — at LEL, employee still pays nothing', () => {
+    const result = ni(6_500);
     assert.equal(result.employeeNI.total, 0);
-    assertApprox(result.employerNI.contribution, 258.75, 'employer NI'); // 1725 * 0.15
+    assertApprox(result.employerNI.contribution, 225, 'employer NI'); // 1500 * 0.15
   });
 });
 
-describe('LEL to PT (£6,725–£12,570) — NI credit zone, employee pays nothing', () => {
+describe('LEL to PT (£6,500–£12,570) — NI credit zone, employee pays nothing', () => {
   it('grossIncome=10,000 — no employee NI, employer pays above ST', () => {
     const result = ni(10_000);
     assert.equal(result.employeeNI.total, 0);

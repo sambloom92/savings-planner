@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { GIA_CGT_CONSTANTS, projectGIA } from './ukGIA.js';
+import { GIA_CGT_CONSTANTS, cgtBasicRateRoom, projectGIA } from './ukGIA.js';
 
 // ---------------------------------------------------------------------------
 // Minimal test runner
@@ -47,8 +47,32 @@ describe('GIA_CGT_CONSTANTS', () => {
     assert.equal(GIA_CGT_CONSTANTS.higherRate, 0.24);
   });
 
-  it('basic rate limit is £50,270', () => {
-    assert.equal(GIA_CGT_CONSTANTS.basicRateLimit, 50_270);
+  it('basic rate band width is £37,700 of taxable income', () => {
+    assert.equal(GIA_CGT_CONSTANTS.basicRateBandWidth, 37_700);
+  });
+});
+
+describe('cgtBasicRateRoom', () => {
+  it('full band available at zero income', () => {
+    assert.equal(cgtBasicRateRoom(0), 37_700);
+  });
+
+  it('income below the personal allowance leaves the full band', () => {
+    assert.equal(cgtBasicRateRoom(10_000), 37_700);
+  });
+
+  it('room shrinks by taxable income above the allowance', () => {
+    // taxable = 30,000 − 12,570 = 17,430 → room = 37,700 − 17,430 = 20,270
+    assert.equal(cgtBasicRateRoom(30_000), 20_270);
+  });
+
+  it('no room at or above the higher-rate threshold', () => {
+    assert.equal(cgtBasicRateRoom(50_270), 0);
+    assert.equal(cgtBasicRateRoom(120_000), 0);
+  });
+
+  it('null income means no room (higher rate assumed)', () => {
+    assert.equal(cgtBasicRateRoom(null), 0);
   });
 });
 
@@ -85,8 +109,16 @@ describe('input validation — projectGIA', () => {
     assert.throws(() => gia(10000, 10000, proj, { startYear: 2025.5 }), RangeError);
   });
 
-  it('throws TypeError for negative growthRate in a projection year', () => {
-    assert.throws(() => gia(10000, 10000, [{ growthRate: -0.01 }]), TypeError);
+  it('accepts negative growthRate (falling markets), rejects below −100%', () => {
+    assert.doesNotThrow(() => gia(10000, 10000, [{ growthRate: -0.2 }]));
+    assert.throws(() => gia(10000, 10000, [{ growthRate: -1.5 }]), TypeError);
+  });
+
+  it('negative growth reduces the balance without going below zero', () => {
+    const r = gia(10_000, 10_000, [{ growthRate: -0.3 }]);
+    assertApprox(r.finalBalance, 7_000, 'balance after −30%');
+    const wiped = gia(10_000, 10_000, [{ growthRate: -1 }]);
+    assert.equal(wiped.finalBalance, 0);
   });
 
   it('throws TypeError for negative contributions or withdrawals', () => {

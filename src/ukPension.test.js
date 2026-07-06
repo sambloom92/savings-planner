@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import {
   PENSION_CONSTANTS,
+  taperedAnnualAllowance,
   projectPensionAccumulation,
   calculatePCLS,
   projectPensionDrawdown,
@@ -51,6 +52,37 @@ describe('PENSION_CONSTANTS', () => {
   it('max PCLS percentage is 25%', () => {
     assert.equal(PENSION_CONSTANTS.maxPCLSPercentage, 0.25);
   });
+
+  it('taper limits are £200k threshold / £260k adjusted, £10k floor', () => {
+    assert.equal(PENSION_CONSTANTS.taperThresholdIncomeLimit, 200_000);
+    assert.equal(PENSION_CONSTANTS.taperAdjustedIncomeLimit, 260_000);
+    assert.equal(PENSION_CONSTANTS.minAnnualAllowance, 10_000);
+  });
+});
+
+describe('taperedAnnualAllowance', () => {
+  it('full £60,000 allowance below both limits', () => {
+    assert.equal(taperedAnnualAllowance(150_000, 180_000), 60_000);
+  });
+
+  it('no taper when threshold income is at or below £200,000', () => {
+    // adjusted income high, but threshold income protected
+    assert.equal(taperedAnnualAllowance(200_000, 300_000), 60_000);
+  });
+
+  it('no taper when adjusted income is at or below £260,000', () => {
+    assert.equal(taperedAnnualAllowance(250_000, 260_000), 60_000);
+  });
+
+  it('reduces £1 per £2 of adjusted income above £260,000', () => {
+    // £300,000 adjusted → excess 40,000 → reduction 20,000 → AA 40,000
+    assert.equal(taperedAnnualAllowance(250_000, 300_000), 40_000);
+  });
+
+  it('floors at £10,000 for adjusted income of £360,000 or more', () => {
+    assert.equal(taperedAnnualAllowance(300_000, 360_000), 10_000);
+    assert.equal(taperedAnnualAllowance(400_000, 500_000), 10_000);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -80,8 +112,7 @@ describe('projectPensionAccumulation — input validation', () => {
     assert.throws(() => projectPensionAccumulation(0, proj, { startYear: 2025.5 }), RangeError);
   });
 
-  it('throws TypeError for negative contributions or growthRate', () => {
-    assert.throws(() => projectPensionAccumulation(0, [{ growthRate: -0.01 }]), TypeError);
+  it('throws TypeError for negative contributions', () => {
     assert.throws(
       () => projectPensionAccumulation(0, [{ growthRate: 0, employeeContributions: -1 }]),
       TypeError
@@ -90,6 +121,16 @@ describe('projectPensionAccumulation — input validation', () => {
       () => projectPensionAccumulation(0, [{ growthRate: 0, employerContributions: -1 }]),
       TypeError
     );
+  });
+
+  it('accepts negative growthRate (falling markets), rejects below −100%', () => {
+    assert.doesNotThrow(() => projectPensionAccumulation(10_000, [{ growthRate: -0.2 }]));
+    assert.throws(() => projectPensionAccumulation(10_000, [{ growthRate: -1.5 }]), TypeError);
+  });
+
+  it('negative growth reduces the pot', () => {
+    const r = projectPensionAccumulation(10_000, [{ growthRate: -0.1 }]);
+    assertApprox(r.finalBalance, 9_000, 'pot after −10%');
   });
 
   it('throws RangeError when total contributions exceed annual allowance', () => {
@@ -381,11 +422,17 @@ describe('projectPensionDrawdown — input validation', () => {
     );
   });
 
-  it('throws TypeError for negative annualDrawdown, otherIncome, or growthRate', () => {
+  it('accepts negative growthRate in drawdown, rejects below −100%', () => {
+    assert.doesNotThrow(() =>
+      projectPensionDrawdown(50_000, [{ growthRate: -0.2, annualDrawdown: 0 }])
+    );
     assert.throws(
-      () => projectPensionDrawdown(50_000, [{ growthRate: -0.01, annualDrawdown: 0 }]),
+      () => projectPensionDrawdown(50_000, [{ growthRate: -1.5, annualDrawdown: 0 }]),
       TypeError
     );
+  });
+
+  it('throws TypeError for negative annualDrawdown or otherIncome', () => {
     assert.throws(
       () => projectPensionDrawdown(50_000, [{ growthRate: 0, annualDrawdown: -1 }]),
       TypeError

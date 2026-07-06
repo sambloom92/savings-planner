@@ -2,8 +2,8 @@
  * UK National Insurance calculator — Class 1 (employment income), 2025/26
  *
  * Employee (Class 1 Primary):
- *   Below LEL  (£6,725)           : 0% — no NI paid, no NI credit towards State Pension
- *   LEL to PT  (£6,725–£12,570)   : 0% — no NI paid, but NI credit IS earned
+ *   Below LEL  (£6,500)           : 0% — no NI paid, no NI credit towards State Pension
+ *   LEL to PT  (£6,500–£12,570)   : 0% — no NI paid, but NI credit IS earned
  *   PT to UEL  (£12,570–£50,270)  : 8%
  *   Above UEL  (£50,270+)         : 2%
  *
@@ -28,7 +28,7 @@ const TAX_YEAR = '2025/26';
 
 export const NI_THRESHOLDS = {
   employee: {
-    lowerEarningsLimit: 6_725, // LEL: below this, no NI and no NI credit
+    lowerEarningsLimit: 6_500, // LEL (2025/26: £125/week × 52): below this, no NI and no NI credit
     primaryThreshold: 12_570, // PT:  NI contributions begin
     upperEarningsLimit: 50_270, // UEL: additional rate applies above this
     mainRate: 0.08, // 8%  on earnings between PT and UEL
@@ -47,6 +47,10 @@ export const NI_THRESHOLDS = {
 
 function round2(n) {
   return Math.round(n * 100) / 100;
+}
+
+function round4(n) {
+  return Math.round(n * 10_000) / 10_000;
 }
 
 function assertValidGrossIncome(grossIncome) {
@@ -114,12 +118,12 @@ export function calculateNationalInsurance(grossIncome, scaleFactor = 1) {
   const additionalRateContribution = round2(additionalRateIncome * emp.additionalRate);
 
   const totalEmployeeNI = round2(mainRateContribution + additionalRateContribution);
-  const employeeEffectiveRate = grossIncome > 0 ? round2(totalEmployeeNI / grossIncome) : 0;
+  const employeeEffectiveRate = grossIncome > 0 ? round4(totalEmployeeNI / grossIncome) : 0;
 
   // Employer — 15% on all earnings above the Secondary Threshold, no upper limit
   const employerNIableIncome = Math.max(0, grossIncome - st);
   const employerContribution = round2(employerNIableIncome * er.rate);
-  const employerEffectiveRate = grossIncome > 0 ? round2(employerContribution / grossIncome) : 0;
+  const employerEffectiveRate = grossIncome > 0 ? round4(employerContribution / grossIncome) : 0;
 
   return {
     grossIncome,
