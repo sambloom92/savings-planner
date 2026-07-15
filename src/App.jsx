@@ -16,6 +16,7 @@ const TABS = [
   'Personal',
   'Pension',
   'Savings',
+  'Events',
   'Mortgage',
   'Debts',
   'Rates',
@@ -62,6 +63,8 @@ const DEFAULTS = {
   niContributionYears: 3,
   statePensionAge: 67,
   statePensionDeferralYears: 0,
+  windfalls: [],
+  oneOffExpenses: [],
   employeePensionPct: 5,
   employerPensionPct: 3,
   pensionBalance: 10_000,
@@ -78,6 +81,7 @@ const DEFAULTS = {
   mortgageTermYears: 25,
   mortgageType: 'repayment',
   mortgageOverpayment: 0,
+  mortgageStartAge: 28, // clamped to ≥ currentAge by the engine; = "already started"
   unsecuredBalance: 5_000,
   unsecuredMonthly: 200,
   studentLoanPlan: '',
@@ -550,6 +554,186 @@ function StatCard({ label, value, color, subtitle, help }) {
 }
 
 // ── Tab content ───────────────────────────────────────────────────────────────
+// ── Life-event editors (windfalls & one-off expenses) ────────────────────────
+const eventInputStyle = {
+  width: '100%',
+  padding: '5px 8px',
+  background: 'var(--bg-input)',
+  border: '1px solid var(--border)',
+  borderRadius: 5,
+  color: 'var(--text-primary)',
+  fontFamily: 'var(--font-mono)',
+  fontSize: 12,
+  outline: 'none',
+  boxSizing: 'border-box',
+};
+
+function EventSection({ p, events, onChange, title, accent, intro, help, placeholder, addLabel }) {
+  const update = (idx, field, value) => {
+    onChange(events.map((ev, i) => (i === idx ? { ...ev, [field]: value } : ev)));
+  };
+  const remove = (idx) => onChange(events.filter((_, i) => i !== idx));
+  const add = () =>
+    onChange([...events, { age: Math.min(p.currentAge + 5, p.maxAge), amount: 10_000, label: '' }]);
+
+  return (
+    <div style={{ marginBottom: 22 }}>
+      <div
+        style={{
+          fontSize: 11,
+          letterSpacing: '0.1em',
+          textTransform: 'uppercase',
+          color: accent,
+          fontWeight: 600,
+          marginBottom: 6,
+        }}
+      >
+        {title}
+      </div>
+      <p
+        style={{
+          fontSize: 11,
+          color: 'var(--text-muted)',
+          fontFamily: 'var(--font-body)',
+          lineHeight: 1.6,
+          marginBottom: 12,
+        }}
+      >
+        {intro}
+        <HelpTip text={help} />
+      </p>
+      {events.map((ev, idx) => (
+        <div
+          key={idx}
+          style={{
+            border: '1px solid var(--border)',
+            borderLeft: `2px solid ${accent}`,
+            borderRadius: 8,
+            padding: '10px 12px',
+            marginBottom: 10,
+            background: 'var(--bg-card)',
+          }}
+        >
+          <div
+            style={{
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              marginBottom: 8,
+            }}
+          >
+            <input
+              type="text"
+              placeholder={placeholder}
+              value={ev.label ?? ''}
+              onChange={(e) => update(idx, 'label', e.target.value)}
+              style={{ ...eventInputStyle, width: 170, fontFamily: 'var(--font-body)' }}
+            />
+            <button
+              onClick={() => remove(idx)}
+              title="Remove event"
+              style={{
+                background: 'transparent',
+                border: 'none',
+                color: 'var(--text-muted)',
+                cursor: 'pointer',
+                fontSize: 14,
+                padding: '2px 6px',
+              }}
+            >
+              ✕
+            </button>
+          </div>
+          <div style={{ display: 'flex', gap: 10 }}>
+            <label style={{ flex: 1, fontSize: 10, color: 'var(--text-secondary)' }}>
+              AGE{' '}
+              <span style={{ color: 'var(--text-muted)' }}>
+                ({CURRENT_YEAR + Math.max(0, (ev.age ?? p.currentAge) - p.currentAge)})
+              </span>
+              <input
+                type="number"
+                min={p.currentAge}
+                max={p.maxAge}
+                step={1}
+                value={ev.age ?? p.currentAge}
+                onChange={(e) => {
+                  const n = parseInt(e.target.value, 10);
+                  if (!isNaN(n)) update(idx, 'age', n);
+                }}
+                onBlur={(e) => {
+                  const n = parseInt(e.target.value, 10);
+                  if (!isNaN(n)) update(idx, 'age', Math.max(p.currentAge, Math.min(p.maxAge, n)));
+                }}
+                style={{ ...eventInputStyle, marginTop: 4 }}
+              />
+            </label>
+            <label style={{ flex: 2, fontSize: 10, color: 'var(--text-secondary)' }}>
+              AMOUNT <span style={{ color: 'var(--text-muted)' }}>(today&apos;s £)</span>
+              <input
+                type="number"
+                min={0}
+                step={1000}
+                value={ev.amount ?? 0}
+                onChange={(e) => {
+                  const n = parseFloat(e.target.value);
+                  if (!isNaN(n) && n >= 0) update(idx, 'amount', n);
+                }}
+                style={{ ...eventInputStyle, marginTop: 4 }}
+              />
+            </label>
+          </div>
+        </div>
+      ))}
+      <button
+        onClick={add}
+        style={{
+          width: '100%',
+          padding: '8px 0',
+          background: 'transparent',
+          border: '1px dashed var(--border-bright)',
+          borderRadius: 7,
+          color: 'var(--text-secondary)',
+          fontFamily: 'var(--font-mono)',
+          fontSize: 11,
+          letterSpacing: '0.06em',
+          cursor: 'pointer',
+        }}
+      >
+        {addLabel}
+      </button>
+    </div>
+  );
+}
+
+function EventsEditor({ p, set }) {
+  return (
+    <>
+      <EventSection
+        p={p}
+        events={p.windfalls ?? []}
+        onChange={set('windfalls')}
+        title="Windfalls"
+        accent="var(--accent-gold)"
+        intro="One-off amounts added to your GIA at a given age — an inheritance, asset sale, or gift. Enter amounts in today's money, net of any fees and taxes; they are inflated to the event year."
+        help="The full amount counts as cost basis (no phantom gains), and the yearly bed-and-ISA sweep migrates it into ISA headroom over time. Windfalls are marked ▲ on the chart. In Monte Carlo mode each trial inflates the amount along its own inflation path. To model downsizing, enter the expected net proceeds here — see the README for why property itself is not tracked."
+        placeholder="Label (e.g. Inheritance)"
+        addLabel="+ Add Windfall"
+      />
+      <EventSection
+        p={p}
+        events={p.oneOffExpenses ?? []}
+        onChange={set('oneOffExpenses')}
+        title="One-off Expenses"
+        accent="#f43f5e"
+        intro="One-off costs paid from your pots at a given age — a house deposit, wedding, or helping children. Enter amounts in today's money; they are inflated to the event year."
+        help="Funded in tax-efficiency order: first from that year's unallocated savings (no tax event), then the GIA (CGT-aware, using the annual exempt amount), then the ISA. The pension is never touched — it is inaccessible before retirement. In retirement the expense joins that year's drawdown need. If your pots can't cover it, the gap is reported as a shortfall rather than borrowed. Expenses are marked ▼ on the chart. Pair a deposit here with a mortgage start age (Mortgage tab) to model a future property purchase."
+        placeholder="Label (e.g. House deposit)"
+        addLabel="+ Add Expense"
+      />
+    </>
+  );
+}
+
 function TabContent({ tab, p, set }) {
   switch (tab) {
     case 'Personal':
@@ -732,6 +916,9 @@ function TabContent({ tab, p, set }) {
         </>
       );
 
+    case 'Events':
+      return <EventsEditor p={p} set={set} />;
+
     case 'Mortgage': {
       const effectiveMortgageRate =
         p.mortgageRateType === 'boe' ? p.boePct + p.mortgageSpreadPct : p.mortgageRatePct;
@@ -747,7 +934,7 @@ function TabContent({ tab, p, set }) {
             onChange={set('mortgageBalance')}
             color="#f43f5e"
             allowInput
-            help="Your remaining mortgage balance. Set to £0 to exclude the mortgage from the projection. Interest and capital repayment are modelled monthly using the interest rate below."
+            help="Your remaining mortgage balance. Set to £0 to exclude the mortgage from the projection. Interest and capital repayment are modelled monthly using the interest rate below. Note: only the mortgage (the debt) is modelled — your home's value is deliberately not tracked as an asset. The mortgage is a fixed cash-flow commitment regardless of house prices, while home equity is illiquid and not treated as a drawable pot. To model downsizing, add the expected net proceeds to your ISA/GIA balances in a separate scenario."
           />
           <Slider
             label="Remaining Term"
@@ -759,6 +946,17 @@ function TabContent({ tab, p, set }) {
             onChange={set('mortgageTermYears')}
             color="#f43f5e"
             help="Years remaining on your mortgage. The monthly payment is calculated from this term and the interest rate below. Overpayments reduce the balance faster but don't change the required payment."
+          />
+          <Slider
+            label="Start Age"
+            value={Math.max(p.mortgageStartAge ?? p.currentAge, p.currentAge)}
+            min={p.currentAge}
+            max={p.maxAge}
+            step={1}
+            format={fmtAge}
+            onChange={set('mortgageStartAge')}
+            color="#f43f5e"
+            help="Age the mortgage begins. Leave at your current age for an existing mortgage. Set a future age to model a planned property purchase: no payments or balance exist before then, and the balance above (today's money) is inflated to the purchase year, since house prices and loan sizes move with the economy. Pair it with a one-off expense in the Events tab for the deposit."
           />
           <Toggle
             label="Mortgage Type"
@@ -1455,6 +1653,66 @@ function YearDetailPanel({ row, mobile = false }) {
           )}
           <DetailLine label="→ ISA" value={fmtGBP(row.isaContribution)} color="#34d399" />
           <DetailLine label="→ GIA" value={fmtGBP(row.giaContribution)} color="#e8b84b" />
+          {(row.windfall ?? 0) > 0 && (
+            <DetailLine
+              label={`+ Windfall (${(row.windfallLabels ?? []).join(', ') || 'Windfall'})`}
+              value={fmtGBP(row.windfall)}
+              color="#e8b84b"
+              bold
+            />
+          )}
+          {(row.oneOffExpense ?? 0) > 0 && (
+            <>
+              <DetailLine
+                label={`− One-off expense (${(row.oneOffExpenseLabels ?? []).join(', ') || 'Expense'})`}
+                value={fmtGBP(row.oneOffExpense)}
+                color="#f43f5e"
+                bold
+              />
+              {row.oneOffExpenseFunding?.fromSavings > 0 && (
+                <DetailLine
+                  label="from this year's savings"
+                  value={fmtGBP(row.oneOffExpenseFunding.fromSavings)}
+                  dim
+                  indent={1}
+                />
+              )}
+              {row.oneOffExpenseFunding?.fromGIAGross > 0 && (
+                <DetailLine
+                  label="from GIA (gross)"
+                  value={fmtGBP(row.oneOffExpenseFunding.fromGIAGross)}
+                  dim
+                  indent={1}
+                />
+              )}
+              {row.oneOffExpenseFunding?.giaCGT > 0 && (
+                <DetailLine
+                  label="CGT on GIA sale"
+                  value={fmtGBP(row.oneOffExpenseFunding.giaCGT)}
+                  color="#f43f5e"
+                  dim
+                  indent={1}
+                />
+              )}
+              {row.oneOffExpenseFunding?.fromISA > 0 && (
+                <DetailLine
+                  label="from ISA"
+                  value={fmtGBP(row.oneOffExpenseFunding.fromISA)}
+                  dim
+                  indent={1}
+                />
+              )}
+              {(row.expenseShortfall ?? 0) > 0 && (
+                <DetailLine
+                  label="unfunded shortfall"
+                  value={`−${fmtGBP(row.expenseShortfall)}`}
+                  color="#f43f5e"
+                  bold
+                  indent={1}
+                />
+              )}
+            </>
+          )}
           <Divider />
           <DetailLine
             label="+ Employer pension (free)"
@@ -1706,6 +1964,22 @@ function YearDetailPanel({ row, mobile = false }) {
             color="#a78bfa"
           />
         )}
+        {(row.windfall ?? 0) > 0 && (
+          <DetailLine
+            label={`+ Windfall (${(row.windfallLabels ?? []).join(', ') || 'Windfall'})`}
+            value={fmtGBP(row.windfall)}
+            color="#e8b84b"
+            bold
+          />
+        )}
+        {(row.oneOffExpense ?? 0) > 0 && (
+          <DetailLine
+            label={`+ One-off expense (${(row.oneOffExpenseLabels ?? []).join(', ') || 'Expense'})`}
+            value={fmtGBP(row.oneOffExpense)}
+            color="#f43f5e"
+            bold
+          />
+        )}
         {hasShortfall && (
           <DetailLine label="Shortfall" value={`−${fmtGBP(row.shortfall)}`} color="#f43f5e" bold />
         )}
@@ -1930,6 +2204,7 @@ export default function App() {
         termYears: p.mortgageTermYears,
         type: p.mortgageType,
         monthlyOverpayment: p.mortgageOverpayment,
+        startAge: p.mortgageStartAge,
       };
     }
     if (p.unsecuredBalance > 0) {
@@ -1957,6 +2232,8 @@ export default function App() {
         statePensionAge: p.statePensionAge,
         statePensionDeferralYears: p.statePensionDeferralYears,
         studentLoanPlan: p.studentLoanPlan || null,
+        windfalls: p.windfalls,
+        oneOffExpenses: p.oneOffExpenses,
       };
       const rates = buildRates(p);
       const pots = buildPots(p);
@@ -2037,6 +2314,8 @@ export default function App() {
           statePensionAge: p.statePensionAge,
           statePensionDeferralYears: p.statePensionDeferralYears,
           studentLoanPlan: p.studentLoanPlan || null,
+          windfalls: p.windfalls,
+          oneOffExpenses: p.oneOffExpenses,
         };
         const mcRates = buildRates(p);
         const mcPots = buildPots(p);
@@ -2112,6 +2391,24 @@ export default function App() {
       projectedStatePension: summary.projectedStatePension * spF,
     };
   }, [summary, realTerms, inflRate, p.currentAge, p.retirementAge]);
+
+  // Life-event chart markers: one per event age and kind, same-age labels combined.
+  const eventMarkers = useMemo(() => {
+    const collect = (list, kind, defaultLabel) => {
+      const byAge = new Map();
+      for (const ev of list ?? []) {
+        if (!(ev.amount > 0) || ev.age < p.currentAge || ev.age > p.maxAge) continue;
+        const label = ev.label || defaultLabel;
+        byAge.set(ev.age, byAge.has(ev.age) ? `${byAge.get(ev.age)}, ${label}` : label);
+      }
+      return Array.from(byAge, ([age, label]) => ({ age, label, kind }));
+    };
+    const markers = [
+      ...collect(p.windfalls, 'windfall', 'Windfall'),
+      ...collect(p.oneOffExpenses, 'expense', 'Expense'),
+    ];
+    return markers.length > 0 ? markers : null;
+  }, [p.windfalls, p.oneOffExpenses, p.currentAge, p.maxAge]);
 
   // 4% rule: need 25× annual spending as a portfolio (1 / 0.04 = 25).
   // Expressed in the same terms as the chart (real or nominal).
@@ -2538,7 +2835,7 @@ export default function App() {
                     )}
                     color="var(--accent-gold)"
                     subtitle={`Age ${p.retirementAge} · year-end${realTerms ? " · today's £" : ''}`}
-                    help="Pension + ISA + GIA balances at the end of your first retirement year, minus any outstanding debts. Matches the chart value at that age. Does not include property equity, defined benefit pensions, or other illiquid assets."
+                    help="Pension + ISA + GIA balances at the end of your first retirement year, minus any outstanding debts. Matches the chart value at that age. Property equity is deliberately excluded, even though the mortgage liability is counted: the mortgage is a contractual cash-flow commitment that must be serviced regardless of house prices, whereas home equity is illiquid, costly to access, and shouldn't silently prop up a retirement plan. If a plan only works by selling or borrowing against your home, this tool is designed to show that as a shortfall rather than hide it. Defined benefit pensions and other illiquid assets are also excluded."
                   />
                   <StatCard
                     label="Pension Pot"
@@ -2580,7 +2877,7 @@ export default function App() {
                       firstShortfall
                         ? `Your pots run out at this age — combined pension, ISA, and GIA can no longer cover the inflation-adjusted target spending of ${fmtGBP(p.targetNetExpenses)}/yr. Consider increasing savings, reducing target expenses, or retiring later.`
                         : lastRetRow
-                          ? `Combined pension + ISA + GIA balance at age ${p.maxAge}, after funding all retirement spending. Property equity and other illiquid assets are not included.`
+                          ? `Combined pension + ISA + GIA balance at age ${p.maxAge}, after funding all retirement spending. Property equity and other illiquid assets are deliberately not included — the projection never draws on your home, so any shortfall is shown honestly rather than backfilled by assumed downsizing or equity release.`
                           : 'Total outstanding debt (mortgage + unsecured + student loan) at retirement.'
                     }
                   />
@@ -2797,6 +3094,7 @@ export default function App() {
                     showDetails={true}
                     colorMode={colorMode}
                     logScale={logScale}
+                    eventMarkers={eventMarkers}
                     height={mobile ? 260 : 390}
                   />
                 ) : mcPending ? (
@@ -2845,6 +3143,7 @@ export default function App() {
                   fourPctTarget={fourPctTarget}
                   colorMode={colorMode}
                   logScale={logScale}
+                  eventMarkers={eventMarkers}
                   height={mobile ? 260 : 390}
                 />
               ) : (

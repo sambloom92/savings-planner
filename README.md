@@ -9,6 +9,9 @@ A browser-based retirement savings projection dashboard for residents of England
 - **Glide path** — configurable equity/bond split pre- and post-retirement, with a linear taper over a user-defined window (e.g. start de-risking 10 years before retirement, fully de-risked 5 years after)
 - **Monte Carlo simulation** — stochastic fan chart showing p10–p90 outcome bands across hundreds of trials; uses a two-regime Markov model (normal/bear) with fat-tailed (t₅) market shocks and GARCH-like volatility persistence
 - **Fiscal drag** — configurable bracket-creep: model frozen, inflation-linked, or real-terms-rising tax bands
+- **Windfalls** — discrete life events (inheritance, asset sale, gift) that add money to the GIA at a chosen age; amounts are in today's money (net of fees/taxes), inflated to the event year, marked on the chart, and swept into ISA headroom over time
+- **One-off expenses** — discrete outflows (house deposit, wedding, helping children) at a chosen age, funded in tax-efficiency order (unallocated savings → GIA → ISA, never the pension); unfundable amounts are reported as shortfalls, not borrowed
+- **Deferred mortgage start** — the mortgage can begin at a future age to model a planned property purchase (pair with a one-off expense for the deposit); the balance is inflated to the purchase year
 - **Real / nominal toggle** — switch between future cash values and today's purchasing power at any time
 - **Year detail panel** — hover the chart to see a full breakdown of every money flow for that year
 - **Export / import** — copy parameters as JSON and paste them back to save or share a scenario
@@ -19,6 +22,18 @@ A browser-based retirement savings projection dashboard for residents of England
 Income tax bands and NI thresholds are based on **2025/26 rates** for **England, Wales & Northern Ireland**. Scottish income tax rates are not modelled.
 
 Note for Plan 4 student loan users: Plan 4 loans are held by Scottish students, who typically pay **Scottish income tax** — which this model does not implement. Plan 4 repayments themselves (9% above the threshold) and interest are modelled correctly since they do not depend on income tax bands, but the income tax figures will follow rUK bands rather than Scottish ones.
+
+## Why property equity is not modelled
+
+The projection counts your **mortgage as a liability but never counts your home as an asset**. This asymmetry is deliberate, not an oversight:
+
+- **The mortgage is a contractual cash-flow commitment.** It must be serviced every month regardless of what your house is worth, so it belongs in the projection as a real drain on income.
+- **Home equity is not a drawable pot.** Accessing it means either downsizing (a discrete, costly event that depends on finding a buyer) or equity release (compound roll-up interest, age-gated loan-to-value caps). Neither resembles a smooth "draw £X per year" income stream, and modelling it as one would misrepresent how the money can actually be reached.
+- **A safety net that hides failure defeats the tool's purpose.** The most useful output of the projection — especially the Monte Carlo view — is showing *when a plan fails*. If shortfalls were silently backfilled from home equity, a plan that only survives by consuming the roof over your head would look identical to one that genuinely works. The tool is designed to surface that distinction, not paper over it.
+
+If you want to explore a downsizing scenario, add a **windfall** (Events tab) at the age you expect to sell, for the expected net proceeds in today's money after transaction costs. To model a future first purchase, add a **one-off expense** for the deposit and set the mortgage's **start age** (Mortgage tab) to the purchase year. The projection stays honest — the base case still shows any shortfall — while letting you compare outcomes side by side.
+
+The same reasoning applies to defined benefit pensions and other illiquid assets: the headline net worth figure covers **pension + ISA + GIA minus debts** only.
 
 ## Getting started
 
