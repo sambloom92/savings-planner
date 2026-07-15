@@ -79,7 +79,8 @@ function drawFanChart(
   potSeries,
   fourPctTarget,
   logScale,
-  deterministicMode
+  deterministicMode,
+  eventMarkers
 ) {
   const ctx = canvas.getContext('2d');
 
@@ -459,6 +460,51 @@ function drawFanChart(
     ctx.fillText('State Pension', xOf(statePensionAge), PAD.top - 8);
   }
 
+  // ── Life-event markers (windfalls ▲ gold, one-off expenses ▼ rose) ─────────
+  // Small triangles on the x-axis at each event age. Labels are drawn only
+  // when they don't collide with the previous label — full details are
+  // always available in the hover panel.
+  if (eventMarkers && eventMarkers.length > 0) {
+    const baseY = PAD.top + cH;
+    const sorted = eventMarkers
+      .filter((m) => m.age >= minAge && m.age <= maxAgeVal)
+      .sort((a, b) => a.age - b.age || (a.kind === 'windfall' ? -1 : 1));
+    let lastLabelEnd = -Infinity;
+    ctx.font = `bold 8px ${mono}`;
+    for (const m of sorted) {
+      const isExpense = m.kind === 'expense';
+      const fill = isExpense ? 'rgba(244,63,94,0.95)' : 'rgba(232,184,75,0.95)';
+      const labelFill = isExpense ? 'rgba(244,63,94,0.8)' : 'rgba(232,184,75,0.75)';
+      const mx = xOf(m.age);
+      ctx.beginPath();
+      if (isExpense) {
+        // ▼ apex pointing down at the axis
+        ctx.moveTo(mx - 4.5, baseY - 8);
+        ctx.lineTo(mx + 4.5, baseY - 8);
+        ctx.lineTo(mx, baseY - 1);
+      } else {
+        // ▲ apex pointing up
+        ctx.moveTo(mx, baseY - 8);
+        ctx.lineTo(mx - 4.5, baseY - 1);
+        ctx.lineTo(mx + 4.5, baseY - 1);
+      }
+      ctx.closePath();
+      ctx.fillStyle = fill;
+      ctx.fill();
+
+      let text = (m.label || (isExpense ? 'Expense' : 'Windfall')).slice(0, 14);
+      if ((m.label || '').length > 14) text += '…';
+      const tw = ctx.measureText(text).width;
+      const tx = Math.max(PAD.left + tw / 2, Math.min(mx, PAD.left + cW - tw / 2));
+      if (tx - tw / 2 > lastLabelEnd + 6) {
+        ctx.fillStyle = labelFill;
+        ctx.textAlign = 'center';
+        ctx.fillText(text, tx, baseY - 12);
+        lastLabelEnd = tx + tw / 2;
+      }
+    }
+  }
+
   // ── Hover overlay: cursor line in det mode, dots-on-lines in fan mode ────
   if (deterministicMode && hoverState?.age != null) {
     const hx = xOf(hoverState.age);
@@ -659,6 +705,7 @@ export function FanChart({
   colorMode = 'dark',
   logScale = false,
   deterministicData = null,
+  eventMarkers = null,
   height = 390,
 }) {
   const canvasRef = useRef(null);
@@ -811,7 +858,8 @@ export function FanChart({
       potSeries ?? null,
       fourPctTarget,
       logScale,
-      !!deterministicData
+      !!deterministicData,
+      eventMarkers
     );
     coordRef.current = { ...coords, adjData: effectiveAdjData };
     // colorMode in deps: theme change re-reads CSS vars via cssVar() at draw time
@@ -833,6 +881,7 @@ export function FanChart({
     potSeries,
     fourPctTarget,
     logScale,
+    eventMarkers,
   ]);
 
   // Mousemove: update hover; frozen while a trial is locked

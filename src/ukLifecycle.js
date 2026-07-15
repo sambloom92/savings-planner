@@ -291,6 +291,16 @@ function applyGIAWithdrawal(bal, costBasis, gross) {
  *                                             year raises the weekly amount by 1% per
  *                                             9 weeks ≈ 5.8% (new state pension rules).
  *   studentLoanPlan?:       string | null   - 'plan1'|'plan2'|'plan4'|'plan5'|'postgrad'|null
+ *   windfalls?: Array<{                     - Discrete events adding money to the GIA
+ *     age:    number,                         at a given age (inheritance, asset sale, gift).
+ *     amount: number,                         Today's money, net of fees/taxes; inflated to
+ *     label?: string                          the event year. Full amount added to cost basis.
+ *   }>
+ *   oneOffExpenses?: Array<{                - Discrete outflows at a given age (house
+ *     age:    number,                         deposit, wedding, helping children). Today's
+ *     amount: number,                         money, inflated to the event year. Funded from
+ *     label?: string                          savings → GIA → ISA (accumulation) or via the
+ *   }>                                        drawdown order (retirement); never the pension.
  * }} profile
  *
  * @param {{
@@ -309,10 +319,14 @@ function applyGIAWithdrawal(bal, costBasis, gross) {
  *   giaBalance?:      number,   - Existing GIA market value (default 0)
  *   giaCostBasis?:    number,   - GIA cost basis for CGT purposes (default = giaBalance)
  *   mortgage?: {
- *     balance:              number,  - Outstanding mortgage balance
+ *     balance:              number,  - Outstanding mortgage balance (today's money —
+ *                                      inflated to the start year for future purchases)
  *     termYears:            number,  - Remaining mortgage term in whole years
  *     type?:                string,  - 'repayment' (default) or 'interest-only'
- *     monthlyOverpayment?:  number
+ *     monthlyOverpayment?:  number,
+ *     startAge?:            number   - Age the mortgage begins (default currentAge; a
+ *                                      future age models a planned property purchase —
+ *                                      no payments and no balance before it starts)
  *   } | null,
  *   unsecuredDebts?: Array<{
  *     balance:        number,
@@ -363,6 +377,8 @@ export function projectLifecycle(
     statePensionAge = LIFECYCLE_CONSTANTS.statePension.defaultStatePensionAge,
     statePensionDeferralYears = 0,
     studentLoanPlan = null,
+    windfalls = [],
+    oneOffExpenses = [],
   } = profile;
 
   assertPositiveInteger(currentAge, 'currentAge');
@@ -384,6 +400,39 @@ export function projectLifecycle(
 
   if (studentLoanPlan !== null && !STUDENT_LOAN_PLANS[studentLoanPlan])
     throw new TypeError(`studentLoanPlan '${studentLoanPlan}' is not a recognised plan`);
+
+  // Windfalls and one-off expenses: discrete life events at a given age.
+  // Windfalls (inheritance, asset sale, gift) add money to the GIA; one-off
+  // expenses (house deposit, wedding, helping children) are funded from the
+  // pots. Amounts are net of fees/taxes, expressed in today's money, and
+  // inflated to the event year. Events at ages outside the projected range
+  // are simply never reached (harmless).
+  function validateEvents(list, name, defaultLabel) {
+    if (!Array.isArray(list)) throw new TypeError(`${name} must be an array`);
+    for (let i = 0; i < list.length; i++) {
+      const ev = list[i];
+      if (ev == null || typeof ev !== 'object')
+        throw new TypeError(`${name}[${i}] must be an object`);
+      if (!Number.isInteger(ev.age)) throw new TypeError(`${name}[${i}].age must be an integer`);
+      assertNonNegativeFinite(ev.amount, `${name}[${i}].amount`);
+    }
+    /** Events landing at a given age: nominal total (today's £ × cumulative
+     *  inflation) plus labels for reporting. Returns null when none. */
+    return function eventsAtAge(age, inflationFactor) {
+      let total = 0;
+      const labels = [];
+      for (const ev of list) {
+        if (ev.age === age && ev.amount > 0) {
+          total += ev.amount;
+          labels.push(ev.label || defaultLabel);
+        }
+      }
+      if (total === 0) return null;
+      return { nominal: round2(total * inflationFactor), labels };
+    };
+  }
+  const windfallsAtAge = validateEvents(windfalls, 'windfalls', 'Windfall');
+  const expensesAtAge = validateEvents(oneOffExpenses, 'oneOffExpenses', 'One-off expense');
 
   // ── Validate rates ───────────────────────────────────────────────────────
   const {
@@ -436,20 +485,37 @@ export function projectLifecycle(
   let mortgageType = 'repayment';
   let hasMortgage = false;
 
+  let mortgageStartAge = currentAge;
+  let mortgageStarted = false;
+
   if (mortgageConfig != null) {
     assertNonNegativeFinite(mortgageConfig.balance, 'mortgage.balance');
     assertPositiveInteger(mortgageConfig.termYears, 'mortgage.termYears');
     if (mortgageConfig.monthlyOverpayment != null)
       assertNonNegativeFinite(mortgageConfig.monthlyOverpayment, 'mortgage.monthlyOverpayment');
+    if (mortgageConfig.startAge != null && !Number.isInteger(mortgageConfig.startAge))
+      throw new TypeError('mortgage.startAge must be an integer');
 
     mortgageType = mortgageConfig.type ?? 'repayment';
     if (mortgageType !== 'repayment' && mortgageType !== 'interest-only')
       throw new TypeError("mortgage.type must be 'repayment' or 'interest-only'");
 
-    mortgageBalance = round2(mortgageConfig.balance);
     mortgageMonthlyRate = mortgageRate / 12;
     mortgageMonthlyOverpayment = mortgageConfig.monthlyOverpayment ?? 0;
+    // A start age in the past means the mortgage already exists — start now.
+    mortgageStartAge = Math.max(currentAge, mortgageConfig.startAge ?? currentAge);
+    hasMortgage = mortgageConfig.balance > 0;
+  }
 
+  /** Lazily start the mortgage in the year the start age is reached. For a
+   *  future purchase the balance is stated in today's money and inflated to
+   *  the start year (house prices and loan sizes move with the economy); the
+   *  monthly payment is then fixed from that starting balance. For a mortgage
+   *  starting now (the default) the inflation factor is 1 — unchanged. */
+  function maybeStartMortgage(age, inflationFactor) {
+    if (!hasMortgage || mortgageStarted || age < mortgageStartAge) return;
+    mortgageStarted = true;
+    mortgageBalance = round2(mortgageConfig.balance * inflationFactor);
     if (mortgageType === 'interest-only') {
       mortgageMonthlyPayment = round2(mortgageBalance * mortgageMonthlyRate);
     } else {
@@ -462,7 +528,6 @@ export function projectLifecycle(
               mortgageConfig.termYears
             );
     }
-    hasMortgage = mortgageBalance > 0;
   }
 
   // Unsecured debts
@@ -634,7 +699,8 @@ export function projectLifecycle(
     const netTakeHome = round2(income - employeeContrib - incomeTax - employeeNI - slRepayment);
 
     // ── Debt payments ───────────────────────────────────────────────────
-    // Mortgage
+    // Mortgage — may begin part-way through the projection (future purchase)
+    maybeStartMortgage(age, cumulInflation);
     let mortgageRow = null;
     let mortgagePaymentThisYear = 0;
 
@@ -720,14 +786,94 @@ export function projectLifecycle(
     const availableForSavings = round2(
       Math.max(0, netTakeHome - totalDebtPayments - livingExpenses)
     );
-    const isaContrib = round2(Math.min(Math.max(0, availableForSavings), ISA_LIMIT));
-    const giaContrib = round2(Math.max(0, availableForSavings - isaContrib));
+
+    // Start-of-year pot snapshots, before any event or transfer this year.
+    const openingISA = isaBal;
+    const openingGIA = giaBal;
+
+    // ── Windfalls ───────────────────────────────────────────────────────
+    // Land in the GIA before anything else this year — so a same-year
+    // one-off expense (e.g. sell business → buy house) can spend them.
+    // The full amount is added to the cost basis: net-of-tax money carries
+    // no embedded gain. The bed-and-ISA sweep migrates it into ISA headroom.
+    const accWindfall = windfallsAtAge(age, cumulInflation);
+    const accWindfallAmt = accWindfall?.nominal ?? 0;
+    if (accWindfallAmt > 0) {
+      giaBal = round2(giaBal + accWindfallAmt);
+      costBasis = round2(costBasis + accWindfallAmt);
+    }
+
+    // ── One-off expenses ────────────────────────────────────────────────
+    // Funded in tax-efficiency order:
+    //   1. this year's unallocated savings (cash not yet invested — no tax)
+    //   2. GIA (CGT-aware, consumes the annual exempt amount first)
+    //   3. ISA (liquid and tax-free)
+    // The pension is never raided — it is inaccessible before retirement.
+    // Anything unfunded is reported as expenseShortfall, not borrowed.
+    const accExpense = expensesAtAge(age, cumulInflation);
+    const accExpenseAmt = accExpense?.nominal ?? 0;
+    let savingsForAllocation = availableForSavings;
+    let accExemptRemaining = GIA_CGT_CONSTANTS.annualExemptAmount;
+    let expFromSavings = 0,
+      expFromGIAGross = 0,
+      expGIACGT = 0,
+      expFromISA = 0,
+      expenseShortfall = 0;
+    if (accExpenseAmt > 0) {
+      let expRemaining = accExpenseAmt;
+      expFromSavings = round2(Math.min(savingsForAllocation, expRemaining));
+      savingsForAllocation = round2(savingsForAllocation - expFromSavings);
+      expRemaining = round2(expRemaining - expFromSavings);
+
+      if (expRemaining > 0 && giaBal > 0) {
+        const gainFracPre = Math.max(0, (giaBal - costBasis) / giaBal);
+        const gross = round2(
+          Math.min(
+            giaBal,
+            giaGrossForNet(
+              expRemaining,
+              giaBal,
+              costBasis,
+              adjustedGross,
+              accExemptRemaining,
+              thresholdScale
+            )
+          )
+        );
+        expGIACGT = computeGIACGT(
+          gross,
+          giaBal,
+          costBasis,
+          adjustedGross,
+          accExemptRemaining,
+          thresholdScale
+        );
+        const net = round2(gross - expGIACGT);
+        const after = applyGIAWithdrawal(giaBal, costBasis, gross);
+        giaBal = after.bal;
+        costBasis = after.costBasis;
+        expFromGIAGross = gross;
+        expRemaining = round2(Math.max(0, expRemaining - net));
+        accExemptRemaining = round2(Math.max(0, accExemptRemaining - gross * gainFracPre));
+      }
+
+      if (expRemaining > 0 && isaBal > 0) {
+        expFromISA = round2(Math.min(isaBal, expRemaining));
+        isaBal = round2(isaBal - expFromISA);
+        expRemaining = round2(expRemaining - expFromISA);
+      }
+
+      expenseShortfall = round2(Math.max(0, expRemaining));
+    }
+
+    const isaContrib = round2(Math.min(Math.max(0, savingsForAllocation), ISA_LIMIT));
+    const giaContrib = round2(Math.max(0, savingsForAllocation - isaContrib));
 
     // ── Bed and ISA (accumulation) ──────────────────────────────────────
     // Any remaining annual ISA headroom after new contributions is used to sell
     // existing GIA and rebuy inside the ISA (sheltering future growth from CGT).
-    // CGT is realised now on any embedded gains; the annual exempt amount is
-    // available because no other GIA disposals occur during accumulation.
+    // CGT is realised now on any embedded gains; only the exempt amount not
+    // already consumed by expense funding is available.
     const accIsaHeadroom = round2(ISA_LIMIT - isaContrib);
     let accBedIsaGross = 0,
       accBedIsaCGT = 0,
@@ -739,7 +885,7 @@ export function projectLifecycle(
         giaBal,
         costBasis,
         adjustedGross,
-        GIA_CGT_CONSTANTS.annualExemptAmount,
+        accExemptRemaining,
         thresholdScale
       );
       accBedIsaGross = round2(Math.min(giaBal, accGrossNeeded));
@@ -748,7 +894,7 @@ export function projectLifecycle(
         giaBal,
         costBasis,
         adjustedGross,
-        GIA_CGT_CONSTANTS.annualExemptAmount,
+        accExemptRemaining,
         thresholdScale
       );
       accBedIsaNet = round2(accBedIsaGross - accBedIsaCGT);
@@ -774,14 +920,10 @@ export function projectLifecycle(
     const pensionGrowth = round2(penAfterC * yearRate);
     pensionBal = Math.max(0, round2(penAfterC + pensionGrowth));
 
-    // openingISA / openingGIA reflect the start of year (before bed-and-ISA);
-    // growth is calculated on the post-bed-and-ISA, post-contribution balance.
-    const openingISA = round2(isaBal - accBedIsaNet);
     const isaAfterC = round2(isaBal + isaContrib);
     const isaGrowth = round2(isaAfterC * yearRate);
     isaBal = Math.max(0, round2(isaAfterC + isaGrowth));
 
-    const openingGIA = round2(giaBal + accBedIsaGross);
     const giaAfterC = round2(giaBal + giaContrib);
     const giaGrowth = round2(giaAfterC * yearRate);
     giaBal = Math.max(0, round2(giaAfterC + giaGrowth));
@@ -817,6 +959,23 @@ export function projectLifecycle(
       isaContribution: isaContrib,
       giaContribution: giaContrib,
 
+      windfall: accWindfallAmt,
+      windfallLabels: accWindfall?.labels ?? [],
+
+      oneOffExpense: accExpenseAmt,
+      oneOffExpenseLabels: accExpense?.labels ?? [],
+      oneOffExpenseFunding:
+        accExpenseAmt > 0
+          ? {
+              fromSavings: expFromSavings,
+              fromGIAGross: expFromGIAGross,
+              giaCGT: expGIACGT,
+              fromISA: expFromISA,
+              shortfall: expenseShortfall,
+            }
+          : null,
+      expenseShortfall,
+
       investmentRate: round2(yearRate * 10000) / 10000,
 
       pension: {
@@ -836,6 +995,7 @@ export function projectLifecycle(
       gia: {
         openingBalance: openingGIA,
         contribution: giaContrib,
+        windfall: accWindfallAmt,
         bedIsaGross: accBedIsaGross,
         bedIsaCGT: accBedIsaCGT,
         growthAmount: giaGrowth,
@@ -961,7 +1121,8 @@ export function projectLifecycle(
       const spTax = round2(calculateIncomeTax(spGross, retThresholdScale).totalTax);
       const spNet = round2(spGross - spTax);
 
-      // ── Mortgage (if still outstanding at retirement) ──────────────────────
+      // ── Mortgage (if still outstanding at retirement, or starting now) ─────
+      maybeStartMortgage(rAge, cumulInflation);
       let retMortgageRow = null;
       let mortgagePaymentThisRetYear = 0;
       if (hasMortgage && mortgageBalance > 0) {
@@ -1026,12 +1187,32 @@ export function projectLifecycle(
         };
       });
 
+      // ── Windfalls arriving this retirement year ───────────────────────────
+      // Added to the GIA (full amount to cost basis — net-of-tax money has no
+      // embedded gain) BEFORE the drawdown steps, so an inheritance can fund
+      // the same year's spending and rescue an otherwise-exhausted plan.
+      const retWindfall = windfallsAtAge(rAge, cumulInflation);
+      const retWindfallAmt = retWindfall?.nominal ?? 0;
+      if (retWindfallAmt > 0) {
+        giaBal = round2(giaBal + retWindfallAmt);
+        costBasis = round2(costBasis + retWindfallAmt);
+      }
+
+      // One-off expenses this retirement year simply raise the year's funding
+      // need — the normal five-step drawdown below then finds the cash in the
+      // most tax-efficient order, so the expense gets full tax treatment.
+      const retExpense = expensesAtAge(rAge, cumulInflation);
+      const retExpenseAmt = retExpense?.nominal ?? 0;
+
       // ── Drawdown strategy ─────────────────────────────────────────────────
       // Priority: tax-free pension → CGT-exempt GIA harvest → ISA → taxable GIA → taxable pension
-      // Mortgage and unsecured debt payments are added on top of living expenses so the
-      // full drawdown need is accounted for — state pension covers living costs only.
+      // Mortgage, unsecured debt payments, and one-off expenses are added on top of
+      // living expenses so the full drawdown need is accounted for.
       let remaining = round2(
-        Math.max(0, targetExpenses - spNet) + mortgagePaymentThisRetYear + retUnsecuredPayments
+        Math.max(0, targetExpenses - spNet) +
+          mortgagePaymentThisRetYear +
+          retUnsecuredPayments +
+          retExpenseAmt
       );
 
       // 1. Pension: fill remaining personal allowance after state pension (no tax)
@@ -1153,7 +1334,9 @@ export function projectLifecycle(
         calculateIncomeTax(spGross + pensionTaxableIncome, retThresholdScale).totalTax
       );
       const shortfall = round2(Math.max(0, remaining));
-      const netAchieved = round2(targetExpenses - shortfall);
+      // A large one-off expense can push the shortfall past the year's target
+      // expenses; net income achieved is floored at 0 rather than reported negative.
+      const netAchieved = round2(Math.max(0, targetExpenses - shortfall));
 
       // ── Bed and ISA (retirement) ────────────────────────────────────────────
       // After funding expenses, any remaining GIA is moved into the ISA up to the
@@ -1235,6 +1418,12 @@ export function projectLifecycle(
         netIncomeAchieved: netAchieved,
         shortfall,
 
+        windfall: retWindfallAmt,
+        windfallLabels: retWindfall?.labels ?? [],
+
+        oneOffExpense: retExpenseAmt,
+        oneOffExpenseLabels: retExpense?.labels ?? [],
+
         investmentRate: round2(retYearRate * 10000) / 10000,
 
         pension: {
@@ -1254,6 +1443,7 @@ export function projectLifecycle(
           openingBalance: openGIA,
           withdrawal: totalGIADraw,
           cgt: totalGIACGT,
+          windfall: retWindfallAmt,
           bedIsaGross: retBedIsaGross,
           bedIsaCGT: retBedIsaCGT,
           growthAmount: giaGrow,

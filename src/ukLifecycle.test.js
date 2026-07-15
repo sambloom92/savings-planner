@@ -637,6 +637,293 @@ describe('tapered annual allowance for high earners', () => {
   });
 });
 
+describe('windfalls', () => {
+  const wfProfile = { ...baseProfile, retirementAge: 33 };
+
+  it('throws for malformed windfall entries', () => {
+    assert.throws(() => run({ ...wfProfile, windfalls: 'bad' }), TypeError);
+    assert.throws(() => run({ ...wfProfile, windfalls: [{ age: 31.5, amount: 100 }] }), TypeError);
+    assert.throws(() => run({ ...wfProfile, windfalls: [{ age: 31, amount: -5 }] }), TypeError);
+    assert.throws(() => run({ ...wfProfile, windfalls: [null] }), TypeError);
+  });
+
+  it('windfall in year 1 is added at face value (no inflation yet)', () => {
+    const r = run({ ...wfProfile, windfalls: [{ age: 30, amount: 10_000, label: 'Gift' }] });
+    const y = r.yearlyBreakdown[0];
+    assert.equal(y.windfall, 10_000);
+    assert.deepEqual(y.windfallLabels, ['Gift']);
+  });
+
+  it("windfall in a later year is inflated from today's money", () => {
+    const r = run({ ...wfProfile, windfalls: [{ age: 32, amount: 10_000 }] });
+    const y = r.yearlyBreakdown.find((row) => row.age === 32);
+    // cumulInflation at year index 2 = 1.03² = 1.0609 → 10,609
+    assertApprox(y.windfall, 10_609, 'inflated windfall');
+    assert.deepEqual(y.windfallLabels, ['Windfall']); // default label
+  });
+
+  it('windfall lands in the GIA and grows in the arrival year', () => {
+    const base = run(wfProfile);
+    const wf = run({ ...wfProfile, windfalls: [{ age: 30, amount: 10_000 }] });
+    const giaBase = base.yearlyBreakdown[0].gia.closingBalance;
+    const giaWf = wf.yearlyBreakdown[0].gia.closingBalance;
+    // Extra £10,000 grown at 7% → +£10,700
+    assertApprox(giaWf - giaBase, 10_700, 'GIA increase');
+  });
+
+  it('full windfall amount is added to the cost basis (no phantom gains)', () => {
+    const base = run(wfProfile);
+    const wf = run({ ...wfProfile, windfalls: [{ age: 30, amount: 10_000 }] });
+    const cbBase = base.yearlyBreakdown[0].gia.closingCostBasis;
+    const cbWf = wf.yearlyBreakdown[0].gia.closingCostBasis;
+    assertApprox(cbWf - cbBase, 10_000, 'cost basis increase');
+  });
+
+  it('multiple windfalls in the same year sum, labels both reported', () => {
+    const r = run({
+      ...wfProfile,
+      windfalls: [
+        { age: 31, amount: 5_000, label: 'Car sale' },
+        { age: 31, amount: 2_000, label: 'Gift' },
+      ],
+    });
+    const y = r.yearlyBreakdown.find((row) => row.age === 31);
+    assertApprox(y.windfall, 7_000 * 1.03, 'summed and inflated');
+    assert.deepEqual(y.windfallLabels, ['Car sale', 'Gift']);
+  });
+
+  it('windfalls at ages outside the projection are ignored', () => {
+    const r = run({ ...wfProfile, windfalls: [{ age: 99, amount: 50_000 }] });
+    assert.ok(r.yearlyBreakdown.every((row) => (row.windfall ?? 0) === 0));
+  });
+
+  it('retirement-phase windfall is applied and reported on the row', () => {
+    const retOpts = { targetNetAnnualExpenses: 15_000, maxAge: 45 };
+    const r = projectLifecycle(
+      { ...wfProfile, windfalls: [{ age: 40, amount: 100_000, label: 'Inheritance' }] },
+      baseRates,
+      { isaBalance: 50_000 },
+      retOpts
+    );
+    const y = r.yearlyBreakdown.find((row) => row.age === 40);
+    assert.equal(y.phase, 'retirement');
+    assert.ok(y.windfall > 100_000, 'inflated above face value');
+    assert.deepEqual(y.windfallLabels, ['Inheritance']);
+    assert.ok(y.gia.windfall === y.windfall);
+  });
+
+  it('a retirement windfall can rescue an otherwise-exhausted plan', () => {
+    const retOpts = { targetNetAnnualExpenses: 20_000, maxAge: 50 };
+    const pots = { isaBalance: 60_000 };
+    const without = projectLifecycle(wfProfile, baseRates, pots, retOpts);
+    const withWf = projectLifecycle(
+      { ...wfProfile, windfalls: [{ age: 38, amount: 400_000 }] },
+      baseRates,
+      pots,
+      retOpts
+    );
+    const shortfallYearsWithout = without.yearlyBreakdown.filter((r) => r.shortfall > 0).length;
+    const shortfallYearsWith = withWf.yearlyBreakdown.filter((r) => r.shortfall > 0).length;
+    assert.ok(shortfallYearsWithout > 0, 'baseline plan should fail');
+    assert.ok(shortfallYearsWith < shortfallYearsWithout, 'windfall reduces shortfall years');
+  });
+});
+
+describe('one-off expenses', () => {
+  const expProfile = { ...baseProfile, retirementAge: 33 };
+
+  it('throws for malformed expense entries', () => {
+    assert.throws(() => run({ ...expProfile, oneOffExpenses: 'bad' }), TypeError);
+    assert.throws(
+      () => run({ ...expProfile, oneOffExpenses: [{ age: 31, amount: -5 }] }),
+      TypeError
+    );
+  });
+
+  it('funds from unallocated savings first — contributions shrink, pots untouched', () => {
+    // Baseline year 1: availableForSavings = 30,879.60. Expense of £10,000
+    // comes straight out of that cash before it reaches ISA/GIA.
+    const r = run({
+      ...expProfile,
+      oneOffExpenses: [{ age: 30, amount: 10_000, label: 'Wedding' }],
+    });
+    const y = r.yearlyBreakdown[0];
+    assert.equal(y.oneOffExpense, 10_000);
+    assertApprox(y.oneOffExpenseFunding.fromSavings, 10_000, 'fromSavings');
+    assert.equal(y.oneOffExpenseFunding.fromGIAGross, 0);
+    assert.equal(y.oneOffExpenseFunding.fromISA, 0);
+    assert.equal(y.expenseShortfall, 0);
+    // Savings that reach the pots: 30,879.60 − 10,000 = 20,879.60
+    assertApprox(y.isaContribution, 20_000, 'ISA still fills first');
+    assertApprox(y.giaContribution, 879.6, 'GIA gets the remainder');
+  });
+
+  it('overflows to GIA then ISA when savings are insufficient', () => {
+    // Expense of £80,000 in year 1: savings 30,879.60, GIA 20,000 (no gains),
+    // ISA 40,000. Funding: 30,879.60 + 20,000 + 29,120.40 from ISA.
+    const r = projectLifecycle(
+      { ...expProfile, oneOffExpenses: [{ age: 30, amount: 80_000 }] },
+      baseRates,
+      { giaBalance: 20_000, giaCostBasis: 20_000, isaBalance: 40_000 }
+    );
+    const y = r.yearlyBreakdown[0];
+    const f = y.oneOffExpenseFunding;
+    assertApprox(f.fromSavings, 30_879.6, 'savings leg');
+    assertApprox(f.fromGIAGross, 20_000, 'GIA leg (no gains → gross = net)');
+    assert.equal(f.giaCGT, 0);
+    assertApprox(f.fromISA, 29_120.4, 'ISA leg');
+    assert.equal(f.shortfall, 0);
+    assert.equal(y.isaContribution, 0);
+    assert.equal(y.giaContribution, 0);
+  });
+
+  it('GIA leg realises gains and can incur CGT', () => {
+    // GIA worth 100,000 with cost basis 20,000 → gain fraction 80%.
+    // Expense 50,000, no savings available (huge living expenses).
+    const r = projectLifecycle(
+      {
+        ...expProfile,
+        annualLivingExpenses: 100_000,
+        oneOffExpenses: [{ age: 30, amount: 50_000 }],
+      },
+      baseRates,
+      { giaBalance: 100_000, giaCostBasis: 20_000 }
+    );
+    const y = r.yearlyBreakdown[0];
+    const f = y.oneOffExpenseFunding;
+    assert.equal(f.fromSavings, 0);
+    assert.ok(f.giaCGT > 0, 'CGT charged on the gains');
+    assertApprox(f.fromGIAGross - f.giaCGT, 50_000, 'net raised equals the expense');
+    assert.equal(f.shortfall, 0);
+  });
+
+  it('reports a shortfall when pots cannot cover the expense — no debt is created', () => {
+    const r = projectLifecycle(
+      {
+        ...expProfile,
+        annualLivingExpenses: 100_000, // no savings capacity
+        oneOffExpenses: [{ age: 30, amount: 500_000 }],
+      },
+      baseRates,
+      { isaBalance: 10_000 }
+    );
+    const y = r.yearlyBreakdown[0];
+    assert.ok(y.expenseShortfall > 0, 'shortfall reported');
+    assertApprox(
+      y.oneOffExpenseFunding.fromISA + y.expenseShortfall,
+      500_000,
+      'ISA drained, rest unfunded'
+    );
+    assert.equal(y.isa.closingBalance, 0);
+  });
+
+  it('a same-year windfall can fund a same-year expense', () => {
+    // Windfall 200,000 and expense 150,000 at the same age: the windfall lands
+    // in the GIA first, and the expense draws on it (no shortfall).
+    const r = projectLifecycle(
+      {
+        ...expProfile,
+        annualLivingExpenses: 100_000, // no savings capacity
+        windfalls: [{ age: 31, amount: 200_000, label: 'Sale' }],
+        oneOffExpenses: [{ age: 31, amount: 150_000, label: 'Deposit' }],
+      },
+      baseRates,
+      {}
+    );
+    const y = r.yearlyBreakdown.find((row) => row.age === 31);
+    assert.equal(y.expenseShortfall, 0);
+    assert.ok(y.oneOffExpenseFunding.fromGIAGross > 0);
+  });
+
+  it("retirement-phase expense raises that year's drawdown", () => {
+    const retOpts = { targetNetAnnualExpenses: 15_000, maxAge: 45 };
+    const pots = { isaBalance: 400_000 };
+    const base = projectLifecycle(expProfile, baseRates, pots, retOpts);
+    const withExp = projectLifecycle(
+      { ...expProfile, oneOffExpenses: [{ age: 40, amount: 50_000, label: 'Kids' }] },
+      baseRates,
+      pots,
+      retOpts
+    );
+    const baseRow = base.yearlyBreakdown.find((row) => row.age === 40);
+    const expRow = withExp.yearlyBreakdown.find((row) => row.age === 40);
+    assert.equal(expRow.phase, 'retirement');
+    assert.ok(expRow.oneOffExpense > 50_000, 'inflated above face value');
+    assert.deepEqual(expRow.oneOffExpenseLabels, ['Kids']);
+    // The extra need is met from pots: withdrawals rise by ~the expense
+    assert.ok(
+      expRow.isaWithdrawal + expRow.giaWithdrawal + expRow.pensionDrawdown >
+        baseRow.isaWithdrawal + baseRow.giaWithdrawal + baseRow.pensionDrawdown + 40_000
+    );
+  });
+});
+
+describe('mortgage start age', () => {
+  const mortgage = { balance: 200_000, termYears: 25 };
+  const mProfile = { ...baseProfile, retirementAge: 40 };
+
+  it('defaults to starting immediately (unchanged behaviour)', () => {
+    const a = projectLifecycle(mProfile, baseRates, { mortgage });
+    const b = projectLifecycle(mProfile, baseRates, {
+      mortgage: { ...mortgage, startAge: 30 },
+    });
+    assert.deepEqual(a.yearlyBreakdown[0].mortgage, b.yearlyBreakdown[0].mortgage);
+  });
+
+  it('no payments and zero balance before the start age', () => {
+    const r = projectLifecycle(mProfile, baseRates, {
+      mortgage: { ...mortgage, startAge: 35 },
+    });
+    for (const row of r.yearlyBreakdown.filter((row) => row.age < 35)) {
+      assert.equal(row.mortgagePayment, 0, `payment at ${row.age}`);
+      assert.equal(row.mortgage.closingBalance, 0, `balance at ${row.age}`);
+    }
+  });
+
+  it('starts at the given age with the balance inflated to that year', () => {
+    const r = projectLifecycle(mProfile, baseRates, {
+      mortgage: { ...mortgage, startAge: 35 },
+    });
+    const startRow = r.yearlyBreakdown.find((row) => row.age === 35);
+    // cumulInflation at year index 5 = 1.03^5 = 1.159274…
+    const expectedOpening = Math.round(200_000 * Math.pow(1.03, 5) * 100) / 100;
+    assertApprox(startRow.mortgage.openingBalance, expectedOpening, 'inflated opening balance');
+    assert.ok(startRow.mortgagePayment > 0, 'payments begin');
+  });
+
+  it('a start age in the past behaves as starting now', () => {
+    const a = projectLifecycle(mProfile, baseRates, { mortgage });
+    const b = projectLifecycle(mProfile, baseRates, {
+      mortgage: { ...mortgage, startAge: 25 },
+    });
+    assert.deepEqual(a.yearlyBreakdown[0].mortgage, b.yearlyBreakdown[0].mortgage);
+  });
+
+  it('can start during retirement', () => {
+    const retOpts = { targetNetAnnualExpenses: 10_000, maxAge: 50 };
+    const r = projectLifecycle(
+      mProfile,
+      baseRates,
+      {
+        mortgage: { ...mortgage, startAge: 45 },
+        isaBalance: 500_000,
+      },
+      retOpts
+    );
+    const preStart = r.yearlyBreakdown.find((row) => row.age === 44);
+    const startRow = r.yearlyBreakdown.find((row) => row.age === 45);
+    assert.equal(preStart.mortgagePayment, 0);
+    assert.ok(startRow.mortgagePayment > 0);
+  });
+
+  it('throws for a non-integer startAge', () => {
+    assert.throws(
+      () => projectLifecycle(mProfile, baseRates, { mortgage: { ...mortgage, startAge: 35.5 } }),
+      TypeError
+    );
+  });
+});
+
 describe('summary totals', () => {
   it('summary balances match final yearlyBreakdown row', () => {
     const r = run({ ...baseProfile, retirementAge: 35 });
