@@ -574,7 +574,10 @@ function EventSection({ p, events, onChange, title, accent, intro, help, placeho
   };
   const remove = (idx) => onChange(events.filter((_, i) => i !== idx));
   const add = () =>
-    onChange([...events, { age: Math.min(p.currentAge + 5, p.maxAge), amount: 10_000, label: '' }]);
+    onChange([
+      ...events,
+      { age: Math.min(p.currentAge + 5, p.maxAge), amount: 10_000, label: '', enabled: true },
+    ]);
 
   return (
     <div style={{ marginBottom: 22 }}>
@@ -602,88 +605,120 @@ function EventSection({ p, events, onChange, title, accent, intro, help, placeho
         {intro}
         <HelpTip text={help} />
       </p>
-      {events.map((ev, idx) => (
-        <div
-          key={idx}
-          style={{
-            border: '1px solid var(--border)',
-            borderLeft: `2px solid ${accent}`,
-            borderRadius: 8,
-            padding: '10px 12px',
-            marginBottom: 10,
-            background: 'var(--bg-card)',
-          }}
-        >
+      {events.map((ev, idx) => {
+        const enabled = ev.enabled !== false;
+        return (
           <div
+            key={idx}
             style={{
-              display: 'flex',
-              justifyContent: 'space-between',
-              alignItems: 'center',
-              marginBottom: 8,
+              border: '1px solid var(--border)',
+              borderLeft: `2px solid ${enabled ? accent : 'var(--border)'}`,
+              borderRadius: 8,
+              padding: '10px 12px',
+              marginBottom: 10,
+              background: 'var(--bg-card)',
+              opacity: enabled ? 1 : 0.45,
+              transition: 'opacity 0.15s',
             }}
           >
-            <input
-              type="text"
-              placeholder={placeholder}
-              value={ev.label ?? ''}
-              onChange={(e) => update(idx, 'label', e.target.value)}
-              style={{ ...eventInputStyle, width: 170, fontFamily: 'var(--font-body)' }}
-            />
-            <button
-              onClick={() => remove(idx)}
-              title="Remove event"
+            <div
               style={{
-                background: 'transparent',
-                border: 'none',
-                color: 'var(--text-muted)',
-                cursor: 'pointer',
-                fontSize: 14,
-                padding: '2px 6px',
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                marginBottom: 8,
+                gap: 8,
               }}
             >
-              ✕
-            </button>
-          </div>
-          <div style={{ display: 'flex', gap: 10 }}>
-            <label style={{ flex: 1, fontSize: 10, color: 'var(--text-secondary)' }}>
-              AGE{' '}
-              <span style={{ color: 'var(--text-muted)' }}>
-                ({CURRENT_YEAR + Math.max(0, (ev.age ?? p.currentAge) - p.currentAge)})
+              <input
+                type="text"
+                placeholder={placeholder}
+                value={ev.label ?? ''}
+                onChange={(e) => update(idx, 'label', e.target.value)}
+                style={{ ...eventInputStyle, width: 150, fontFamily: 'var(--font-body)' }}
+              />
+              <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                <button
+                  onClick={() => update(idx, 'enabled', !enabled)}
+                  title={
+                    enabled
+                      ? 'Exclude this event from the projection'
+                      : 'Include this event in the projection'
+                  }
+                  style={{
+                    background: enabled ? accent : 'transparent',
+                    border: `1px solid ${enabled ? accent : 'var(--border-bright)'}`,
+                    borderRadius: 10,
+                    color: enabled ? 'var(--accent-gold-text)' : 'var(--text-muted)',
+                    fontFamily: 'var(--font-mono)',
+                    fontSize: 9,
+                    fontWeight: 700,
+                    letterSpacing: '0.08em',
+                    padding: '2px 8px',
+                    cursor: 'pointer',
+                    opacity: 1,
+                  }}
+                >
+                  {enabled ? 'ON' : 'OFF'}
+                </button>
+                <button
+                  onClick={() => remove(idx)}
+                  title="Remove event"
+                  style={{
+                    background: 'transparent',
+                    border: 'none',
+                    color: 'var(--text-muted)',
+                    cursor: 'pointer',
+                    fontSize: 14,
+                    padding: '2px 6px',
+                  }}
+                >
+                  ✕
+                </button>
               </span>
-              <input
-                type="number"
-                min={p.currentAge}
-                max={p.maxAge}
-                step={1}
-                value={ev.age ?? p.currentAge}
-                onChange={(e) => {
-                  const n = parseInt(e.target.value, 10);
-                  if (!isNaN(n)) update(idx, 'age', n);
-                }}
-                onBlur={(e) => {
-                  const n = parseInt(e.target.value, 10);
-                  if (!isNaN(n)) update(idx, 'age', Math.max(p.currentAge, Math.min(p.maxAge, n)));
-                }}
-                style={{ ...eventInputStyle, marginTop: 4 }}
-              />
-            </label>
-            <label style={{ flex: 2, fontSize: 10, color: 'var(--text-secondary)' }}>
-              AMOUNT <span style={{ color: 'var(--text-muted)' }}>(today&apos;s £)</span>
-              <input
-                type="number"
-                min={0}
-                step={1000}
-                value={ev.amount ?? 0}
-                onChange={(e) => {
-                  const n = parseFloat(e.target.value);
-                  if (!isNaN(n) && n >= 0) update(idx, 'amount', n);
-                }}
-                style={{ ...eventInputStyle, marginTop: 4 }}
-              />
-            </label>
+            </div>
+            <div style={{ display: 'flex', gap: 10 }}>
+              <label style={{ flex: 1, fontSize: 10, color: 'var(--text-secondary)' }}>
+                AGE{' '}
+                <span style={{ color: 'var(--text-muted)' }}>
+                  ({CURRENT_YEAR + Math.max(0, (ev.age ?? p.currentAge) - p.currentAge)})
+                </span>
+                <input
+                  type="number"
+                  min={p.currentAge}
+                  max={p.maxAge}
+                  step={1}
+                  value={ev.age ?? p.currentAge}
+                  onChange={(e) => {
+                    const n = parseInt(e.target.value, 10);
+                    if (!isNaN(n)) update(idx, 'age', n);
+                  }}
+                  onBlur={(e) => {
+                    const n = parseInt(e.target.value, 10);
+                    if (!isNaN(n))
+                      update(idx, 'age', Math.max(p.currentAge, Math.min(p.maxAge, n)));
+                  }}
+                  style={{ ...eventInputStyle, marginTop: 4 }}
+                />
+              </label>
+              <label style={{ flex: 2, fontSize: 10, color: 'var(--text-secondary)' }}>
+                AMOUNT <span style={{ color: 'var(--text-muted)' }}>(today&apos;s £)</span>
+                <input
+                  type="number"
+                  min={0}
+                  step={1000}
+                  value={ev.amount ?? 0}
+                  onChange={(e) => {
+                    const n = parseFloat(e.target.value);
+                    if (!isNaN(n) && n >= 0) update(idx, 'amount', n);
+                  }}
+                  style={{ ...eventInputStyle, marginTop: 4 }}
+                />
+              </label>
+            </div>
           </div>
-        </div>
-      ))}
+        );
+      })}
       <button
         onClick={add}
         style={{
@@ -715,7 +750,7 @@ function EventsEditor({ p, set }) {
         title="Windfalls"
         accent="var(--accent-gold)"
         intro="One-off amounts added to your GIA at a given age — an inheritance, asset sale, or gift. Enter amounts in today's money, net of any fees and taxes; they are inflated to the event year."
-        help="The full amount counts as cost basis (no phantom gains), and the yearly bed-and-ISA sweep migrates it into ISA headroom over time. Windfalls are marked ▲ on the chart. In Monte Carlo mode each trial inflates the amount along its own inflation path. To model downsizing, enter the expected net proceeds here — see the README for why property itself is not tracked."
+        help="The full amount counts as cost basis (no phantom gains), and the yearly bed-and-ISA sweep migrates it into ISA headroom over time. Windfalls are marked ▲ on the chart. In Monte Carlo mode each trial inflates the amount along its own inflation path. Use the ON/OFF toggle to include or exclude an event without deleting it — handy for before/after comparisons. To model downsizing, enter the expected net proceeds here — see the README for why property itself is not tracked."
         placeholder="Label (e.g. Inheritance)"
         addLabel="+ Add Windfall"
       />
@@ -726,7 +761,7 @@ function EventsEditor({ p, set }) {
         title="One-off Expenses"
         accent="#f43f5e"
         intro="One-off costs paid from your pots at a given age — a house deposit, wedding, or helping children. Enter amounts in today's money; they are inflated to the event year."
-        help="Funded in tax-efficiency order: first from that year's unallocated savings (no tax event), then the GIA (CGT-aware, using the annual exempt amount), then the ISA. The pension is never touched — it is inaccessible before retirement. In retirement the expense joins that year's drawdown need. If your pots can't cover it, the gap is reported as a shortfall rather than borrowed. Expenses are marked ▼ on the chart. Pair a deposit here with a mortgage start age (Mortgage tab) to model a future property purchase."
+        help="Funded in tax-efficiency order: first from that year's unallocated savings (no tax event), then the GIA (CGT-aware, using the annual exempt amount), then the ISA. The pension is never touched — it is inaccessible before retirement. In retirement the expense joins that year's drawdown need. If your pots can't cover it, the gap is reported as a shortfall rather than borrowed. Expenses are marked ▼ on the chart. Use the ON/OFF toggle to include or exclude an event without deleting it. Pair a deposit here with a mortgage start age (Mortgage tab) to model a future property purchase."
         placeholder="Label (e.g. House deposit)"
         addLabel="+ Add Expense"
       />
@@ -2397,6 +2432,7 @@ export default function App() {
     const collect = (list, kind, defaultLabel) => {
       const byAge = new Map();
       for (const ev of list ?? []) {
+        if (ev.enabled === false) continue;
         if (!(ev.amount > 0) || ev.age < p.currentAge || ev.age > p.maxAge) continue;
         const label = ev.label || defaultLabel;
         byAge.set(ev.age, byAge.has(ev.age) ? `${byAge.get(ev.age)}, ${label}` : label);
