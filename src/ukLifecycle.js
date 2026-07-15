@@ -292,15 +292,17 @@ function applyGIAWithdrawal(bal, costBasis, gross) {
  *                                             9 weeks ≈ 5.8% (new state pension rules).
  *   studentLoanPlan?:       string | null   - 'plan1'|'plan2'|'plan4'|'plan5'|'postgrad'|null
  *   windfalls?: Array<{                     - Discrete events adding money to the GIA
- *     age:    number,                         at a given age (inheritance, asset sale, gift).
- *     amount: number,                         Today's money, net of fees/taxes; inflated to
- *     label?: string                          the event year. Full amount added to cost basis.
+ *     age:      number,                       at a given age (inheritance, asset sale, gift).
+ *     amount:   number,                       Today's money, net of fees/taxes; inflated to
+ *     label?:   string,                       the event year. Full amount added to cost basis.
+ *     enabled?: boolean                       enabled: false skips the event (default true).
  *   }>
  *   oneOffExpenses?: Array<{                - Discrete outflows at a given age (house
- *     age:    number,                         deposit, wedding, helping children). Today's
- *     amount: number,                         money, inflated to the event year. Funded from
- *     label?: string                          savings → GIA → ISA (accumulation) or via the
- *   }>                                        drawdown order (retirement); never the pension.
+ *     age:      number,                       deposit, wedding, helping children). Today's
+ *     amount:   number,                       money, inflated to the event year. Funded from
+ *     label?:   string,                       savings → GIA → ISA (accumulation) or via the
+ *     enabled?: boolean                       drawdown order (retirement); never the pension.
+ *   }>                                        enabled: false skips the event (default true).
  * }} profile
  *
  * @param {{
@@ -406,7 +408,9 @@ export function projectLifecycle(
   // expenses (house deposit, wedding, helping children) are funded from the
   // pots. Amounts are net of fees/taxes, expressed in today's money, and
   // inflated to the event year. Events at ages outside the projected range
-  // are simply never reached (harmless).
+  // are simply never reached (harmless). An event with enabled === false is
+  // skipped entirely — it can be toggled off for what-if comparisons without
+  // being deleted.
   function validateEvents(list, name, defaultLabel) {
     if (!Array.isArray(list)) throw new TypeError(`${name} must be an array`);
     for (let i = 0; i < list.length; i++) {
@@ -422,6 +426,7 @@ export function projectLifecycle(
       let total = 0;
       const labels = [];
       for (const ev of list) {
+        if (ev.enabled === false) continue;
         if (ev.age === age && ev.amount > 0) {
           total += ev.amount;
           labels.push(ev.label || defaultLabel);

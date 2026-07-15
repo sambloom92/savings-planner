@@ -697,6 +697,26 @@ describe('windfalls', () => {
     assert.ok(r.yearlyBreakdown.every((row) => (row.windfall ?? 0) === 0));
   });
 
+  it('enabled: false skips an event; enabled: true and omitted both include it', () => {
+    const off = run({
+      ...wfProfile,
+      windfalls: [{ age: 30, amount: 10_000, enabled: false }],
+      oneOffExpenses: [{ age: 30, amount: 5_000, enabled: false }],
+    });
+    const y = off.yearlyBreakdown[0];
+    assert.equal(y.windfall, 0);
+    assert.equal(y.oneOffExpense, 0);
+    assert.deepEqual(y.gia.closingBalance, run(wfProfile).yearlyBreakdown[0].gia.closingBalance);
+
+    const onExplicit = run({
+      ...wfProfile,
+      windfalls: [{ age: 30, amount: 10_000, enabled: true }],
+    });
+    const onOmitted = run({ ...wfProfile, windfalls: [{ age: 30, amount: 10_000 }] });
+    assert.equal(onExplicit.yearlyBreakdown[0].windfall, 10_000);
+    assert.equal(onOmitted.yearlyBreakdown[0].windfall, 10_000);
+  });
+
   it('retirement-phase windfall is applied and reported on the row', () => {
     const retOpts = { targetNetAnnualExpenses: 15_000, maxAge: 45 };
     const r = projectLifecycle(
