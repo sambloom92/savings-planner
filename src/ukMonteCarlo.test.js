@@ -190,6 +190,68 @@ describe('bear-drag compensation keeps the median calibrated', () => {
   });
 });
 
+describe('solvency metrics', () => {
+  // A deliberately under-funded plan so some trials run dry: retire early on
+  // modest pots with high spending.
+  const thinProfile = { ...profile, retirementAge: 50 };
+  const thinPots = { pensionBalance: 60_000, isaBalance: 20_000, giaBalance: 0 };
+  const thinRet = { ...retirementOpts, targetNetAnnualExpenses: 40_000, maxAge: 100 };
+
+  it('exposes both horizon and lifetime solvency figures', () => {
+    const res = runMonteCarlo(thinProfile, rates, thinPots, thinRet, { trials: 200, seed: 5 });
+    const s = res.solvency;
+    for (const k of ['solventToHorizon', 'solventForLife', 'lifetimeRuinProb']) {
+      assert.ok(s[k] >= 0 && s[k] <= 1, `${k} out of range: ${s[k]}`);
+    }
+    assert.ok(Math.abs(s.solventForLife + s.lifetimeRuinProb - 1) < 1e-9, 'complement holds');
+  });
+
+  it('lifetime solvency is at least horizon solvency (late ruin is discounted)', () => {
+    // Mortality forgives late shortfalls, so P(solvent for life) >= P(solvent to horizon).
+    const res = runMonteCarlo(thinProfile, rates, thinPots, thinRet, { trials: 300, seed: 9 });
+    const s = res.solvency;
+    assert.ok(
+      s.solventForLife >= s.solventToHorizon - 1e-9,
+      `lifetime ${s.solventForLife} < horizon ${s.solventToHorizon}`
+    );
+  });
+
+  it('a fully-funded plan is solvent on both measures', () => {
+    const res = runMonteCarlo(profile, rates, { ...pots, isaBalance: 2_000_000 }, retirementOpts, {
+      trials: 100,
+      seed: 3,
+      volatility: 0,
+    });
+    assert.equal(res.solvency.exhaustedTrials, 0);
+    assert.equal(res.solvency.solventToHorizon, 1);
+    assert.equal(res.solvency.solventForLife, 1);
+  });
+
+  it('survival series spans the horizon, starts at 1, and is non-increasing', () => {
+    const res = runMonteCarlo(thinProfile, rates, thinPots, thinRet, { trials: 20, seed: 1 });
+    const surv = res.solvency.survival;
+    assert.equal(surv[0].age, thinProfile.currentAge);
+    assert.equal(surv[0].survival, 1);
+    assert.equal(surv.at(-1).age, thinRet.maxAge);
+    for (let i = 1; i < surv.length; i++) {
+      assert.ok(surv[i].survival <= surv[i - 1].survival);
+    }
+  });
+
+  it('sex changes the lifetime figure but not the horizon figure', () => {
+    const base = { trials: 300, seed: 7 };
+    const male = runMonteCarlo(thinProfile, rates, thinPots, thinRet, { ...base, sex: 'male' });
+    const female = runMonteCarlo(thinProfile, rates, thinPots, thinRet, { ...base, sex: 'female' });
+    // Horizon solvency is mortality-independent → identical for the same seed.
+    assert.equal(male.solvency.solventToHorizon, female.solvency.solventToHorizon);
+    // Females live longer → more exposed to late ruin → lower lifetime solvency.
+    assert.ok(
+      female.solvency.solventForLife <= male.solvency.solventForLife + 1e-9,
+      'female lifetime solvency should not exceed male'
+    );
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Summary
 // ---------------------------------------------------------------------------

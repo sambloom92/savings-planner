@@ -6,7 +6,7 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "test": "node src/ukIncomeTax.test.js && node src/ukStudentLoan.test.js && node src/ukDebt.test.js && node src/ukNationalInsurance.test.js && node src/ukGIA.test.js && node src/ukISA.test.js && node src/ukPension.test.js && node src/ukLifecycle.test.js && node src/ukMonteCarlo.test.js",
+    "test": "node src/ukIncomeTax.test.js && node src/ukStudentLoan.test.js && node src/ukDebt.test.js && node src/ukNationalInsurance.test.js && node src/ukGIA.test.js && node src/ukISA.test.js && node src/ukPension.test.js && node src/ukLifecycle.test.js && node src/ukMonteCarlo.test.js && node src/ukMortality.test.js",
     "lint": "eslint src/",
     "format:check": "prettier --check src/",
     "format": "prettier --write src/"

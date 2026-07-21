@@ -8,6 +8,7 @@ A browser-based retirement savings projection dashboard for residents of England
 - **Retirement phase** — simulates tax-efficient drawdown across pension (tax-free + taxable), ISA, and GIA (with CGT modelling); state pension eligibility based on NI qualifying years
 - **Glide path** — configurable equity/bond split pre- and post-retirement, with a linear taper over a user-defined window (e.g. start de-risking 10 years before retirement, fully de-risked 5 years after)
 - **Monte Carlo simulation** — stochastic fan chart showing p10–p90 outcome bands across hundreds of trials; uses a two-regime Markov model (normal/bear) with fat-tailed (t₅) market shocks and GARCH-like volatility persistence
+- **Lifetime solvency** — mortality-weighted probability of never running out of money *while alive*: each trial that runs dry is discounted by the chance you live to experience it, so dying with money left counts as success. Uses a UK population survival model (Gompertz–Makeham, sex-selectable) and is shown alongside the simpler fixed-horizon figure, with a survival curve overlaid on the fan chart
 - **Fiscal drag** — configurable bracket-creep: model frozen, inflation-linked, or real-terms-rising tax bands
 - **Windfalls** — discrete life events (inheritance, asset sale, gift) that add money to the GIA at a chosen age; amounts are in today's money (net of fees/taxes), inflated to the event year, marked on the chart, and swept into ISA headroom over time
 - **One-off expenses** — discrete outflows (house deposit, wedding, helping children) at a chosen age, funded in tax-efficiency order (unallocated savings → GIA → ISA, never the pension); unfundable amounts are reported as shortfalls, not borrowed
@@ -71,6 +72,7 @@ src/
   ukPension.js            Pension commencement lump sum (PCLS) calculator
   ukLifecycle.js          Full lifecycle projection engine (accumulation + retirement)
   ukMonteCarlo.js         Monte Carlo simulation — two-regime Markov model
+  ukMortality.js          UK survival model (Gompertz–Makeham) for lifetime solvency
   FanChart.jsx            Canvas-based stochastic fan chart React component
   App.jsx                 React UI — sidebar, charts, year-detail panel
 ```
