@@ -80,7 +80,8 @@ function drawFanChart(
   fourPctTarget,
   logScale,
   deterministicMode,
-  eventMarkers
+  eventMarkers,
+  survivalSeries
 ) {
   const ctx = canvas.getContext('2d');
 
@@ -460,6 +461,49 @@ function drawFanChart(
     ctx.fillText('State Pension', xOf(statePensionAge), PAD.top - 8);
   }
 
+  // ── Survival curve overlay (P(alive) by age) ──────────────────────────────
+  // Faint dotted line on its own 0..1 scale mapped to the full plot height, so
+  // the top edge = certainly alive and the bottom = certainly not. It explains
+  // why late shortfalls barely dent the lifetime-solvency figure.
+  if (survivalSeries && survivalSeries.length > 1 && !lockedPath) {
+    const sTop = PAD.top;
+    const sBot = PAD.top + cH;
+    const survY = (s) => sBot - Math.max(0, Math.min(1, s)) * (sBot - sTop);
+    ctx.save();
+    ctx.setLineDash([2, 3]);
+    ctx.strokeStyle = mutedCol;
+    ctx.globalAlpha = 0.55;
+    ctx.lineWidth = 1.25;
+    ctx.beginPath();
+    let started = false;
+    for (const pt of survivalSeries) {
+      if (pt.age < minAge || pt.age > maxAgeVal) continue;
+      const x = xOf(pt.age);
+      const y = survY(pt.survival);
+      if (!started) {
+        ctx.moveTo(x, y);
+        started = true;
+      } else {
+        ctx.lineTo(x, y);
+      }
+    }
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.globalAlpha = 0.75;
+    ctx.font = `9px ${mono}`;
+    ctx.textAlign = 'left';
+    ctx.fillStyle = mutedCol;
+    const last = survivalSeries[survivalSeries.length - 1];
+    ctx.fillText('P(alive)', PAD.left + 4, survY(survivalSeries[0].survival) + 12);
+    ctx.textAlign = 'right';
+    ctx.fillText(
+      `${Math.round(last.survival * 100)}%`,
+      PAD.left + cW - 4,
+      survY(last.survival) - 4
+    );
+    ctx.restore();
+  }
+
   // ── Life-event markers (windfalls ▲ gold, one-off expenses ▼ rose) ─────────
   // Small triangles on the x-axis at each event age. Labels are drawn only
   // when they don't collide with the previous label — full details are
@@ -706,6 +750,7 @@ export function FanChart({
   logScale = false,
   deterministicData = null,
   eventMarkers = null,
+  survivalSeries = null,
   height = 390,
 }) {
   const canvasRef = useRef(null);
@@ -859,7 +904,8 @@ export function FanChart({
       fourPctTarget,
       logScale,
       !!deterministicData,
-      eventMarkers
+      eventMarkers,
+      survivalSeries
     );
     coordRef.current = { ...coords, adjData: effectiveAdjData };
     // colorMode in deps: theme change re-reads CSS vars via cssVar() at draw time
@@ -882,6 +928,7 @@ export function FanChart({
     fourPctTarget,
     logScale,
     eventMarkers,
+    survivalSeries,
   ]);
 
   // Mousemove: update hover; frozen while a trial is locked

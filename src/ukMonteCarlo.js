@@ -56,6 +56,7 @@
  */
 
 import { projectLifecycle } from './ukLifecycle.js';
+import { survivalToAge, survivalCurve } from './ukMortality.js';
 
 const VOL_BEAR = 2.5; // vol multiplier target during bear regimes
 const VOL_NORMAL = 1.0; // vol multiplier target during normal regimes
@@ -128,6 +129,9 @@ export function runMonteCarlo(profile, baseRates, pots, retirementOpts, opts = {
     // Default 0.5/0.8 → ratio ≈ 0.625 (close to the old hardcoded 0.75 at 0.6/0.8).
     preRetirementEquity = 0.8,
     postRetirementEquity = 0.4,
+    // Sex for the mortality/survival weighting of the lifetime-solvency metric.
+    // 'neutral' (default) blends male and female rates.
+    sex = 'neutral',
   } = opts;
 
   // Volatility reduction factor for the retirement-phase rate relative to the
@@ -220,28 +224,35 @@ export function runMonteCarlo(profile, baseRates, pots, retirementOpts, opts = {
   const ages = successful[0].yearlyBreakdown.map((r) => r.age);
   const portfolioMatrix = successful.map((r) => r.yearlyBreakdown.map(rowPortfolio));
 
+  // Age at which each trial's pots first hit zero (Infinity = never within the
+  // horizon). Computed once and shared by both the ranking below and the
+  // lifetime-solvency metric further down.
+  const maxAgeIdx = ages.length - 1;
+  const currentAge = ages[0];
+
+  function firstShortfallAge(col) {
+    for (let i = 1; i < col.length; i++) {
+      if (col[i] <= 0 && col[i - 1] > 0) return ages[i];
+    }
+    return Infinity;
+  }
+
+  const shortfallAges = portfolioMatrix.map(firstShortfallAge);
+
   // ── Rank trials for representative-path selection ─────────────────────────
   // Sort order (ascending = worst → best):
   //   Survivors (never exhaust funds) always beat exhausted trials.
   //   Among survivors:  rank by final balance at maxAge.
   //   Among exhausted:  rank by shortfall age, then total portfolio area.
-  const maxAgeIdx = ages.length - 1;
-
-  function trialScore(col) {
-    const finalBal = col[maxAgeIdx] ?? 0;
-    let shortfallAge = Infinity;
-    for (let i = 1; i < col.length; i++) {
-      if (col[i] <= 0 && col[i - 1] > 0) {
-        shortfallAge = ages[i];
-        break;
-      }
-    }
-    const totalBal = col.reduce((s, v) => s + v, 0);
-    return { finalBal, shortfallAge, totalBal };
-  }
-
+  // Purely financial — mortality is deliberately NOT folded in here, so the fan
+  // bands stay a clean "wealth distribution conditional on being alive".
   const ranked = portfolioMatrix
-    .map((col, i) => ({ i, ...trialScore(col) }))
+    .map((col, i) => ({
+      i,
+      finalBal: col[maxAgeIdx] ?? 0,
+      shortfallAge: shortfallAges[i],
+      totalBal: col.reduce((s, v) => s + v, 0),
+    }))
     .sort((a, b) => {
       const aEx = a.shortfallAge !== Infinity;
       const bEx = b.shortfallAge !== Infinity;
@@ -289,5 +300,47 @@ export function runMonteCarlo(profile, baseRates, pots, retirementOpts, opts = {
     }))
   );
 
-  return { percentileData, repPaths, trialCount: successful.length, portfolioMatrix, allPotData };
+  // ── Solvency metrics ──────────────────────────────────────────────────────
+  // Horizon (fixed-age) view: fraction of trials that never run dry by maxAge.
+  // This ignores whether you're alive to see a late shortfall.
+  const ranTrials = successful.length;
+  const exhaustedTrials = shortfallAges.filter((a) => a !== Infinity).length;
+  const solventToHorizon = ranTrials > 0 ? (ranTrials - exhaustedTrials) / ranTrials : 0;
+
+  // Lifetime (mortality-weighted) view — the actuarially correct metric.
+  // For a trial that runs dry at age A, the probability you actually experience
+  // that ruin is P(alive at A) = survivalToAge(currentAge, A). Averaging that
+  // over all trials integrates mortality out analytically (no extra sampling):
+  //   P(lifetime ruin)    = mean over trials of survival-to-shortfall
+  //   P(solvent for life) = 1 − that
+  // Trials that never run dry contribute 0 (survival to Infinity = 0). Dying
+  // with money still invested therefore counts as a success.
+  const lifetimeRuinProb =
+    ranTrials > 0
+      ? shortfallAges.reduce(
+          (sum, a) => sum + (a === Infinity ? 0 : survivalToAge(currentAge, a, sex)),
+          0
+        ) / ranTrials
+      : 0;
+  const solventForLife = 1 - lifetimeRuinProb;
+
+  // Survival curve over the projection ages — for the optional chart overlay
+  // and to show how much of the horizon is discounted by mortality.
+  const survival = survivalCurve(currentAge, ages[maxAgeIdx], sex);
+
+  return {
+    percentileData,
+    repPaths,
+    trialCount: successful.length,
+    portfolioMatrix,
+    allPotData,
+    solvency: {
+      sex,
+      solventToHorizon,
+      solventForLife,
+      lifetimeRuinProb,
+      exhaustedTrials,
+      survival,
+    },
+  };
 }

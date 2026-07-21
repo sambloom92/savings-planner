@@ -63,6 +63,7 @@ const DEFAULTS = {
   niContributionYears: 3,
   statePensionAge: 67,
   statePensionDeferralYears: 0,
+  sex: 'neutral', // mortality basis for the lifetime-solvency metric
   windfalls: [],
   oneOffExpenses: [],
   employeePensionPct: 5,
@@ -1324,6 +1325,65 @@ function TabContent({ tab, p, set }) {
             These settings control the Monte Carlo simulation. Switch to the Monte Carlo tab in the
             chart to run it.
           </InfoBox>
+          {/* Sex — mortality basis for the lifetime-solvency metric */}
+          <div style={{ marginBottom: 16 }}>
+            <div
+              style={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                marginBottom: 6,
+              }}
+            >
+              <span
+                style={{
+                  fontSize: 12,
+                  fontFamily: 'var(--font-body)',
+                  color: 'var(--text-secondary)',
+                  display: 'flex',
+                  alignItems: 'center',
+                }}
+              >
+                Sex (for survival)
+                <HelpTip text="Sets the mortality table used for the lifetime-solvency figure — the chance of never running out of money while you're alive. Female mortality is lower, so a longer expected lifespan gives more exposure to late shortfalls. 'Neutral' blends the male and female rates. This affects only the lifetime-solvency number, never the projection itself or the fan bands. It's a rough population estimate, not individual health." />
+              </span>
+              <div
+                style={{
+                  display: 'flex',
+                  background: 'var(--bg-input)',
+                  border: '1px solid var(--border)',
+                  borderRadius: 5,
+                  overflow: 'hidden',
+                }}
+              >
+                {[
+                  { label: 'Female', value: 'female' },
+                  { label: 'Male', value: 'male' },
+                  { label: 'Neutral', value: 'neutral' },
+                ].map(({ label, value }) => (
+                  <button
+                    key={value}
+                    onClick={() => set('sex')(value)}
+                    style={{
+                      padding: '3px 9px',
+                      background: p.sex === value ? 'var(--accent-gold)' : 'transparent',
+                      border: 'none',
+                      color: p.sex === value ? 'var(--accent-gold-text)' : 'var(--text-secondary)',
+                      fontFamily: 'var(--font-mono)',
+                      fontSize: 10,
+                      fontWeight: 600,
+                      letterSpacing: '0.05em',
+                      cursor: 'pointer',
+                      transition: 'all 0.15s',
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
           <Slider
             label="Trials"
             value={p.mcTrials}
@@ -2504,6 +2564,7 @@ export default function App() {
             crisisPersistence: p.mcCrisisPersistence,
             preRetirementEquity: p.preRetirementEquityPct / 100,
             postRetirementEquity: p.postRetirementEquityPct / 100,
+            sex: p.sex,
           })
         );
       } catch {
@@ -3279,13 +3340,48 @@ export default function App() {
                     />
                   </span>
                 )}
+                {chartTab === 'mc' && mcResults?.solvency && (
+                  <span
+                    style={{
+                      display: 'flex',
+                      alignItems: 'baseline',
+                      gap: 6,
+                      fontFamily: 'var(--font-mono)',
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    <span
+                      style={{ fontSize: 10, color: 'var(--text-muted)', letterSpacing: '0.04em' }}
+                    >
+                      SOLVENT FOR LIFE
+                    </span>
+                    <span
+                      style={{
+                        fontSize: 15,
+                        fontWeight: 700,
+                        color:
+                          mcResults.solvency.solventForLife >= 0.9
+                            ? '#34d399'
+                            : mcResults.solvency.solventForLife >= 0.75
+                              ? 'var(--accent-gold)'
+                              : '#f43f5e',
+                      }}
+                    >
+                      {fmtPct(mcResults.solvency.solventForLife * 100)}
+                    </span>
+                    <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>
+                      · to age {p.maxAge}: {fmtPct(mcResults.solvency.solventToHorizon * 100)}
+                    </span>
+                  </span>
+                )}
                 {chartTab === 'mc' && (
                   <HelpTip
                     text={
                       `${mcResults ? mcResults.trialCount : 0} trials shown. Each trial varies investment returns (market factor) and inflation / BoE / wage growth (macro factor) using correlated random shocks.\n\n` +
-                      'Bands show the 10th–90th percentile range (faint) and 25th–75th range (stronger). Lines show the 5 key percentiles.\n\n' +
-                      'Click and hold on a data point to isolate the single trial closest to that percentile at that age. Release to return to the full fan.\n\n' +
-                      'Shortfall labels (▼ with age) on the x-axis show when each percentile path runs out of money. Hover to see pot detail from that path.'
+                      'Solvent for life: the chance you never run out of money while still alive — the complement of the lifetime probability of ruin. Each trial that runs dry is weighted by the probability you live to see it (from UK population mortality for the selected sex, set in the Simulation tab), so dying with money left counts as success. Set high enough that the age horizon reaches ~100 for this to be meaningful.\n\n' +
+                      'The "to age N" figure is the simpler fixed-horizon view: the fraction of trials solvent all the way to the model horizon, ignoring survival. It is always the more pessimistic of the two.\n\n' +
+                      'Bands show the 10th–90th percentile range (faint) and 25th–75th range (stronger). Lines show the 5 key percentiles. The dotted curve is the probability of still being alive at each age.\n\n' +
+                      'Click and hold on a data point to isolate the single trial closest to that percentile at that age. Shortfall labels (▼ with age) show when each percentile path runs out of money.'
                     }
                   />
                 )}
@@ -3315,6 +3411,7 @@ export default function App() {
                     colorMode={colorMode}
                     logScale={logScale}
                     eventMarkers={eventMarkers}
+                    survivalSeries={mcResults.solvency?.survival}
                     height={mobile ? 260 : 390}
                   />
                 ) : mcPending ? (
