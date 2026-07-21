@@ -1,4 +1,4 @@
-import { useState, useMemo, useRef, useEffect } from 'react';
+import { useState, useMemo, useRef, useEffect, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import { projectLifecycle } from './ukLifecycle.js';
 import { runMonteCarlo } from './ukMonteCarlo.js';
@@ -2127,9 +2127,114 @@ function YearDetailPanel({ row, mobile = false }) {
   );
 }
 
+// ── Undo/redo history ─────────────────────────────────────────────────────────
+// Wraps a single state value in a past/present/future stack. Edits made through
+// `set(key)(value)` coalesce by field: contiguous changes to the same key within
+// COALESCE_MS collapse into one undo step, so dragging a slider is a single undo
+// rather than dozens. `replace()` commits a discrete step (JSON paste, reset).
+// `seal()` ends the current coalescing group so the next edit — even to the same
+// field — starts a fresh step (called on pointerup / blur, i.e. "commit on settle").
+const COALESCE_MS = 600;
+const HISTORY_LIMIT = 100;
+
+function useHistory(initializer) {
+  const [hist, setHist] = useState(() => ({
+    past: [],
+    present: typeof initializer === 'function' ? initializer() : initializer,
+    future: [],
+  }));
+  // Identity of the in-progress coalescing group; refs don't trigger renders.
+  const groupRef = useRef({ key: null, time: 0 });
+
+  const commit = useCallback((updater, coalesceKey) => {
+    setHist((h) => {
+      const next = typeof updater === 'function' ? updater(h.present) : updater;
+      if (Object.is(next, h.present)) return h;
+      const now = Date.now();
+      const g = groupRef.current;
+      const merge = coalesceKey != null && g.key === coalesceKey && now - g.time < COALESCE_MS;
+      groupRef.current = { key: coalesceKey ?? null, time: now };
+      if (merge) return { past: h.past, present: next, future: [] };
+      const past = [...h.past, h.present];
+      if (past.length > HISTORY_LIMIT) past.shift();
+      return { past, present: next, future: [] };
+    });
+  }, []);
+
+  const seal = useCallback(() => {
+    groupRef.current = { key: null, time: 0 };
+  }, []);
+
+  const undo = useCallback(() => {
+    setHist((h) => {
+      if (h.past.length === 0) return h;
+      const previous = h.past[h.past.length - 1];
+      return {
+        past: h.past.slice(0, -1),
+        present: previous,
+        future: [h.present, ...h.future],
+      };
+    });
+    groupRef.current = { key: null, time: 0 };
+  }, []);
+
+  const redo = useCallback(() => {
+    setHist((h) => {
+      if (h.future.length === 0) return h;
+      const next = h.future[0];
+      return {
+        past: [...h.past, h.present],
+        present: next,
+        future: h.future.slice(1),
+      };
+    });
+    groupRef.current = { key: null, time: 0 };
+  }, []);
+
+  const set = useCallback(
+    (key) => (value) => commit((prev) => ({ ...prev, [key]: value }), key),
+    [commit]
+  );
+  const replace = useCallback((next) => commit(next, null), [commit]);
+
+  return {
+    state: hist.present,
+    set,
+    replace,
+    seal,
+    undo,
+    redo,
+    canUndo: hist.past.length > 0,
+    canRedo: hist.future.length > 0,
+  };
+}
+
+// True for fields where the browser's own text undo should win over app undo.
+// Range sliders (type=range) are deliberately excluded — after dragging one, the
+// slider keeps focus and Ctrl+Z should undo the app change, not do nothing.
+function isTextEntry(el) {
+  if (!el) return false;
+  if (el.isContentEditable) return true;
+  if (el.tagName === 'TEXTAREA') return true;
+  if (el.tagName === 'INPUT') {
+    const t = (el.getAttribute('type') || 'text').toLowerCase();
+    return ['text', 'number', 'search', 'tel', 'url', 'email', 'password'].includes(t);
+  }
+  return false;
+}
+
 // ── App ───────────────────────────────────────────────────────────────────────
 export default function App() {
-  const [p, setP] = useState(() => {
+  const {
+    state: p,
+    set,
+    replace: replaceP,
+    seal: sealHistory,
+    undo,
+    redo,
+    canUndo,
+    canRedo,
+  } = useHistory(() => {
     try {
       const saved = localStorage.getItem('inputs');
       return saved ? { ...DEFAULTS, ...JSON.parse(saved) } : DEFAULTS;
@@ -2154,6 +2259,36 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem('inputs', JSON.stringify(p));
   }, [p]);
+
+  // Undo/redo keyboard shortcuts: Ctrl/Cmd+Z, Ctrl/Cmd+Shift+Z, and Ctrl+Y.
+  // Skipped while a text field is focused so the browser's native text undo wins.
+  useEffect(() => {
+    const onKeyDown = (e) => {
+      const mod = e.metaKey || e.ctrlKey;
+      if (!mod) return;
+      const key = e.key.toLowerCase();
+      const isUndo = key === 'z' && !e.shiftKey;
+      const isRedo = (key === 'z' && e.shiftKey) || (e.ctrlKey && key === 'y');
+      if (!isUndo && !isRedo) return;
+      if (isTextEntry(document.activeElement)) return;
+      e.preventDefault();
+      if (isRedo) redo();
+      else undo();
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [undo, redo]);
+
+  // "Commit on settle": end the current coalescing group when a drag or edit
+  // finishes, so a fresh interaction with the same field is a separate undo step.
+  useEffect(() => {
+    window.addEventListener('pointerup', sealHistory);
+    window.addEventListener('focusout', sealHistory);
+    return () => {
+      window.removeEventListener('pointerup', sealHistory);
+      window.removeEventListener('focusout', sealHistory);
+    };
+  }, [sealHistory]);
 
   // Persist colorMode and, for 'device', keep data-theme in sync with OS preference.
   // data-theme itself is set synchronously via changeColorMode() before each render.
@@ -2188,15 +2323,13 @@ export default function App() {
       const parsed = JSON.parse(text);
       if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed))
         throw new Error('not an object');
-      setP({ ...DEFAULTS, ...parsed });
+      replaceP({ ...DEFAULTS, ...parsed });
       setPasteMsg('Applied!');
     } catch (e) {
       setPasteMsg(e instanceof SyntaxError ? 'Invalid JSON' : 'Failed');
     }
     setTimeout(() => setPasteMsg(null), 2000);
   }
-
-  const set = (key) => (value) => setP((prev) => ({ ...prev, [key]: value }));
 
   // ── Shared helpers — derive rates + pots from current params ─────────────
   // Used by both the deterministic memo and the Monte Carlo effect so there is
@@ -2715,6 +2848,58 @@ export default function App() {
           >
             {(!mobile || sidebarOpen) && (
               <>
+                {/* Undo / Redo */}
+                <div style={{ display: 'flex', gap: 8 }}>
+                  {[
+                    {
+                      label: '↶ Undo',
+                      title: 'Undo (Ctrl/Cmd+Z)',
+                      handler: undo,
+                      enabled: canUndo,
+                    },
+                    {
+                      label: 'Redo ↷',
+                      title: 'Redo (Ctrl/Cmd+Shift+Z)',
+                      handler: redo,
+                      enabled: canRedo,
+                    },
+                  ].map(({ label, title, handler, enabled }) => (
+                    <button
+                      key={label}
+                      onClick={handler}
+                      disabled={!enabled}
+                      title={title}
+                      style={{
+                        flex: 1,
+                        padding: '7px 4px',
+                        background: 'transparent',
+                        border: '1px solid var(--border-bright)',
+                        borderRadius: 6,
+                        color: enabled ? 'var(--text-secondary)' : 'var(--text-muted)',
+                        opacity: enabled ? 1 : 0.4,
+                        fontFamily: 'var(--font-mono)',
+                        fontSize: 11,
+                        cursor: enabled ? 'pointer' : 'default',
+                        letterSpacing: '0.04em',
+                        transition: 'all 0.15s',
+                      }}
+                      onMouseOver={(e) => {
+                        if (enabled) {
+                          e.currentTarget.style.borderColor = 'var(--accent-gold)';
+                          e.currentTarget.style.color = 'var(--accent-gold)';
+                        }
+                      }}
+                      onMouseOut={(e) => {
+                        e.currentTarget.style.borderColor = 'var(--border-bright)';
+                        e.currentTarget.style.color = enabled
+                          ? 'var(--text-secondary)'
+                          : 'var(--text-muted)';
+                      }}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
                 {/* Copy / Paste JSON */}
                 <div style={{ display: 'flex', gap: 8 }}>
                   {[
@@ -2760,8 +2945,7 @@ export default function App() {
                 {/* Reset */}
                 <button
                   onClick={() => {
-                    localStorage.removeItem('inputs');
-                    setP(DEFAULTS);
+                    replaceP(DEFAULTS);
                     setActiveTab('Personal');
                   }}
                   style={{
