@@ -2653,6 +2653,43 @@ export default function App() {
   // at retirementAge — keeping stat-card figures consistent with graph hover / axis readings.
   const retYearEndRow = displayData.find((d) => d.phase === 'retirement') ?? null;
 
+  // Solvency readout for the Monte Carlo chart header. Rendered inline in the
+  // right controls on desktop, or as its own full-width line on mobile (where
+  // the 3-column header has no room for a wide nowrap figure).
+  const solvencyReadout =
+    chartTab === 'mc' && mcResults?.solvency ? (
+      <span
+        style={{
+          display: 'flex',
+          alignItems: 'baseline',
+          gap: 6,
+          fontFamily: 'var(--font-mono)',
+          flexWrap: 'wrap',
+        }}
+      >
+        <span style={{ fontSize: 10, color: 'var(--text-muted)', letterSpacing: '0.04em' }}>
+          SOLVENT FOR LIFE
+        </span>
+        <span
+          style={{
+            fontSize: 15,
+            fontWeight: 700,
+            color:
+              mcResults.solvency.solventForLife >= 0.9
+                ? '#34d399'
+                : mcResults.solvency.solventForLife >= 0.75
+                  ? 'var(--accent-gold)'
+                  : '#f43f5e',
+          }}
+        >
+          {fmtPct(mcResults.solvency.solventForLife * 100)}
+        </span>
+        <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>
+          · to age {p.maxAge}: {fmtPct(mcResults.solvency.solventToHorizon * 100)}
+        </span>
+      </span>
+    ) : null;
+
   return (
     <div
       style={{
@@ -3340,40 +3377,7 @@ export default function App() {
                     />
                   </span>
                 )}
-                {chartTab === 'mc' && mcResults?.solvency && (
-                  <span
-                    style={{
-                      display: 'flex',
-                      alignItems: 'baseline',
-                      gap: 6,
-                      fontFamily: 'var(--font-mono)',
-                      whiteSpace: 'nowrap',
-                    }}
-                  >
-                    <span
-                      style={{ fontSize: 10, color: 'var(--text-muted)', letterSpacing: '0.04em' }}
-                    >
-                      SOLVENT FOR LIFE
-                    </span>
-                    <span
-                      style={{
-                        fontSize: 15,
-                        fontWeight: 700,
-                        color:
-                          mcResults.solvency.solventForLife >= 0.9
-                            ? '#34d399'
-                            : mcResults.solvency.solventForLife >= 0.75
-                              ? 'var(--accent-gold)'
-                              : '#f43f5e',
-                      }}
-                    >
-                      {fmtPct(mcResults.solvency.solventForLife * 100)}
-                    </span>
-                    <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>
-                      · to age {p.maxAge}: {fmtPct(mcResults.solvency.solventToHorizon * 100)}
-                    </span>
-                  </span>
-                )}
+                {!mobile && solvencyReadout}
                 {chartTab === 'mc' && (
                   <HelpTip
                     text={
@@ -3387,6 +3391,11 @@ export default function App() {
                 )}
               </div>
             </div>
+
+            {/* Mobile: solvency readout on its own full-width line (no room in the header row) */}
+            {mobile && solvencyReadout && (
+              <div style={{ padding: '0 16px', marginBottom: 12 }}>{solvencyReadout}</div>
+            )}
 
             {/* ── Monte Carlo tab ── */}
             {chartTab === 'mc' && (
