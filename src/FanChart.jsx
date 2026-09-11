@@ -81,7 +81,8 @@ function drawFanChart(
   logScale,
   deterministicMode,
   eventMarkers,
-  survivalSeries
+  survivalSeries,
+  pensionAccessAge
 ) {
   const ctx = canvas.getContext('2d');
 
@@ -220,6 +221,22 @@ function drawFanChart(
     ctx.beginPath();
     ctx.moveTo(spX, PAD.top);
     ctx.lineTo(spX, PAD.top + cH);
+    ctx.stroke();
+  }
+
+  // Pension access (NMPA) — only when it falls after retirement (a binding
+  // bridge constraint) and within the plotted range.
+  if (
+    pensionAccessAge != null &&
+    pensionAccessAge > retirementAge &&
+    pensionAccessAge >= minAge &&
+    pensionAccessAge <= maxAgeVal
+  ) {
+    const paX = xOf(pensionAccessAge);
+    ctx.strokeStyle = 'rgba(79,142,247,0.5)';
+    ctx.beginPath();
+    ctx.moveTo(paX, PAD.top);
+    ctx.lineTo(paX, PAD.top + cH);
     ctx.stroke();
   }
 
@@ -459,6 +476,18 @@ function drawFanChart(
   ) {
     ctx.fillStyle = 'rgba(167,139,250,0.85)';
     ctx.fillText('State Pension', xOf(statePensionAge), PAD.top - 8);
+  }
+
+  // Pension-access label sits just inside the top edge so it stays legible
+  // between the retirement and state-pension labels on the row above.
+  if (
+    pensionAccessAge != null &&
+    pensionAccessAge > retirementAge &&
+    pensionAccessAge >= minAge &&
+    pensionAccessAge <= maxAgeVal
+  ) {
+    ctx.fillStyle = 'rgba(79,142,247,0.9)';
+    ctx.fillText('Pension Access', xOf(pensionAccessAge), PAD.top + 11);
   }
 
   // ── Survival curve overlay (P(alive) by age) ──────────────────────────────
@@ -751,6 +780,7 @@ export function FanChart({
   deterministicData = null,
   eventMarkers = null,
   survivalSeries = null,
+  pensionAccessAge = null,
   height = 390,
 }) {
   const canvasRef = useRef(null);
@@ -905,7 +935,8 @@ export function FanChart({
       logScale,
       !!deterministicData,
       eventMarkers,
-      survivalSeries
+      survivalSeries,
+      pensionAccessAge
     );
     coordRef.current = { ...coords, adjData: effectiveAdjData };
     // colorMode in deps: theme change re-reads CSS vars via cssVar() at draw time
@@ -929,6 +960,7 @@ export function FanChart({
     logScale,
     eventMarkers,
     survivalSeries,
+    pensionAccessAge,
   ]);
 
   // Mousemove: update hover; frozen while a trial is locked

@@ -63,6 +63,7 @@ const DEFAULTS = {
   niContributionYears: 3,
   statePensionAge: 67,
   statePensionDeferralYears: 0,
+  pensionAccessAge: 57, // NMPA — earliest age the DC pension can be accessed
   sex: 'neutral', // mortality basis for the lifetime-solvency metric
   windfalls: [],
   oneOffExpenses: [],
@@ -894,9 +895,22 @@ function TabContent({ tab, p, set }) {
             allowInput
             help="Your current pension pot value. This is your defined contribution (DC) pension — the pot you own, not a final salary (DB) scheme. Grows with investment returns each year."
           />
+          <Slider
+            label="Access Age"
+            value={p.pensionAccessAge}
+            min={50}
+            max={60}
+            step={1}
+            format={fmtAge}
+            onChange={set('pensionAccessAge')}
+            color="#4f8ef7"
+            allowInput
+            help="The earliest age you can access your defined-contribution pension — the Normal Minimum Pension Age. It's 55 today, rising to 57 from April 2028, so 57 is the safe default for anyone retiring in the years ahead. If you retire before this age, the model can't touch your pension yet: it bridges spending from your ISA and GIA until you reach it, taking any tax-free lump sum then, and shows a shortfall if those pots run dry first. Marked on the chart alongside your retirement and state pension ages."
+          />
           <InfoBox>
             Contributions are via salary sacrifice, reducing both income tax and employee NI. Annual
-            allowance: £60,000. PCLS (tax-free lump sum): up to 25%.
+            allowance: £60,000. PCLS (tax-free lump sum): up to 25%. Pension accessible from age{' '}
+            {p.pensionAccessAge}.
           </InfoBox>
         </>
       );
@@ -2459,6 +2473,7 @@ export default function App() {
         niContributionYears: p.niContributionYears,
         statePensionAge: p.statePensionAge,
         statePensionDeferralYears: p.statePensionDeferralYears,
+        pensionAccessAge: p.pensionAccessAge,
         studentLoanPlan: p.studentLoanPlan || null,
         windfalls: p.windfalls,
         oneOffExpenses: p.oneOffExpenses,
@@ -2541,6 +2556,7 @@ export default function App() {
           niContributionYears: p.niContributionYears,
           statePensionAge: p.statePensionAge,
           statePensionDeferralYears: p.statePensionDeferralYears,
+          pensionAccessAge: p.pensionAccessAge,
           studentLoanPlan: p.studentLoanPlan || null,
           windfalls: p.windfalls,
           oneOffExpenses: p.oneOffExpenses,
@@ -3412,6 +3428,7 @@ export default function App() {
                     currentAge={p.currentAge}
                     retirementAge={p.retirementAge}
                     statePensionAge={p.statePensionAge}
+                    pensionAccessAge={p.pensionAccessAge}
                     onHoverRow={(row) => {
                       setHoveredRow(row ?? null);
                     }}
@@ -3465,6 +3482,7 @@ export default function App() {
                   currentAge={p.currentAge}
                   retirementAge={p.retirementAge}
                   statePensionAge={p.statePensionAge}
+                  pensionAccessAge={p.pensionAccessAge}
                   onHoverRow={(row) => setHoveredRow(row ?? null)}
                   fourPctTarget={fourPctTarget}
                   colorMode={colorMode}

@@ -944,6 +944,97 @@ describe('mortgage start age', () => {
   });
 });
 
+describe('pension access age (NMPA)', () => {
+  // Retire at 52 with a large pension but only a modest ISA bridge; NMPA default 57.
+  const earlyProfile = { ...baseProfile, currentAge: 50, retirementAge: 52 };
+  const bigPension = { pensionBalance: 500_000, isaBalance: 120_000, giaBalance: 0 };
+  const retOpts = { targetNetAnnualExpenses: 25_000, maxAge: 70 };
+
+  const rows = (r) => r.yearlyBreakdown.filter((x) => x.phase === 'retirement');
+
+  it('throws for a non-integer pensionAccessAge', () => {
+    assert.throws(() => run({ ...earlyProfile, pensionAccessAge: 57.5 }), TypeError);
+  });
+
+  it('does not touch the pension before the access age', () => {
+    const r = projectLifecycle(earlyProfile, baseRates, bigPension, retOpts);
+    for (const row of rows(r).filter((x) => x.age < 57)) {
+      assert.equal(row.pensionAccessible, false, `age ${row.age} accessible`);
+      assert.equal(row.pension.drawdown, 0, `age ${row.age} drew pension`);
+    }
+  });
+
+  it('lets the locked pension keep growing during the bridge years', () => {
+    const r = projectLifecycle(earlyProfile, baseRates, bigPension, retOpts);
+    const at52 = rows(r).find((x) => x.age === 52).pension.closingBalance;
+    const at56 = rows(r).find((x) => x.age === 56).pension.closingBalance;
+    assert.ok(at56 > at52, `pension shrank during bridge: ${at52} → ${at56}`);
+  });
+
+  it('bridges spending from ISA/GIA before access, then draws pension from 57', () => {
+    const r = projectLifecycle(earlyProfile, baseRates, bigPension, retOpts);
+    // Bridge years are funded from the ISA (no pension), so the ISA falls.
+    const isa52 = rows(r).find((x) => x.age === 52).isa.openingBalance;
+    const isa56 = rows(r).find((x) => x.age === 56).isa.closingBalance;
+    assert.ok(isa56 < isa52, 'ISA not drawn during bridge');
+    // First accessible year draws the pension.
+    const at57 = rows(r).find((x) => x.age === 57);
+    assert.equal(at57.pensionAccessible, true);
+    assert.ok(at57.pension.drawdown > 0, 'pension not drawn at access age');
+  });
+
+  it('defers PCLS to the access age when retiring early', () => {
+    const r = projectLifecycle(earlyProfile, baseRates, bigPension, { ...retOpts, takePCLS: true });
+    const before = rows(r).filter((x) => x.age < 57);
+    assert.ok(
+      before.every((x) => x.pclsLumpSum == null),
+      'PCLS taken before access age'
+    );
+    const at57 = rows(r).find((x) => x.age === 57);
+    assert.ok(at57.pclsLumpSum > 0, 'PCLS not taken at access age');
+  });
+
+  it('reports a shortfall when the bridge cannot cover pre-access spending', () => {
+    // Tiny ISA, no GIA, pension locked → the early years cannot be funded.
+    const r = projectLifecycle(
+      earlyProfile,
+      baseRates,
+      { pensionBalance: 500_000, isaBalance: 5_000, giaBalance: 0 },
+      { ...retOpts, targetNetAnnualExpenses: 30_000 }
+    );
+    const preAccess = rows(r).filter((x) => x.age < 57);
+    assert.ok(
+      preAccess.some((x) => x.shortfall > 0),
+      'no shortfall despite locked pension'
+    );
+  });
+
+  it('a custom access age is respected', () => {
+    const r = projectLifecycle(
+      { ...earlyProfile, pensionAccessAge: 55 },
+      baseRates,
+      bigPension,
+      retOpts
+    );
+    assert.equal(rows(r).find((x) => x.age === 54).pensionAccessible, false);
+    assert.equal(rows(r).find((x) => x.age === 55).pensionAccessible, true);
+  });
+
+  it('no effect when retirement age is already at/after the access age', () => {
+    // Retire at 60 (≥ 57): pension accessible from year 1, PCLS taken immediately.
+    const lateProfile = { ...baseProfile, currentAge: 58, retirementAge: 60 };
+    const r = projectLifecycle(lateProfile, baseRates, bigPension, {
+      targetNetAnnualExpenses: 25_000,
+      maxAge: 75,
+      takePCLS: true,
+    });
+    const first = rows(r)[0];
+    assert.equal(first.age, 60);
+    assert.equal(first.pensionAccessible, true);
+    assert.ok(first.pclsLumpSum > 0, 'PCLS not taken in first retirement year');
+  });
+});
+
 describe('summary totals', () => {
   it('summary balances match final yearlyBreakdown row', () => {
     const r = run({ ...baseProfile, retirementAge: 35 });

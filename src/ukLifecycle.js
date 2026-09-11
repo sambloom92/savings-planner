@@ -57,6 +57,12 @@ export const LIFECYCLE_CONSTANTS = {
     // non-compounding). Source: gov.uk/deferring-state-pension
     deferralUpliftPerYear: 0.0578,
   },
+  pension: {
+    // Normal Minimum Pension Age (NMPA): earliest age a DC pension is accessible.
+    // Currently 55; legislated to rise to 57 from 6 April 2028. Default to 57 as
+    // the forward-looking figure for anyone retiring in the years ahead.
+    defaultAccessAge: 57,
+  },
 };
 
 // ---------------------------------------------------------------------------
@@ -290,6 +296,10 @@ function applyGIAWithdrawal(bal, costBasis, gross) {
  *                                             statePensionAge (default 0). Each deferred
  *                                             year raises the weekly amount by 1% per
  *                                             9 weeks ≈ 5.8% (new state pension rules).
+ *   pensionAccessAge?:      number,         - Earliest age the DC pension can be accessed
+ *                                             (NMPA; default 57). Before it, no PCLS or
+ *                                             pension drawdown — spending is bridged from
+ *                                             ISA/GIA, and any gap shows as a shortfall.
  *   studentLoanPlan?:       string | null   - 'plan1'|'plan2'|'plan4'|'plan5'|'postgrad'|null
  *   windfalls?: Array<{                     - Discrete events adding money to the GIA
  *     age:      number,                       at a given age (inheritance, asset sale, gift).
@@ -378,6 +388,9 @@ export function projectLifecycle(
     niContributionYears,
     statePensionAge = LIFECYCLE_CONSTANTS.statePension.defaultStatePensionAge,
     statePensionDeferralYears = 0,
+    // Normal Minimum Pension Age — the earliest age a DC pension can be accessed
+    // (2025/26: 55, rising to 57 in April 2028). Before it, no PCLS or drawdown.
+    pensionAccessAge = LIFECYCLE_CONSTANTS.pension.defaultAccessAge,
     studentLoanPlan = null,
     windfalls = [],
     oneOffExpenses = [],
@@ -399,6 +412,7 @@ export function projectLifecycle(
   assertNonNegativeInteger(niContributionYears, 'niContributionYears');
   assertPositiveInteger(statePensionAge, 'statePensionAge');
   assertNonNegativeInteger(statePensionDeferralYears, 'statePensionDeferralYears');
+  assertPositiveInteger(pensionAccessAge, 'pensionAccessAge');
 
   if (studentLoanPlan !== null && !STUDENT_LOAN_PLANS[studentLoanPlan])
     throw new TypeError(`studentLoanPlan '${studentLoanPlan}' is not a recognised plan`);
@@ -1042,25 +1056,36 @@ export function projectLifecycle(
       throw new RangeError('retirementOptions.maxAge must be an integer > retirementAge');
     const pclsPct = Math.max(0, Math.min(PENSION_CONSTANTS.maxPCLSPercentage, pclsPercentage));
 
-    // ── PCLS at retirement ──────────────────────────────────────────────────
+    // ── PCLS (pension commencement lump sum) ─────────────────────────────────
+    // The pension can only be touched from the Normal Minimum Pension Age. PCLS
+    // is therefore taken at the first accessible age: retirementAge when that is
+    // already ≥ NMPA, otherwise deferred inside the loop to the year NMPA is
+    // reached (an early retiree bridges the gap from ISA/GIA until then).
     let pclsLumpSum = 0;
     let pclsCapped = false;
-    let pclsToISA = 0; // ISA subscription headroom consumed by PCLS in retirement year 1
-    if (takePCLS && pensionBal > 0) {
+    // Crystallise the pot and distribute the tax-free lump sum: ISA up to the
+    // annual subscription limit, remainder into the GIA at cost. Returns the
+    // ISA headroom consumed, so the same-year bed-and-ISA step doesn't reuse it.
+    function applyPCLS() {
       const pclsResult = calculatePCLS(pensionBal, { pclsPercentage: pclsPct });
       pclsLumpSum = pclsResult.lumpSum;
       pclsCapped = pclsResult.lumpSumCapped;
       pensionBal = pclsResult.crystallisedFund;
-      // Distribute: ISA up to annual subscription limit, remainder into GIA at cost
       const toISA = Math.min(pclsLumpSum, ISA_LIMIT);
-      pclsToISA = toISA;
       const toGIA = round2(pclsLumpSum - toISA);
       isaBal = round2(isaBal + toISA);
       giaBal = round2(giaBal + toGIA);
       costBasis = round2(costBasis + toGIA);
+      return toISA;
     }
 
-    // Snapshot balances at the point of retirement entry (after PCLS, before any drawdown).
+    const takePclsAtEntry = takePCLS && pensionBal > 0 && retirementAge >= pensionAccessAge;
+    let pclsToISAAtEntry = 0;
+    if (takePclsAtEntry) pclsToISAAtEntry = applyPCLS();
+    // Still-pending PCLS for the early-retirement (deferred) case.
+    let pclsPending = takePCLS && retirementAge < pensionAccessAge;
+
+    // Snapshot balances at the point of retirement entry (after any PCLS, before drawdown).
     // The year-by-year loop mutates the running state variables, so by maxAge they may be
     // zero. The summary must reflect "what you have at retirement", not "what's left at maxAge".
     retEntryPension = pensionBal;
@@ -1209,6 +1234,18 @@ export function projectLifecycle(
       const retExpense = expensesAtAge(rAge, cumulInflation);
       const retExpenseAmt = retExpense?.nominal ?? 0;
 
+      // ── Pension access (Normal Minimum Pension Age) ───────────────────────
+      // The DC pension is untouchable before pensionAccessAge. When the person
+      // retired early, PCLS was deferred — take it in the first accessible year.
+      const pensionAccessible = rAge >= pensionAccessAge;
+      let pclsThisYear = isFirstYear && takePclsAtEntry;
+      let pclsToISAThisYear = isFirstYear ? pclsToISAAtEntry : 0;
+      if (pclsPending && pensionAccessible && pensionBal > 0) {
+        pclsToISAThisYear = applyPCLS();
+        pclsPending = false;
+        pclsThisYear = true;
+      }
+
       // ── Drawdown strategy ─────────────────────────────────────────────────
       // Priority: tax-free pension → CGT-exempt GIA harvest → ISA → taxable GIA → taxable pension
       // Mortgage, unsecured debt payments, and one-off expenses are added on top of
@@ -1228,25 +1265,31 @@ export function projectLifecycle(
       //   • LSA ≥ taxFreeRoom/3: normal 25%/75% split → gross = taxFreeRoom / 0.75
       //   • LSA < taxFreeRoom/3: use all remaining LSA, rest taxable
       //       taxable = gross − remainingLSA = taxFreeRoom → gross = taxFreeRoom + remainingLSA
-      const scaledPA = round2(PERSONAL_ALLOWANCE * retThresholdScale);
-      const taxFreeRoom = round2(Math.max(0, scaledPA - spGross));
-      let step1Limit;
-      if (takePCLS || taxFreeRoom <= 0) {
-        step1Limit = taxFreeRoom;
-      } else if (remainingLSA <= 0) {
-        step1Limit = taxFreeRoom; // fully taxable
-      } else if (remainingLSA >= taxFreeRoom / 3) {
-        step1Limit = round2(taxFreeRoom / 0.75); // normal UFPLS split
-      } else {
-        step1Limit = round2(taxFreeRoom + remainingLSA); // exhaust remaining LSA
-      }
-      const tfPension = round2(Math.min(remaining, Math.min(step1Limit, pensionBal)));
-      pensionBal = round2(pensionBal - tfPension);
-      remaining = round2(remaining - tfPension);
+      // Skipped entirely before the pension is accessible (NMPA) — the pot is
+      // left to grow and spending is met from GIA/ISA below.
+      let tfPension = 0;
+      let step1TaxFree = 0;
+      if (pensionAccessible && remaining > 0 && pensionBal > 0) {
+        const scaledPA = round2(PERSONAL_ALLOWANCE * retThresholdScale);
+        const taxFreeRoom = round2(Math.max(0, scaledPA - spGross));
+        let step1Limit;
+        if (takePCLS || taxFreeRoom <= 0) {
+          step1Limit = taxFreeRoom;
+        } else if (remainingLSA <= 0) {
+          step1Limit = taxFreeRoom; // fully taxable
+        } else if (remainingLSA >= taxFreeRoom / 3) {
+          step1Limit = round2(taxFreeRoom / 0.75); // normal UFPLS split
+        } else {
+          step1Limit = round2(taxFreeRoom + remainingLSA); // exhaust remaining LSA
+        }
+        tfPension = round2(Math.min(remaining, Math.min(step1Limit, pensionBal)));
+        pensionBal = round2(pensionBal - tfPension);
+        remaining = round2(remaining - tfPension);
 
-      // Compute the tax-free component and consume from the LSA.
-      const step1TaxFree = takePCLS ? 0 : round2(Math.min(0.25 * tfPension, remainingLSA));
-      if (!takePCLS) remainingLSA = round2(Math.max(0, remainingLSA - step1TaxFree));
+        // Compute the tax-free component and consume from the LSA.
+        step1TaxFree = takePCLS ? 0 : round2(Math.min(0.25 * tfPension, remainingLSA));
+        if (!takePCLS) remainingLSA = round2(Math.max(0, remainingLSA - step1TaxFree));
+      }
       // Only the taxable portion counts as income for CGT band determination.
       const tfPensionIncome = round2(tfPension - step1TaxFree);
       const incomeForCGT = round2(spGross + tfPensionIncome);
@@ -1310,7 +1353,7 @@ export function projectLifecycle(
       // is limited by the remaining Lump Sum Allowance (may be less than 25% if near exhaustion).
       let taxablePension = 0;
       let step5TaxFree = 0;
-      if (remaining > 0 && pensionBal > 0) {
+      if (pensionAccessible && remaining > 0 && pensionBal > 0) {
         const gross = takePCLS
           ? pensionGrossForNet(remaining, pensionBal, incomeForCGT, retThresholdScale)
           : ufplsGrossForNet(remaining, pensionBal, incomeForCGT, retThresholdScale, remainingLSA);
@@ -1354,7 +1397,7 @@ export function projectLifecycle(
       const retExemptRemaining = round2(
         Math.max(0, GIA_CGT_CONSTANTS.annualExemptAmount - gainsUsedInStep2)
       );
-      const retBedIsaHeadroom = round2(ISA_LIMIT - (isFirstYear ? pclsToISA : 0));
+      const retBedIsaHeadroom = round2(ISA_LIMIT - pclsToISAThisYear);
       let retBedIsaGross = 0,
         retBedIsaCGT = 0,
         retBedIsaNet = 0;
@@ -1461,10 +1504,11 @@ export function projectLifecycle(
         unsecuredDebts: retDebtRows,
         studentLoan: null,
       };
-      if (isFirstYear && takePCLS) {
+      if (pclsThisYear) {
         retRow.pclsLumpSum = pclsLumpSum;
         retRow.pclsCapped = pclsCapped;
       }
+      retRow.pensionAccessible = pensionAccessible;
       yearlyBreakdown.push(retRow);
     }
   }
