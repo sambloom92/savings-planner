@@ -3501,10 +3501,25 @@ Use Available funds to see whether an early-retirement plan can bridge the gap u
                     minWidth: 200,
                   }}
                 >
-                  <strong style={{ color: '#f87171' }}>Spendable money runs out early.</strong> A
-                  shortfall happens before your pension access age ({p.pensionAccessAge}), while the
-                  locked pension keeps the total balance above zero — so this view looks solvent
-                  when it isn&apos;t.
+                  {chartTab === 'mc' ? (
+                    <>
+                      <strong style={{ color: '#f87171' }}>
+                        Spendable money runs out early in some trials.
+                      </strong>{' '}
+                      In about {fmtPct((mcResults?.solvency?.ruinBeforeAccessProb ?? 0) * 100)} of
+                      trials a shortfall happens before your pension access age (
+                      {p.pensionAccessAge}
+                      ), while the locked pension keeps the total balance above zero — so those
+                      paths can look solvent here when they aren&apos;t.
+                    </>
+                  ) : (
+                    <>
+                      <strong style={{ color: '#f87171' }}>Spendable money runs out early.</strong>{' '}
+                      A shortfall happens before your pension access age ({p.pensionAccessAge}),
+                      while the locked pension keeps the total balance above zero — so this view
+                      looks solvent when it isn&apos;t.
+                    </>
+                  )}
                 </span>
                 <button
                   onClick={() => setFundsView('available')}
