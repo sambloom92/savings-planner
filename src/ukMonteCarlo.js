@@ -343,6 +343,15 @@ export function runMonteCarlo(profile, baseRates, pots, retirementOpts, opts = {
   const exhaustedTrials = shortfallAges.filter((a) => a !== Infinity).length;
   const solventToHorizon = ranTrials > 0 ? (ranTrials - exhaustedTrials) / ranTrials : 0;
 
+  // Fraction of trials that run out of spendable money before the pension
+  // access age (bridge insolvency, while the locked pension keeps the total
+  // pot positive). Drives the "available funds" prompt wording so it can say
+  // how many trials are affected rather than implying it's all of them.
+  const ruinBeforeAccessProb =
+    ranTrials > 0
+      ? shortfallAges.filter((a) => a !== Infinity && a < accessAge).length / ranTrials
+      : 0;
+
   // Lifetime (mortality-weighted) view — the actuarially correct metric.
   // For a trial that runs dry at age A, the probability you actually experience
   // that ruin is P(alive at A) = survivalToAge(currentAge, A). Averaging that
@@ -392,6 +401,7 @@ export function runMonteCarlo(profile, baseRates, pots, retirementOpts, opts = {
       solventForLife,
       lifetimeRuinProb,
       exhaustedTrials,
+      ruinBeforeAccessProb,
       survival,
       shortfallMarkers,
     },
