@@ -55,7 +55,7 @@
  * Macro rates floored at −5% to prevent extreme deflation artefacts.
  */
 
-import { projectLifecycle } from './ukLifecycle.js';
+import { projectLifecycle, LIFECYCLE_CONSTANTS } from './ukLifecycle.js';
 import { survivalToAge, survivalCurve } from './ukMortality.js';
 
 const VOL_BEAR = 2.5; // vol multiplier target during bear regimes
@@ -224,20 +224,30 @@ export function runMonteCarlo(profile, baseRates, pots, retirementOpts, opts = {
   const ages = successful[0].yearlyBreakdown.map((r) => r.age);
   const portfolioMatrix = successful.map((r) => r.yearlyBreakdown.map(rowPortfolio));
 
-  // Age at which each trial's pots first hit zero (Infinity = never within the
-  // horizon). Computed once and shared by both the ranking below and the
-  // lifetime-solvency metric further down.
+  // Age at which each trial first fails to meet its target spending — its ruin
+  // age (Infinity = never within the horizon). Computed once and shared by both
+  // the ranking below and the lifetime-solvency metric further down.
+  //
+  // This keys off the row's actual shortfall, NOT the total pot hitting zero.
+  // The distinction matters once a minimum pension access age is modelled: an
+  // early retiree can exhaust their accessible ISA/GIA while a large pension is
+  // still locked away, so the summed pot is nonzero yet no spending can be met.
+  // That is genuine insolvency (we don't model paying a penalty to unlock the
+  // pension early), and using the shortfall field counts it correctly. In the
+  // ordinary case — no locked pension — the first shortfall coincides with the
+  // pots hitting zero, so this changes nothing. Matches the deterministic
+  // "Shortfall from Age" readout, which uses the same field.
   const maxAgeIdx = ages.length - 1;
   const currentAge = ages[0];
 
-  function firstShortfallAge(col) {
-    for (let i = 1; i < col.length; i++) {
-      if (col[i] <= 0 && col[i - 1] > 0) return ages[i];
+  function firstShortfallAge(breakdown) {
+    for (const row of breakdown) {
+      if ((row.shortfall ?? 0) > 0) return row.age;
     }
     return Infinity;
   }
 
-  const shortfallAges = portfolioMatrix.map(firstShortfallAge);
+  const shortfallAges = successful.map((r) => firstShortfallAge(r.yearlyBreakdown));
 
   // ── Rank trials for representative-path selection ─────────────────────────
   // Sort order (ascending = worst → best):
@@ -271,6 +281,32 @@ export function runMonteCarlo(profile, baseRates, pots, retirementOpts, opts = {
 
   const percentileData = ages.map((age, ai) => {
     const vals = portfolioMatrix.map((col) => col[ai]).sort((a, b) => a - b);
+    return {
+      age,
+      p10: pctile(vals, 10),
+      p25: pctile(vals, 25),
+      p50: pctile(vals, 50),
+      p75: pctile(vals, 75),
+      p90: pctile(vals, 90),
+    };
+  });
+
+  // Available-funds percentiles: same bands but counting only money you could
+  // actually spend at each age — ISA + GIA always, plus the pension only from
+  // the access age. Before then the (locked) pension is excluded, so these
+  // bands can fall to zero during an early-retirement bridge while the total
+  // pot is still large. Used by the chart's "Available funds" view.
+  const accessAge = profile.pensionAccessAge ?? LIFECYCLE_CONSTANTS.pension.defaultAccessAge;
+  const availableMatrix = successful.map((r) =>
+    r.yearlyBreakdown.map((row) => {
+      const isa = Math.max(0, row.isa?.closingBalance ?? 0);
+      const gia = Math.max(0, row.gia?.closingBalance ?? 0);
+      const pension = row.age >= accessAge ? Math.max(0, row.pension?.closingBalance ?? 0) : 0;
+      return isa + gia + pension;
+    })
+  );
+  const availablePercentileData = ages.map((age, ai) => {
+    const vals = availableMatrix.map((col) => col[ai]).sort((a, b) => a - b);
     return {
       age,
       p10: pctile(vals, 10),
@@ -328,12 +364,28 @@ export function runMonteCarlo(profile, baseRates, pots, retirementOpts, opts = {
   // and to show how much of the horizon is discounted by mortality.
   const survival = survivalCurve(currentAge, ages[maxAgeIdx], sex);
 
+  // Per-percentile insolvency markers for the fan chart: the age by which each
+  // percentile of trials has become insolvent (first failed to meet spending).
+  // This replaces the old "where the percentile value line hits zero" marker,
+  // which is misleading now that a trial can be insolvent with a nonzero total
+  // pot (a locked pension during the bridge before the access age). p10 = the
+  // age by which the worst 10% have run out, p90 the worst 90%, etc.
+  const ruinSorted = shortfallAges.filter((a) => a !== Infinity).sort((a, b) => a - b);
+  const shortfallMarkers = PCTS.map((pct) => {
+    const need = Math.ceil((pct / 100) * ranTrials);
+    return { pct, age: need > 0 && ruinSorted.length >= need ? ruinSorted[need - 1] : null };
+  });
+
   return {
     percentileData,
+    availablePercentileData,
     repPaths,
     trialCount: successful.length,
     portfolioMatrix,
     allPotData,
+    // Per-trial ruin age (Infinity = solvent through the horizon) — used by the
+    // locked single-trial view to mark when that trial went insolvent.
+    shortfallAges,
     solvency: {
       sex,
       solventToHorizon,
@@ -341,6 +393,7 @@ export function runMonteCarlo(profile, baseRates, pots, retirementOpts, opts = {
       lifetimeRuinProb,
       exhaustedTrials,
       survival,
+      shortfallMarkers,
     },
   };
 }

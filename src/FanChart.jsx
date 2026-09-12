@@ -82,7 +82,8 @@ function drawFanChart(
   deterministicMode,
   eventMarkers,
   survivalSeries,
-  pensionAccessAge
+  pensionAccessAge,
+  shortfallMarks
 ) {
   const ctx = canvas.getContext('2d');
 
@@ -381,19 +382,8 @@ function drawFanChart(
       return cum;
     }
 
-    const cumData = drawStackedBands(POT_STACK_ORDER, +1);
+    drawStackedBands(POT_STACK_ORDER, +1);
     drawStackedBands(DEBT_STACK_ORDER, -1, true);
-
-    // Shortfall marker (when total portfolio hits zero)
-    for (let i = 1; i < lockedPotData.length; i++) {
-      const total = cumData[i][POT_STACK_ORDER.length];
-      const prevTotal = cumData[i - 1][POT_STACK_ORDER.length];
-      if (total <= 0 && prevTotal > 0) {
-        const markerCfg = PCT_CFG[lockedPctKey] ?? { color: mutedCol };
-        drawShortfallMarker(adjData[i].age, markerCfg);
-        break;
-      }
-    }
 
     // In-chart label (MC locked-trial only; suppressed in deterministic mode)
     if (!deterministicMode && lockedPctKey) {
@@ -420,15 +410,18 @@ function drawFanChart(
     // Draw non-median lines first, median on top
     for (const key of ['p10', 'p25', 'p75', 'p90']) drawLine(key);
     drawLine('p50');
+  }
 
-    // Shortfall markers — first age where each cross-sectional percentile hits 0
-    for (const key of PCT_KEYS) {
-      for (let i = 1; i < adjData.length; i++) {
-        if (adjData[i][key] <= 0 && adjData[i - 1][key] > 0) {
-          drawShortfallMarker(adjData[i].age, PCT_CFG[key]);
-          break;
-        }
-      }
+  // ── Shortfall markers ───────────────────────────────────────────────────────
+  // Placed at genuine insolvency ages (first year spending can't be met), not
+  // where the total pot line touches zero — a locked pension can keep the pot
+  // nonzero while the plan is already insolvent. Ages/colours are supplied by
+  // the caller (per-percentile in fan mode; the single trial's age when locked;
+  // the deterministic path's age in deterministic mode).
+  if (shortfallMarks) {
+    for (const m of shortfallMarks) {
+      if (m.age == null || m.age < minAge || m.age > maxAgeVal) continue;
+      drawShortfallMarker(m.age, { color: m.color || mutedCol });
     }
   }
 
@@ -781,6 +774,9 @@ export function FanChart({
   eventMarkers = null,
   survivalSeries = null,
   pensionAccessAge = null,
+  shortfallMarkers = null,
+  shortfallAges = null,
+  fundsView = 'all',
   height = 390,
 }) {
   const canvasRef = useRef(null);
@@ -845,16 +841,23 @@ export function FanChart({
     });
   }, [lockedTrial, portfolioMatrix, percentileData, realTerms, inflRate, currentAge]);
 
+  // In the "available funds" view the pension is excluded before the access
+  // age (it can't be spent yet); ISA/GIA and everything from the access age on
+  // are always counted. Returns true when the pension should be included.
+  const pensionCounts = (age) =>
+    fundsView !== 'available' || pensionAccessAge == null || age >= pensionAccessAge;
+
   // Real-terms adjusted per-pot breakdown for the locked trial.
   const adjLockedPotData = useMemo(() => {
     if (!lockedTrial || !allPotData || !percentileData) return null;
     const trialPots = allPotData[lockedTrial.trialIdx];
     if (!trialPots) return null;
     return trialPots.map((pots, i) => {
-      const f = realTerms ? Math.pow(1 / (1 + inflRate), percentileData[i].age - currentAge) : 1;
+      const age = percentileData[i].age;
+      const f = realTerms ? Math.pow(1 / (1 + inflRate), age - currentAge) : 1;
       return {
         // Assets (clamped to ≥0; debt side handled separately)
-        pension: Math.max(0, (pots.pension ?? 0) * f),
+        pension: pensionCounts(age) ? Math.max(0, (pots.pension ?? 0) * f) : 0,
         isa: Math.max(0, (pots.isa ?? 0) * f),
         gia: Math.max(0, (pots.gia ?? 0) * f),
         // Debts (positive magnitudes; drawn below zero axis)
@@ -863,7 +866,39 @@ export function FanChart({
         studentLoan: Math.max(0, (pots.studentLoan ?? 0) * f),
       };
     });
-  }, [lockedTrial, allPotData, percentileData, realTerms, inflRate, currentAge]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    lockedTrial,
+    allPotData,
+    percentileData,
+    realTerms,
+    inflRate,
+    currentAge,
+    fundsView,
+    pensionAccessAge,
+  ]);
+
+  // Shortfall markers to draw, resolved to {age, color} for the current mode.
+  // Ages come from genuine insolvency (first unmet spending), never the total
+  // pot touching zero. x-positions are ages, so no real-terms adjustment.
+  const shortfallMarks = useMemo(() => {
+    if (deterministicData) {
+      const row = deterministicData.find((r) => (r.shortfall ?? 0) > 0);
+      return row ? [{ age: row.age, color: null }] : [];
+    }
+    if (lockedTrial && shortfallAges) {
+      const a = shortfallAges[lockedTrial.trialIdx];
+      return a != null && a !== Infinity
+        ? [{ age: a, color: PCT_CFG[lockedTrial.pctKey]?.color }]
+        : [];
+    }
+    if (shortfallMarkers) {
+      return shortfallMarkers
+        .filter((m) => m.age != null)
+        .map((m) => ({ age: m.age, color: PCT_CFG[`p${m.pct}`]?.color }));
+    }
+    return [];
+  }, [deterministicData, lockedTrial, shortfallAges, shortfallMarkers]);
 
   // ── Deterministic-mode derived data ──────────────────────────────────────
   // Real-terms adjusted det data. Debts remain signed negative (as in chartData).
@@ -888,23 +923,26 @@ export function FanChart({
   const detAdjPercentiles = useMemo(() => {
     if (!adjDetData) return null;
     return adjDetData.map((row) => {
-      const total = Math.max(0, row.pension + row.isa + row.gia);
+      const pension = pensionCounts(row.age) ? row.pension : 0;
+      const total = Math.max(0, pension + row.isa + row.gia);
       return { age: row.age, p10: total, p25: total, p50: total, p75: total, p90: total };
     });
-  }, [adjDetData]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [adjDetData, fundsView, pensionAccessAge]);
 
   // lockedPotData-shaped array: debts flipped to positive magnitudes.
   const detLockedPotData = useMemo(() => {
     if (!adjDetData) return null;
     return adjDetData.map((row) => ({
-      pension: Math.max(0, row.pension),
+      pension: pensionCounts(row.age) ? Math.max(0, row.pension) : 0,
       isa: Math.max(0, row.isa),
       gia: Math.max(0, row.gia),
       mortgage: Math.max(0, -row.mortgage),
       unsecuredDebt: Math.max(0, -row.unsecuredDebt),
       studentLoan: Math.max(0, -row.studentLoan),
     }));
-  }, [adjDetData]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [adjDetData, fundsView, pensionAccessAge]);
 
   // Redraw whenever data, hover, lock state, or container size changes
   useEffect(() => {
@@ -936,7 +974,8 @@ export function FanChart({
       !!deterministicData,
       eventMarkers,
       survivalSeries,
-      pensionAccessAge
+      pensionAccessAge,
+      shortfallMarks
     );
     coordRef.current = { ...coords, adjData: effectiveAdjData };
     // colorMode in deps: theme change re-reads CSS vars via cssVar() at draw time
@@ -961,6 +1000,7 @@ export function FanChart({
     eventMarkers,
     survivalSeries,
     pensionAccessAge,
+    shortfallMarks,
   ]);
 
   // Mousemove: update hover; frozen while a trial is locked

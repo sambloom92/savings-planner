@@ -2319,6 +2319,8 @@ export default function App() {
   const [activeTab, setActiveTab] = useState('Personal');
   const [realTerms, setRealTerms] = useState(false);
   const [logScale, setLogScale] = useState(false);
+  // 'all' = total pot incl. locked pension · 'available' = spendable now (pension only from access age)
+  const [fundsView, setFundsView] = useState('all');
   const [hoveredRow, setHoveredRow] = useState(null);
   const [copyMsg, setCopyMsg] = useState(null);
   const [pasteMsg, setPasteMsg] = useState(null);
@@ -2669,6 +2671,19 @@ export default function App() {
   // at retirementAge — keeping stat-card figures consistent with graph hover / axis readings.
   const retYearEndRow = displayData.find((d) => d.phase === 'retirement') ?? null;
 
+  // True when a shortfall occurs while the all-balances chart is still above
+  // zero — i.e. spendable money runs out before the total pot does, because a
+  // locked pension props up the total. In that case the all-balances view can
+  // look solvent when it isn't, so we prompt the user to switch views. Both
+  // signals reduce to "insolvency happens before the pension access age", which
+  // is exactly when available funds and total balance diverge.
+  const availableHiddenShortfall =
+    chartTab === 'mc'
+      ? !!mcResults?.solvency?.shortfallMarkers?.some(
+          (m) => m.age != null && m.age < p.pensionAccessAge
+        )
+      : chartData.some((r) => (r.shortfall ?? 0) > 0 && r.pension + r.isa + r.gia > 0);
+
   // Solvency readout for the Monte Carlo chart header. Rendered inline in the
   // right controls on desktop, or as its own full-width line on mobile (where
   // the 3-column header has no room for a wide nowrap figure).
@@ -2857,6 +2872,51 @@ export default function App() {
                   }}
                 >
                   {opt}
+                </button>
+              );
+            })}
+          </div>
+          <HelpTip
+            text="All balances: the chart shows your whole pot — pension + ISA + GIA — at every age. Available funds: shows only money you could actually spend at that age. Your defined-contribution pension is excluded before your pension access age (set in the Pension tab), because it's locked until then; ISA and GIA count throughout.
+
+Two other age gates matter for what you can actually rely on, both marked on the chart:
+• State pension — this is age-gated income, not a spendable balance, so it doesn't appear in either view. It only starts at your state pension age, and from then on it reduces how much you draw from your pots. Before that age you're on your own funds.
+• Windfalls — any you've added arrive at a set age. A future windfall isn't part of your funds until it lands (the balance simply steps up at that age), so it can't help with a shortfall before then.
+
+Use Available funds to see whether an early-retirement plan can bridge the gap until the pension unlocks and these other sources kick in — the total-balance view can look healthy while your spendable money has run out."
+          />
+          <div
+            style={{
+              display: 'flex',
+              borderRadius: 5,
+              overflow: 'hidden',
+              border: '1px solid var(--border-bright)',
+            }}
+          >
+            {[
+              { label: 'All', value: 'all' },
+              { label: 'Available', value: 'available' },
+            ].map(({ label, value }) => {
+              const active = fundsView === value;
+              return (
+                <button
+                  key={value}
+                  onClick={() => setFundsView(value)}
+                  style={{
+                    padding: '4px 12px',
+                    background: active ? 'var(--accent-gold)' : 'transparent',
+                    color: active ? 'var(--accent-gold-text)' : 'var(--text-muted)',
+                    border: 'none',
+                    cursor: 'pointer',
+                    fontFamily: 'var(--font-mono)',
+                    fontSize: 10,
+                    fontWeight: 600,
+                    letterSpacing: '0.08em',
+                    transition: 'all 0.15s',
+                    whiteSpace: 'nowrap',
+                  }}
+                >
+                  {label}
                 </button>
               );
             })}
@@ -3281,7 +3341,8 @@ export default function App() {
                 >
                   {chartTab === 'mc' ? (
                     <>
-                      Total portfolio · {p.mcTrials} trials ·{' '}
+                      {fundsView === 'available' ? 'Available funds' : 'Total portfolio'} ·{' '}
+                      {p.mcTrials} trials ·{' '}
                       {realTerms
                         ? `Real terms (today's £, ${p.inflationPct}% inflation)`
                         : 'Nominal terms'}
@@ -3291,7 +3352,8 @@ export default function App() {
                     </>
                   ) : (
                     <>
-                      Assets above axis · Debts below ·{' '}
+                      {fundsView === 'available' ? 'Available funds' : 'Assets above axis'} · Debts
+                      below ·{' '}
                       {realTerms
                         ? `Real terms (today's £, ${p.inflationPct}% inflation)`
                         : 'Nominal terms'}
@@ -3399,6 +3461,7 @@ export default function App() {
                     text={
                       `${mcResults ? mcResults.trialCount : 0} trials shown. Each trial varies investment returns (market factor) and inflation / BoE / wage growth (macro factor) using correlated random shocks.\n\n` +
                       'Solvent for life: the chance you never run out of money while still alive — the complement of the lifetime probability of ruin. Each trial that runs dry is weighted by the probability you live to see it (from UK population mortality for the selected sex, set in the Simulation tab), so dying with money left counts as success. Set high enough that the age horizon reaches ~100 for this to be meaningful.\n\n' +
+                      'Running dry means being unable to meet your target spending — including the bridge years before your pension access age, when a locked pension you cannot yet touch does not count as available. Early access penalties are not modelled.\n\n' +
                       'The "to age N" figure is the simpler fixed-horizon view: the fraction of trials solvent all the way to the model horizon, ignoring survival. It is always the more pessimistic of the two.\n\n' +
                       'Bands show the 10th–90th percentile range (faint) and 25th–75th range (stronger). Lines show the 5 key percentiles. The dotted curve is the probability of still being alive at each age.\n\n' +
                       'Click and hold on a data point to isolate the single trial closest to that percentile at that age. Shortfall labels (▼ with age) show when each percentile path runs out of money.'
@@ -3413,12 +3476,67 @@ export default function App() {
               <div style={{ padding: '0 16px', marginBottom: 12 }}>{solvencyReadout}</div>
             )}
 
+            {/* Prompt: shortfall hidden by the all-balances view (locked pension) */}
+            {fundsView === 'all' && availableHiddenShortfall && (
+              <div
+                style={{
+                  margin: '0 16px 12px',
+                  padding: '9px 12px',
+                  borderRadius: 7,
+                  border: '1px solid rgba(244,63,94,0.4)',
+                  background: 'rgba(244,63,94,0.08)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 10,
+                  flexWrap: 'wrap',
+                }}
+              >
+                <span
+                  style={{
+                    fontSize: 12,
+                    color: 'var(--text-secondary)',
+                    fontFamily: 'var(--font-body)',
+                    lineHeight: 1.5,
+                    flex: 1,
+                    minWidth: 200,
+                  }}
+                >
+                  <strong style={{ color: '#f87171' }}>Spendable money runs out early.</strong> A
+                  shortfall happens before your pension access age ({p.pensionAccessAge}), while the
+                  locked pension keeps the total balance above zero — so this view looks solvent
+                  when it isn&apos;t.
+                </span>
+                <button
+                  onClick={() => setFundsView('available')}
+                  style={{
+                    padding: '5px 12px',
+                    background: 'transparent',
+                    border: '1px solid rgba(244,63,94,0.6)',
+                    borderRadius: 6,
+                    color: '#f87171',
+                    fontFamily: 'var(--font-mono)',
+                    fontSize: 11,
+                    fontWeight: 600,
+                    letterSpacing: '0.04em',
+                    cursor: 'pointer',
+                    whiteSpace: 'nowrap',
+                  }}
+                >
+                  Show available funds
+                </button>
+              </div>
+            )}
+
             {/* ── Monte Carlo tab ── */}
             {chartTab === 'mc' && (
               <>
                 {mcResults ? (
                   <FanChart
-                    percentileData={mcResults.percentileData}
+                    percentileData={
+                      fundsView === 'available'
+                        ? mcResults.availablePercentileData
+                        : mcResults.percentileData
+                    }
                     portfolioMatrix={mcResults.portfolioMatrix}
                     allPotData={mcResults.allPotData}
                     potSeries={series}
@@ -3438,6 +3556,9 @@ export default function App() {
                     logScale={logScale}
                     eventMarkers={eventMarkers}
                     survivalSeries={mcResults.solvency?.survival}
+                    shortfallMarkers={mcResults.solvency?.shortfallMarkers}
+                    shortfallAges={mcResults.shortfallAges}
+                    fundsView={fundsView}
                     height={mobile ? 260 : 390}
                   />
                 ) : mcPending ? (
@@ -3488,6 +3609,7 @@ export default function App() {
                   colorMode={colorMode}
                   logScale={logScale}
                   eventMarkers={eventMarkers}
+                  fundsView={fundsView}
                   height={mobile ? 260 : 390}
                 />
               ) : (

@@ -113,6 +113,31 @@ describe('result shape', () => {
       }
     }
   });
+
+  it('availablePercentileData never exceeds the all-balances bands', () => {
+    // Available funds = a subset of the total pot (pension excluded before the
+    // access age), so every available percentile is ≤ the matching all band.
+    assert.equal(res.availablePercentileData.length, res.percentileData.length);
+    for (let i = 0; i < res.percentileData.length; i++) {
+      for (const k of ['p10', 'p25', 'p50', 'p75', 'p90']) {
+        assert.ok(
+          res.availablePercentileData[i][k] <= res.percentileData[i][k] + 1e-6,
+          `available ${k} > all at age ${res.percentileData[i].age}`
+        );
+      }
+    }
+  });
+
+  it('available and all bands coincide once the pension is accessible', () => {
+    // From the access age onward the pension counts in both, so the bands match.
+    const accessAge = 57;
+    for (const row of res.availablePercentileData.filter((r) => r.age >= accessAge)) {
+      const all = res.percentileData.find((r) => r.age === row.age);
+      for (const k of ['p10', 'p50', 'p90']) {
+        assert.ok(Math.abs(row[k] - all[k]) < 1e-6, `mismatch at ${row.age} ${k}`);
+      }
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -248,6 +273,33 @@ describe('solvency metrics', () => {
     assert.ok(
       female.solvency.solventForLife <= male.solvency.solventForLife + 1e-9,
       'female lifetime solvency should not exceed male'
+    );
+  });
+
+  it('counts a bridge shortfall as ruin even while a locked pension survives', () => {
+    // Retire at 50 with a large pension but only a tiny ISA bridge. Everything is
+    // identical except the pension access age: 57 (locked, must bridge) vs 50
+    // (immediately accessible). The locked case can't fund spending from the 15k
+    // ISA until the pension unlocks, so nearly every trial is insolvent before 57
+    // — despite the untouchable 800k pot never hitting zero.
+    const base = { ...profile, currentAge: 45, retirementAge: 50 };
+    const pots = { pensionBalance: 800_000, isaBalance: 15_000, giaBalance: 0 };
+    const ret = { targetNetAnnualExpenses: 45_000, maxAge: 95 };
+    const opts = { trials: 200, seed: 4 };
+    const locked = runMonteCarlo({ ...base, pensionAccessAge: 57 }, rates, pots, ret, opts);
+    const accessible = runMonteCarlo({ ...base, pensionAccessAge: 50 }, rates, pots, ret, opts);
+
+    // The locked bridge is unfundable, so almost all trials are ruined.
+    assert.ok(
+      locked.solvency.exhaustedTrials > opts.trials * 0.9,
+      `expected most trials ruined, got ${locked.solvency.exhaustedTrials}/${opts.trials}`
+    );
+    // Same money, same seed — only access age differs — yet the locked pension is
+    // materially worse, proving the metric responds to bridge insolvency rather
+    // than the summed pot hitting zero.
+    assert.ok(
+      locked.solvency.solventForLife < accessible.solvency.solventForLife - 0.2,
+      `locked ${locked.solvency.solventForLife} vs accessible ${accessible.solvency.solventForLife}`
     );
   });
 });
