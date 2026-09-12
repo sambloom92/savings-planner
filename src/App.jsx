@@ -3399,6 +3399,7 @@ export default function App() {
                     text={
                       `${mcResults ? mcResults.trialCount : 0} trials shown. Each trial varies investment returns (market factor) and inflation / BoE / wage growth (macro factor) using correlated random shocks.\n\n` +
                       'Solvent for life: the chance you never run out of money while still alive — the complement of the lifetime probability of ruin. Each trial that runs dry is weighted by the probability you live to see it (from UK population mortality for the selected sex, set in the Simulation tab), so dying with money left counts as success. Set high enough that the age horizon reaches ~100 for this to be meaningful.\n\n' +
+                      'Running dry means being unable to meet your target spending — including the bridge years before your pension access age, when a locked pension you cannot yet touch does not count as available. Early access penalties are not modelled.\n\n' +
                       'The "to age N" figure is the simpler fixed-horizon view: the fraction of trials solvent all the way to the model horizon, ignoring survival. It is always the more pessimistic of the two.\n\n' +
                       'Bands show the 10th–90th percentile range (faint) and 25th–75th range (stronger). Lines show the 5 key percentiles. The dotted curve is the probability of still being alive at each age.\n\n' +
                       'Click and hold on a data point to isolate the single trial closest to that percentile at that age. Shortfall labels (▼ with age) show when each percentile path runs out of money.'
@@ -3438,6 +3439,8 @@ export default function App() {
                     logScale={logScale}
                     eventMarkers={eventMarkers}
                     survivalSeries={mcResults.solvency?.survival}
+                    shortfallMarkers={mcResults.solvency?.shortfallMarkers}
+                    shortfallAges={mcResults.shortfallAges}
                     height={mobile ? 260 : 390}
                   />
                 ) : mcPending ? (
