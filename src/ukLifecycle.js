@@ -313,6 +313,16 @@ function applyGIAWithdrawal(bal, costBasis, gross) {
  *     label?:   string,                       savings → GIA → ISA (accumulation) or via the
  *     enabled?: boolean                       drawdown order (retirement); never the pension.
  *   }>                                        enabled: false skips the event (default true).
+ *   employmentChanges?: Array<{             - Discrete changes to employment hours (part-time,
+ *     age:      number,                       phased retirement, career break). From the given
+ *     fraction: number,                       age, employment income steps to `fraction` of the
+ *     label?:   string,                       full-time-equivalent salary (0 < fraction ≤ 1).
+ *     enabled?: boolean                       Pension contributions (employee & employer), tax,
+ *   }>                                        NI, student loan and savings all scale pro-rata;
+ *                                             a year below the NI Lower Earnings Limit stops
+ *                                             counting toward the state pension. The most recent
+ *                                             change at or before an age applies (100% before
+ *                                             the first). enabled: false skips it (default true).
  * }} profile
  *
  * @param {{
@@ -394,6 +404,7 @@ export function projectLifecycle(
     studentLoanPlan = null,
     windfalls = [],
     oneOffExpenses = [],
+    employmentChanges = [],
   } = profile;
 
   assertPositiveInteger(currentAge, 'currentAge');
@@ -452,6 +463,41 @@ export function projectLifecycle(
   }
   const windfallsAtAge = validateEvents(windfalls, 'windfalls', 'Windfall');
   const expensesAtAge = validateEvents(oneOffExpenses, 'oneOffExpenses', 'One-off expense');
+
+  // Employment-hours changes: discrete points where employment income steps to a
+  // fraction of the full-time-equivalent salary (part-time work, phased
+  // retirement, a career break). The fraction is applied to the wage-grown
+  // full-time track, so a later return to 100% restores the full salary. The
+  // reduced income flows through to pension contributions, tax, NI, student loan
+  // and savings automatically. fraction is bounded to (0, 1]: 0 is disallowed
+  // because stopping work entirely is modelled via retirementAge, not here.
+  function buildHoursFraction(list) {
+    if (!Array.isArray(list)) throw new TypeError('employmentChanges must be an array');
+    const points = [];
+    for (let i = 0; i < list.length; i++) {
+      const ev = list[i];
+      if (ev == null || typeof ev !== 'object')
+        throw new TypeError(`employmentChanges[${i}] must be an object`);
+      if (!Number.isInteger(ev.age))
+        throw new TypeError(`employmentChanges[${i}].age must be an integer`);
+      assertNonNegativeFinite(ev.fraction, `employmentChanges[${i}].fraction`);
+      if (ev.fraction <= 0 || ev.fraction > 1)
+        throw new RangeError(`employmentChanges[${i}].fraction must be in (0, 1]`);
+      if (ev.enabled === false) continue;
+      points.push({ age: ev.age, fraction: ev.fraction });
+    }
+    // Most recent change at or before an age wins; equal ages keep input order.
+    points.sort((a, b) => a.age - b.age);
+    return function hoursFractionAtAge(age) {
+      let fraction = 1;
+      for (const pt of points) {
+        if (pt.age <= age) fraction = pt.fraction;
+        else break;
+      }
+      return fraction;
+    };
+  }
+  const hoursFractionAtAge = buildHoursFraction(employmentChanges);
 
   // ── Validate rates ───────────────────────────────────────────────────────
   const {
@@ -642,13 +688,19 @@ export function projectLifecycle(
     // Wage growth applies from year 1 onwards; floor at 0 (salary cannot go negative)
     if (i > 0) income = Math.max(0, round2(income * (1 + yr.wageGrowthRate)));
 
+    // Employment-hours fraction for this age (part-time / phased retirement).
+    // Applied to the full-time-grown salary; `income` (the full-time track) keeps
+    // growing on its own, so a later return to 100% restores the full amount.
+    const hoursFraction = hoursFractionAtAge(age);
+    const effectiveIncome = round2(income * hoursFraction);
+
     // ── Pension (salary sacrifice) ──────────────────────────────────────
-    const employeeContrib = round2(income * employeePensionRate);
-    const employerContrib = round2(income * employerPensionRate);
+    const employeeContrib = round2(effectiveIncome * employeePensionRate);
+    const employerContrib = round2(effectiveIncome * employerPensionRate);
     const totalPensionContrib = round2(employeeContrib + employerContrib);
 
     // Adjusted gross income after salary sacrifice
-    const adjustedGross = round2(income - employeeContrib);
+    const adjustedGross = round2(effectiveIncome - employeeContrib);
 
     // High earners: annual allowance tapers when threshold income > £200k and
     // adjusted income (threshold income + all pension contributions) > £260k.
@@ -715,7 +767,9 @@ export function projectLifecycle(
     }
 
     // ── Net take-home ───────────────────────────────────────────────────
-    const netTakeHome = round2(income - employeeContrib - incomeTax - employeeNI - slRepayment);
+    const netTakeHome = round2(
+      effectiveIncome - employeeContrib - incomeTax - employeeNI - slRepayment
+    );
 
     // ── Debt payments ───────────────────────────────────────────────────
     // Mortgage — may begin part-way through the projection (future purchase)
@@ -958,7 +1012,9 @@ export function projectLifecycle(
       year,
       age,
 
-      grossIncome: income,
+      grossIncome: effectiveIncome,
+      fullTimeGrossIncome: income,
+      hoursFraction,
       employeeContribution: employeeContrib,
       employerContribution: employerContrib,
       adjustedGrossIncome: adjustedGross,

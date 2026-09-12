@@ -526,8 +526,8 @@ function drawFanChart(
     ctx.restore();
   }
 
-  // ── Life-event markers (windfalls ▲ gold, one-off expenses ▼ rose) ─────────
-  // Small triangles on the x-axis at each event age. Labels are drawn only
+  // ── Life-event markers (windfalls ▲ gold, expenses ▼ rose, hours ◆ teal) ───
+  // Small glyphs on the x-axis at each event age. Labels are drawn only
   // when they don't collide with the previous label — full details are
   // always available in the hover panel.
   if (eventMarkers && eventMarkers.length > 0) {
@@ -537,17 +537,26 @@ function drawFanChart(
       .sort((a, b) => a.age - b.age || (a.kind === 'windfall' ? -1 : 1));
     let lastLabelEnd = -Infinity;
     ctx.font = `bold 8px ${mono}`;
+    const MARKER_STYLE = {
+      expense: { fill: 'rgba(244,63,94,0.95)', label: 'rgba(244,63,94,0.8)', name: 'Expense' },
+      hours: { fill: 'rgba(45,212,191,0.95)', label: 'rgba(45,212,191,0.85)', name: 'Hours' },
+      windfall: { fill: 'rgba(232,184,75,0.95)', label: 'rgba(232,184,75,0.75)', name: 'Windfall' },
+    };
     for (const m of sorted) {
-      const isExpense = m.kind === 'expense';
-      const fill = isExpense ? 'rgba(244,63,94,0.95)' : 'rgba(232,184,75,0.95)';
-      const labelFill = isExpense ? 'rgba(244,63,94,0.8)' : 'rgba(232,184,75,0.75)';
+      const style = MARKER_STYLE[m.kind] ?? MARKER_STYLE.windfall;
       const mx = xOf(m.age);
       ctx.beginPath();
-      if (isExpense) {
+      if (m.kind === 'expense') {
         // ▼ apex pointing down at the axis
         ctx.moveTo(mx - 4.5, baseY - 8);
         ctx.lineTo(mx + 4.5, baseY - 8);
         ctx.lineTo(mx, baseY - 1);
+      } else if (m.kind === 'hours') {
+        // ◆ diamond — a change in level, neither an inflow nor an outflow
+        ctx.moveTo(mx, baseY - 9);
+        ctx.lineTo(mx + 4.5, baseY - 4.5);
+        ctx.lineTo(mx, baseY);
+        ctx.lineTo(mx - 4.5, baseY - 4.5);
       } else {
         // ▲ apex pointing up
         ctx.moveTo(mx, baseY - 8);
@@ -555,15 +564,15 @@ function drawFanChart(
         ctx.lineTo(mx + 4.5, baseY - 1);
       }
       ctx.closePath();
-      ctx.fillStyle = fill;
+      ctx.fillStyle = style.fill;
       ctx.fill();
 
-      let text = (m.label || (isExpense ? 'Expense' : 'Windfall')).slice(0, 14);
+      let text = (m.label || style.name).slice(0, 14);
       if ((m.label || '').length > 14) text += '…';
       const tw = ctx.measureText(text).width;
       const tx = Math.max(PAD.left + tw / 2, Math.min(mx, PAD.left + cW - tw / 2));
       if (tx - tw / 2 > lastLabelEnd + 6) {
-        ctx.fillStyle = labelFill;
+        ctx.fillStyle = style.label;
         ctx.textAlign = 'center';
         ctx.fillText(text, tx, baseY - 12);
         lastLabelEnd = tx + tw / 2;

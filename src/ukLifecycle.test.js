@@ -1035,6 +1035,114 @@ describe('pension access age (NMPA)', () => {
   });
 });
 
+describe('employment-hours changes (part-time / phased retirement)', () => {
+  // Multi-year fixture so a change mid-run is observable.
+  const htProfile = { ...baseProfile, retirementAge: 35, niContributionYears: 5 };
+
+  it('scales gross income to the fraction of the full-time-equivalent salary', () => {
+    // No wage growth so the full-time track is a flat £40k → 60% = £24k.
+    const flat = { ...baseRates, wageGrowthRate: 0 };
+    const r = run({ ...htProfile, employmentChanges: [{ age: 32, fraction: 0.6 }] }, flat);
+    const rows = r.yearlyBreakdown;
+    assert.equal(rows[0].hoursFraction, 1);
+    assert.equal(rows[0].grossIncome, 40_000);
+    assert.equal(rows[0].fullTimeGrossIncome, 40_000);
+    // Age 32 is the third row (30, 31, 32) — the change takes effect here.
+    assert.equal(rows[2].age, 32);
+    assert.equal(rows[2].hoursFraction, 0.6);
+    assert.equal(rows[2].grossIncome, 24_000);
+    assert.equal(rows[2].fullTimeGrossIncome, 40_000);
+  });
+
+  it('scales both employee and employer pension contributions pro-rata', () => {
+    const flat = { ...baseRates, wageGrowthRate: 0 };
+    const r = run({ ...htProfile, employmentChanges: [{ age: 31, fraction: 0.5 }] }, flat);
+    const full = r.yearlyBreakdown[0];
+    const half = r.yearlyBreakdown[1];
+    // 5% employee / 3% employer of £40k, halved from age 31.
+    assert.equal(full.employeeContribution, 2_000);
+    assert.equal(full.employerContribution, 1_200);
+    assert.equal(half.employeeContribution, 1_000);
+    assert.equal(half.employerContribution, 600);
+  });
+
+  it('the full-time track keeps growing, so returning to 100% restores full pay', () => {
+    const r = run({
+      ...htProfile,
+      employmentChanges: [
+        { age: 31, fraction: 0.5 },
+        { age: 33, fraction: 1 },
+      ],
+    });
+    const rows = r.yearlyBreakdown;
+    // Age 33 back at 100%: gross equals the full-time track for that year.
+    const at33 = rows.find((row) => row.age === 33);
+    assert.equal(at33.hoursFraction, 1);
+    assert.equal(at33.grossIncome, at33.fullTimeGrossIncome);
+    // And it exceeds the age-30 salary because wage growth kept compounding.
+    assert.ok(at33.grossIncome > rows[0].grossIncome);
+  });
+
+  it('a year with pay below the NI Lower Earnings Limit does not count toward the state pension', () => {
+    // 10% of £40k = £4,000, below the ~£6,396 LEL → no qualifying year.
+    const flat = { ...baseRates, wageGrowthRate: 0 };
+    const r = run({ ...htProfile, employmentChanges: [{ age: 31, fraction: 0.1 }] }, flat);
+    const rows = r.yearlyBreakdown;
+    assert.equal(rows[0].cumulativeNIYears, 6); // full-time year counts
+    // Every subsequent year is below the LEL → the count never advances.
+    assert.equal(rows[1].cumulativeNIYears, 6);
+    assert.equal(rows[rows.length - 1].cumulativeNIYears, 6);
+  });
+
+  it('the most recent change at or before an age applies; 100% before the first', () => {
+    const flat = { ...baseRates, wageGrowthRate: 0 };
+    const r = run(
+      {
+        ...htProfile,
+        employmentChanges: [
+          { age: 33, fraction: 0.4 },
+          { age: 31, fraction: 0.8 },
+        ],
+      },
+      flat
+    );
+    const at = (age) => r.yearlyBreakdown.find((row) => row.age === age);
+    assert.equal(at(30).hoursFraction, 1); // before the first change
+    assert.equal(at(31).hoursFraction, 0.8);
+    assert.equal(at(32).hoursFraction, 0.8); // holds until the next change
+    assert.equal(at(33).hoursFraction, 0.4);
+    assert.equal(at(34).hoursFraction, 0.4);
+  });
+
+  it('a disabled change is skipped', () => {
+    const flat = { ...baseRates, wageGrowthRate: 0 };
+    const r = run(
+      { ...htProfile, employmentChanges: [{ age: 31, fraction: 0.5, enabled: false }] },
+      flat
+    );
+    assert.equal(r.yearlyBreakdown[1].hoursFraction, 1);
+    assert.equal(r.yearlyBreakdown[1].grossIncome, 40_000);
+  });
+
+  it('validates the employmentChanges array and its entries', () => {
+    assert.throws(() => run({ ...htProfile, employmentChanges: 'nope' }), TypeError);
+    assert.throws(() => run({ ...htProfile, employmentChanges: [{ fraction: 0.5 }] }), TypeError);
+    assert.throws(
+      () => run({ ...htProfile, employmentChanges: [{ age: 32.5, fraction: 0.5 }] }),
+      TypeError
+    );
+    assert.throws(
+      () => run({ ...htProfile, employmentChanges: [{ age: 32, fraction: 0 }] }),
+      RangeError
+    );
+    assert.throws(
+      () => run({ ...htProfile, employmentChanges: [{ age: 32, fraction: 1.5 }] }),
+      RangeError
+    );
+    assert.doesNotThrow(() => run({ ...htProfile, employmentChanges: [{ age: 32, fraction: 1 }] }));
+  });
+});
+
 describe('summary totals', () => {
   it('summary balances match final yearlyBreakdown row', () => {
     const r = run({ ...baseProfile, retirementAge: 35 });

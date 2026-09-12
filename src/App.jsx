@@ -67,6 +67,7 @@ const DEFAULTS = {
   sex: 'neutral', // mortality basis for the lifetime-solvency metric
   windfalls: [],
   oneOffExpenses: [],
+  employmentChanges: [],
   employeePensionPct: 5,
   employerPensionPct: 3,
   pensionBalance: 10_000,
@@ -570,6 +571,152 @@ const eventInputStyle = {
   boxSizing: 'border-box',
 };
 
+const eventSectionTitleStyle = {
+  fontSize: 11,
+  letterSpacing: '0.1em',
+  textTransform: 'uppercase',
+  fontWeight: 600,
+  marginBottom: 6,
+};
+
+const eventIntroStyle = {
+  fontSize: 11,
+  color: 'var(--text-muted)',
+  fontFamily: 'var(--font-body)',
+  lineHeight: 1.6,
+  marginBottom: 12,
+};
+
+// Shared bordered card for a single life event: label + ON/OFF toggle + remove,
+// with the event's value inputs supplied as children. Used by every editor in
+// the Events tab (windfalls, one-off expenses, working-hours changes).
+function EventCard({ accent, enabled, label, placeholder, onLabel, onToggle, onRemove, children }) {
+  return (
+    <div
+      style={{
+        border: '1px solid var(--border)',
+        borderLeft: `2px solid ${enabled ? accent : 'var(--border)'}`,
+        borderRadius: 8,
+        padding: '10px 12px',
+        marginBottom: 10,
+        background: 'var(--bg-card)',
+        opacity: enabled ? 1 : 0.45,
+        transition: 'opacity 0.15s',
+      }}
+    >
+      <div
+        style={{
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          marginBottom: 8,
+          gap: 8,
+        }}
+      >
+        <input
+          type="text"
+          placeholder={placeholder}
+          value={label ?? ''}
+          onChange={(e) => onLabel(e.target.value)}
+          style={{ ...eventInputStyle, width: 150, fontFamily: 'var(--font-body)' }}
+        />
+        <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+          <button
+            onClick={onToggle}
+            title={
+              enabled
+                ? 'Exclude this event from the projection'
+                : 'Include this event in the projection'
+            }
+            style={{
+              background: enabled ? accent : 'transparent',
+              border: `1px solid ${enabled ? accent : 'var(--border-bright)'}`,
+              borderRadius: 10,
+              color: enabled ? 'var(--accent-gold-text)' : 'var(--text-muted)',
+              fontFamily: 'var(--font-mono)',
+              fontSize: 9,
+              fontWeight: 700,
+              letterSpacing: '0.08em',
+              padding: '2px 8px',
+              cursor: 'pointer',
+              opacity: 1,
+            }}
+          >
+            {enabled ? 'ON' : 'OFF'}
+          </button>
+          <button
+            onClick={onRemove}
+            title="Remove event"
+            style={{
+              background: 'transparent',
+              border: 'none',
+              color: 'var(--text-muted)',
+              cursor: 'pointer',
+              fontSize: 14,
+              padding: '2px 6px',
+            }}
+          >
+            ✕
+          </button>
+        </span>
+      </div>
+      {children}
+    </div>
+  );
+}
+
+function AddEventButton({ onClick, label }) {
+  return (
+    <button
+      onClick={onClick}
+      style={{
+        width: '100%',
+        padding: '8px 0',
+        background: 'transparent',
+        border: '1px dashed var(--border-bright)',
+        borderRadius: 7,
+        color: 'var(--text-secondary)',
+        fontFamily: 'var(--font-mono)',
+        fontSize: 11,
+        letterSpacing: '0.06em',
+        cursor: 'pointer',
+      }}
+    >
+      {label}
+    </button>
+  );
+}
+
+// A labelled age input constrained to [minAge, maxAge], with the calendar year shown.
+function AgeField({ p, value, minAge, maxAge, onChange, flex = 1 }) {
+  const lo = minAge ?? p.currentAge;
+  const hi = maxAge ?? p.maxAge;
+  return (
+    <label style={{ flex, fontSize: 10, color: 'var(--text-secondary)' }}>
+      AGE{' '}
+      <span style={{ color: 'var(--text-muted)' }}>
+        ({CURRENT_YEAR + Math.max(0, (value ?? lo) - p.currentAge)})
+      </span>
+      <input
+        type="number"
+        min={lo}
+        max={hi}
+        step={1}
+        value={value ?? lo}
+        onChange={(e) => {
+          const n = parseInt(e.target.value, 10);
+          if (!isNaN(n)) onChange(n);
+        }}
+        onBlur={(e) => {
+          const n = parseInt(e.target.value, 10);
+          if (!isNaN(n)) onChange(Math.max(lo, Math.min(hi, n)));
+        }}
+        style={{ ...eventInputStyle, marginTop: 4 }}
+      />
+    </label>
+  );
+}
+
 function EventSection({ p, events, onChange, title, accent, intro, help, placeholder, addLabel }) {
   const update = (idx, field, value) => {
     onChange(events.map((ev, i) => (i === idx ? { ...ev, [field]: value } : ev)));
@@ -583,126 +730,26 @@ function EventSection({ p, events, onChange, title, accent, intro, help, placeho
 
   return (
     <div style={{ marginBottom: 22 }}>
-      <div
-        style={{
-          fontSize: 11,
-          letterSpacing: '0.1em',
-          textTransform: 'uppercase',
-          color: accent,
-          fontWeight: 600,
-          marginBottom: 6,
-        }}
-      >
-        {title}
-      </div>
-      <p
-        style={{
-          fontSize: 11,
-          color: 'var(--text-muted)',
-          fontFamily: 'var(--font-body)',
-          lineHeight: 1.6,
-          marginBottom: 12,
-        }}
-      >
+      <div style={{ ...eventSectionTitleStyle, color: accent }}>{title}</div>
+      <p style={eventIntroStyle}>
         {intro}
         <HelpTip text={help} />
       </p>
       {events.map((ev, idx) => {
         const enabled = ev.enabled !== false;
         return (
-          <div
+          <EventCard
             key={idx}
-            style={{
-              border: '1px solid var(--border)',
-              borderLeft: `2px solid ${enabled ? accent : 'var(--border)'}`,
-              borderRadius: 8,
-              padding: '10px 12px',
-              marginBottom: 10,
-              background: 'var(--bg-card)',
-              opacity: enabled ? 1 : 0.45,
-              transition: 'opacity 0.15s',
-            }}
+            accent={accent}
+            enabled={enabled}
+            label={ev.label}
+            placeholder={placeholder}
+            onLabel={(v) => update(idx, 'label', v)}
+            onToggle={() => update(idx, 'enabled', !enabled)}
+            onRemove={() => remove(idx)}
           >
-            <div
-              style={{
-                display: 'flex',
-                justifyContent: 'space-between',
-                alignItems: 'center',
-                marginBottom: 8,
-                gap: 8,
-              }}
-            >
-              <input
-                type="text"
-                placeholder={placeholder}
-                value={ev.label ?? ''}
-                onChange={(e) => update(idx, 'label', e.target.value)}
-                style={{ ...eventInputStyle, width: 150, fontFamily: 'var(--font-body)' }}
-              />
-              <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-                <button
-                  onClick={() => update(idx, 'enabled', !enabled)}
-                  title={
-                    enabled
-                      ? 'Exclude this event from the projection'
-                      : 'Include this event in the projection'
-                  }
-                  style={{
-                    background: enabled ? accent : 'transparent',
-                    border: `1px solid ${enabled ? accent : 'var(--border-bright)'}`,
-                    borderRadius: 10,
-                    color: enabled ? 'var(--accent-gold-text)' : 'var(--text-muted)',
-                    fontFamily: 'var(--font-mono)',
-                    fontSize: 9,
-                    fontWeight: 700,
-                    letterSpacing: '0.08em',
-                    padding: '2px 8px',
-                    cursor: 'pointer',
-                    opacity: 1,
-                  }}
-                >
-                  {enabled ? 'ON' : 'OFF'}
-                </button>
-                <button
-                  onClick={() => remove(idx)}
-                  title="Remove event"
-                  style={{
-                    background: 'transparent',
-                    border: 'none',
-                    color: 'var(--text-muted)',
-                    cursor: 'pointer',
-                    fontSize: 14,
-                    padding: '2px 6px',
-                  }}
-                >
-                  ✕
-                </button>
-              </span>
-            </div>
             <div style={{ display: 'flex', gap: 10 }}>
-              <label style={{ flex: 1, fontSize: 10, color: 'var(--text-secondary)' }}>
-                AGE{' '}
-                <span style={{ color: 'var(--text-muted)' }}>
-                  ({CURRENT_YEAR + Math.max(0, (ev.age ?? p.currentAge) - p.currentAge)})
-                </span>
-                <input
-                  type="number"
-                  min={p.currentAge}
-                  max={p.maxAge}
-                  step={1}
-                  value={ev.age ?? p.currentAge}
-                  onChange={(e) => {
-                    const n = parseInt(e.target.value, 10);
-                    if (!isNaN(n)) update(idx, 'age', n);
-                  }}
-                  onBlur={(e) => {
-                    const n = parseInt(e.target.value, 10);
-                    if (!isNaN(n))
-                      update(idx, 'age', Math.max(p.currentAge, Math.min(p.maxAge, n)));
-                  }}
-                  style={{ ...eventInputStyle, marginTop: 4 }}
-                />
-              </label>
+              <AgeField p={p} value={ev.age} onChange={(n) => update(idx, 'age', n)} />
               <label style={{ flex: 2, fontSize: 10, color: 'var(--text-secondary)' }}>
                 AMOUNT <span style={{ color: 'var(--text-muted)' }}>(today&apos;s £)</span>
                 <input
@@ -718,26 +765,83 @@ function EventSection({ p, events, onChange, title, accent, intro, help, placeho
                 />
               </label>
             </div>
-          </div>
+          </EventCard>
         );
       })}
-      <button
-        onClick={add}
-        style={{
-          width: '100%',
-          padding: '8px 0',
-          background: 'transparent',
-          border: '1px dashed var(--border-bright)',
-          borderRadius: 7,
-          color: 'var(--text-secondary)',
-          fontFamily: 'var(--font-mono)',
-          fontSize: 11,
-          letterSpacing: '0.06em',
-          cursor: 'pointer',
-        }}
-      >
-        {addLabel}
-      </button>
+      <AddEventButton onClick={add} label={addLabel} />
+    </div>
+  );
+}
+
+// Working-hours changes: from a given age, employment income steps to a
+// percentage of the full-time-equivalent salary (part-time, phased retirement,
+// career break). Stored as a fraction (0–1); edited here as a whole percentage.
+function WorkingHoursSection({ p, events, onChange, accent }) {
+  const update = (idx, field, value) => {
+    onChange(events.map((ev, i) => (i === idx ? { ...ev, [field]: value } : ev)));
+  };
+  const remove = (idx) => onChange(events.filter((_, i) => i !== idx));
+  const add = () =>
+    onChange([
+      ...events,
+      { age: Math.min(p.currentAge + 5, p.retirementAge), fraction: 0.6, label: '', enabled: true },
+    ]);
+
+  return (
+    <div style={{ marginBottom: 22 }}>
+      <div style={{ ...eventSectionTitleStyle, color: accent }}>Working Hours</div>
+      <p style={eventIntroStyle}>
+        Model going part-time, a phased ramp-down to retirement, or a temporary career break. From
+        the chosen age your employment income steps to the given percentage of your full-time salary
+        and holds until the next change (100% before the first).
+        <HelpTip text="Employment income and both employee and employer pension contributions are scaled pro-rata; income tax, National Insurance, student-loan repayments and savings all follow automatically. The full-time salary keeps growing underneath, so returning to 100% restores full pay. Watch the state pension: a year whose reduced pay falls below the NI Lower Earnings Limit (about £6,400) no longer counts as a qualifying year. This model does not add NI credits — if you would qualify for Carer's Credit or Child Benefit credits during a break, your real state pension may hold up better than shown. Percentages are of your full-time-equivalent salary, floored at 1%; to model stopping work entirely, set your retirement age instead. Changes are marked ◆ on the chart. Use the ON/OFF toggle for before/after comparisons." />
+      </p>
+      {events.map((ev, idx) => {
+        const enabled = ev.enabled !== false;
+        const pct = Math.round((ev.fraction ?? 1) * 100);
+        return (
+          <EventCard
+            key={idx}
+            accent={accent}
+            enabled={enabled}
+            label={ev.label}
+            placeholder="Label (e.g. Go part-time)"
+            onLabel={(v) => update(idx, 'label', v)}
+            onToggle={() => update(idx, 'enabled', !enabled)}
+            onRemove={() => remove(idx)}
+          >
+            <div style={{ display: 'flex', gap: 10 }}>
+              <AgeField
+                p={p}
+                value={ev.age}
+                maxAge={p.retirementAge}
+                onChange={(n) => update(idx, 'age', n)}
+              />
+              <label style={{ flex: 2, fontSize: 10, color: 'var(--text-secondary)' }}>
+                HOURS <span style={{ color: 'var(--text-muted)' }}>(% of full-time)</span>
+                <input
+                  type="number"
+                  min={1}
+                  max={100}
+                  step={1}
+                  value={pct}
+                  onChange={(e) => {
+                    const n = parseInt(e.target.value, 10);
+                    if (!isNaN(n)) update(idx, 'fraction', n / 100);
+                  }}
+                  onBlur={(e) => {
+                    const n = parseInt(e.target.value, 10);
+                    const clamped = isNaN(n) ? 100 : Math.max(1, Math.min(100, n));
+                    update(idx, 'fraction', clamped / 100);
+                  }}
+                  style={{ ...eventInputStyle, marginTop: 4 }}
+                />
+              </label>
+            </div>
+          </EventCard>
+        );
+      })}
+      <AddEventButton onClick={add} label="+ Add Hours Change" />
     </div>
   );
 }
@@ -766,6 +870,12 @@ function EventsEditor({ p, set }) {
         help="Funded in tax-efficiency order: first from that year's unallocated savings (no tax event), then the GIA (CGT-aware, using the annual exempt amount), then the ISA. The pension is never touched — it is inaccessible before retirement. In retirement the expense joins that year's drawdown need. If your pots can't cover it, the gap is reported as a shortfall rather than borrowed. Expenses are marked ▼ on the chart. Use the ON/OFF toggle to include or exclude an event without deleting it. Pair a deposit here with a mortgage start age (Mortgage tab) to model a future property purchase."
         placeholder="Label (e.g. House deposit)"
         addLabel="+ Add Expense"
+      />
+      <WorkingHoursSection
+        p={p}
+        events={p.employmentChanges ?? []}
+        onChange={set('employmentChanges')}
+        accent="#2dd4bf"
       />
     </>
   );
@@ -1695,6 +1805,14 @@ function YearDetailPanel({ row, mobile = false }) {
         {/* Col 1 — Pay & Tax */}
         <DetailSection title="Pay & Tax" accent="#4f8ef7">
           <DetailLine label="Gross salary" value={fmtGBP(row.grossIncome)} />
+          {row.hoursFraction != null && row.hoursFraction < 1 && (
+            <DetailLine
+              label="Working hours"
+              value={`${Math.round(row.hoursFraction * 100)}% of full-time`}
+              color="#2dd4bf"
+              indent={1}
+            />
+          )}
           <DetailLine
             label="− Pension sacrifice"
             value={fmtGBP(row.employeeContribution)}
@@ -2479,6 +2597,7 @@ export default function App() {
         studentLoanPlan: p.studentLoanPlan || null,
         windfalls: p.windfalls,
         oneOffExpenses: p.oneOffExpenses,
+        employmentChanges: p.employmentChanges,
       };
       const rates = buildRates(p);
       const pots = buildPots(p);
@@ -2562,6 +2681,7 @@ export default function App() {
           studentLoanPlan: p.studentLoanPlan || null,
           windfalls: p.windfalls,
           oneOffExpenses: p.oneOffExpenses,
+          employmentChanges: p.employmentChanges,
         };
         const mcRates = buildRates(p);
         const mcPots = buildPots(p);
@@ -2651,12 +2771,26 @@ export default function App() {
       }
       return Array.from(byAge, ([age, label]) => ({ age, label, kind }));
     };
+    // Working-hours changes carry a fraction, not an amount, and only matter up
+    // to retirement; the marker label shows the new percentage.
+    const collectHours = (list) => {
+      const byAge = new Map();
+      for (const ev of list ?? []) {
+        if (ev.enabled === false) continue;
+        if (!(ev.fraction > 0) || ev.age < p.currentAge || ev.age > p.retirementAge) continue;
+        const pct = Math.round(ev.fraction * 100);
+        const label = ev.label ? `${ev.label} · ${pct}%` : `${pct}%`;
+        byAge.set(ev.age, byAge.has(ev.age) ? `${byAge.get(ev.age)}, ${label}` : label);
+      }
+      return Array.from(byAge, ([age, label]) => ({ age, label, kind: 'hours' }));
+    };
     const markers = [
       ...collect(p.windfalls, 'windfall', 'Windfall'),
       ...collect(p.oneOffExpenses, 'expense', 'Expense'),
+      ...collectHours(p.employmentChanges),
     ];
     return markers.length > 0 ? markers : null;
-  }, [p.windfalls, p.oneOffExpenses, p.currentAge, p.maxAge]);
+  }, [p.windfalls, p.oneOffExpenses, p.employmentChanges, p.currentAge, p.retirementAge, p.maxAge]);
 
   // 4% rule: need 25× annual spending as a portfolio (1 / 0.04 = 25).
   // Expressed in the same terms as the chart (real or nominal).
