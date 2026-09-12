@@ -53,7 +53,10 @@ const SERIES_HC = [
   { key: 'studentLoan', name: 'Student Loan', color: '#56B4E9', stackId: 'neg' }, // sky blue
 ];
 
-const CURRENT_YEAR = 2025;
+// The calendar year the projection starts from — taken from the system clock so
+// year labels (and the student-loan start year) stay correct as time passes.
+// This is distinct from TAX_YEAR, the frozen 2025/26 tax regime the model uses.
+const CURRENT_YEAR = new Date().getFullYear();
 
 const DEFAULTS = {
   currentAge: 28,
@@ -2585,6 +2588,7 @@ export default function App() {
     try {
       const profile = {
         currentAge: p.currentAge,
+        currentYear: CURRENT_YEAR,
         retirementAge: p.retirementAge,
         grossIncome: p.grossIncome,
         annualLivingExpenses: p.annualLivingExpenses,
@@ -2669,6 +2673,7 @@ export default function App() {
       try {
         const mcProfile = {
           currentAge: p.currentAge,
+          currentYear: CURRENT_YEAR,
           retirementAge: p.retirementAge,
           grossIncome: p.grossIncome,
           annualLivingExpenses: p.annualLivingExpenses,
