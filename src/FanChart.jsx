@@ -776,6 +776,7 @@ export function FanChart({
   pensionAccessAge = null,
   shortfallMarkers = null,
   shortfallAges = null,
+  fundsView = 'all',
   height = 390,
 }) {
   const canvasRef = useRef(null);
@@ -840,16 +841,23 @@ export function FanChart({
     });
   }, [lockedTrial, portfolioMatrix, percentileData, realTerms, inflRate, currentAge]);
 
+  // In the "available funds" view the pension is excluded before the access
+  // age (it can't be spent yet); ISA/GIA and everything from the access age on
+  // are always counted. Returns true when the pension should be included.
+  const pensionCounts = (age) =>
+    fundsView !== 'available' || pensionAccessAge == null || age >= pensionAccessAge;
+
   // Real-terms adjusted per-pot breakdown for the locked trial.
   const adjLockedPotData = useMemo(() => {
     if (!lockedTrial || !allPotData || !percentileData) return null;
     const trialPots = allPotData[lockedTrial.trialIdx];
     if (!trialPots) return null;
     return trialPots.map((pots, i) => {
-      const f = realTerms ? Math.pow(1 / (1 + inflRate), percentileData[i].age - currentAge) : 1;
+      const age = percentileData[i].age;
+      const f = realTerms ? Math.pow(1 / (1 + inflRate), age - currentAge) : 1;
       return {
         // Assets (clamped to ≥0; debt side handled separately)
-        pension: Math.max(0, (pots.pension ?? 0) * f),
+        pension: pensionCounts(age) ? Math.max(0, (pots.pension ?? 0) * f) : 0,
         isa: Math.max(0, (pots.isa ?? 0) * f),
         gia: Math.max(0, (pots.gia ?? 0) * f),
         // Debts (positive magnitudes; drawn below zero axis)
@@ -858,7 +866,17 @@ export function FanChart({
         studentLoan: Math.max(0, (pots.studentLoan ?? 0) * f),
       };
     });
-  }, [lockedTrial, allPotData, percentileData, realTerms, inflRate, currentAge]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    lockedTrial,
+    allPotData,
+    percentileData,
+    realTerms,
+    inflRate,
+    currentAge,
+    fundsView,
+    pensionAccessAge,
+  ]);
 
   // Shortfall markers to draw, resolved to {age, color} for the current mode.
   // Ages come from genuine insolvency (first unmet spending), never the total
@@ -905,23 +923,26 @@ export function FanChart({
   const detAdjPercentiles = useMemo(() => {
     if (!adjDetData) return null;
     return adjDetData.map((row) => {
-      const total = Math.max(0, row.pension + row.isa + row.gia);
+      const pension = pensionCounts(row.age) ? row.pension : 0;
+      const total = Math.max(0, pension + row.isa + row.gia);
       return { age: row.age, p10: total, p25: total, p50: total, p75: total, p90: total };
     });
-  }, [adjDetData]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [adjDetData, fundsView, pensionAccessAge]);
 
   // lockedPotData-shaped array: debts flipped to positive magnitudes.
   const detLockedPotData = useMemo(() => {
     if (!adjDetData) return null;
     return adjDetData.map((row) => ({
-      pension: Math.max(0, row.pension),
+      pension: pensionCounts(row.age) ? Math.max(0, row.pension) : 0,
       isa: Math.max(0, row.isa),
       gia: Math.max(0, row.gia),
       mortgage: Math.max(0, -row.mortgage),
       unsecuredDebt: Math.max(0, -row.unsecuredDebt),
       studentLoan: Math.max(0, -row.studentLoan),
     }));
-  }, [adjDetData]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [adjDetData, fundsView, pensionAccessAge]);
 
   // Redraw whenever data, hover, lock state, or container size changes
   useEffect(() => {

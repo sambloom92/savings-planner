@@ -113,6 +113,31 @@ describe('result shape', () => {
       }
     }
   });
+
+  it('availablePercentileData never exceeds the all-balances bands', () => {
+    // Available funds = a subset of the total pot (pension excluded before the
+    // access age), so every available percentile is ≤ the matching all band.
+    assert.equal(res.availablePercentileData.length, res.percentileData.length);
+    for (let i = 0; i < res.percentileData.length; i++) {
+      for (const k of ['p10', 'p25', 'p50', 'p75', 'p90']) {
+        assert.ok(
+          res.availablePercentileData[i][k] <= res.percentileData[i][k] + 1e-6,
+          `available ${k} > all at age ${res.percentileData[i].age}`
+        );
+      }
+    }
+  });
+
+  it('available and all bands coincide once the pension is accessible', () => {
+    // From the access age onward the pension counts in both, so the bands match.
+    const accessAge = 57;
+    for (const row of res.availablePercentileData.filter((r) => r.age >= accessAge)) {
+      const all = res.percentileData.find((r) => r.age === row.age);
+      for (const k of ['p10', 'p50', 'p90']) {
+        assert.ok(Math.abs(row[k] - all[k]) < 1e-6, `mismatch at ${row.age} ${k}`);
+      }
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------

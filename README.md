@@ -15,6 +15,7 @@ A browser-based retirement savings projection dashboard for residents of England
 - **One-off expenses** — discrete outflows (house deposit, wedding, helping children) at a chosen age, funded in tax-efficiency order (unallocated savings → GIA → ISA, never the pension); unfundable amounts are reported as shortfalls, not borrowed
 - **Deferred mortgage start** — the mortgage can begin at a future age to model a planned property purchase (pair with a one-off expense for the deposit); the balance is inflated to the purchase year
 - **Real / nominal toggle** — switch between future cash values and today's purchasing power at any time
+- **All balances / available funds toggle** — view the whole pot, or only money spendable at each age (the pension is excluded before its access age); a prompt flags when spendable funds run out while a locked pension keeps the total balance above zero
 - **Year detail panel** — hover the chart to see a full breakdown of every money flow for that year
 - **Export / import** — copy parameters as JSON and paste them back to save or share a scenario
 - **Static site** — no server needed; deployable to GitHub Pages or any CDN

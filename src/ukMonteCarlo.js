@@ -55,7 +55,7 @@
  * Macro rates floored at −5% to prevent extreme deflation artefacts.
  */
 
-import { projectLifecycle } from './ukLifecycle.js';
+import { projectLifecycle, LIFECYCLE_CONSTANTS } from './ukLifecycle.js';
 import { survivalToAge, survivalCurve } from './ukMortality.js';
 
 const VOL_BEAR = 2.5; // vol multiplier target during bear regimes
@@ -291,6 +291,32 @@ export function runMonteCarlo(profile, baseRates, pots, retirementOpts, opts = {
     };
   });
 
+  // Available-funds percentiles: same bands but counting only money you could
+  // actually spend at each age — ISA + GIA always, plus the pension only from
+  // the access age. Before then the (locked) pension is excluded, so these
+  // bands can fall to zero during an early-retirement bridge while the total
+  // pot is still large. Used by the chart's "Available funds" view.
+  const accessAge = profile.pensionAccessAge ?? LIFECYCLE_CONSTANTS.pension.defaultAccessAge;
+  const availableMatrix = successful.map((r) =>
+    r.yearlyBreakdown.map((row) => {
+      const isa = Math.max(0, row.isa?.closingBalance ?? 0);
+      const gia = Math.max(0, row.gia?.closingBalance ?? 0);
+      const pension = row.age >= accessAge ? Math.max(0, row.pension?.closingBalance ?? 0) : 0;
+      return isa + gia + pension;
+    })
+  );
+  const availablePercentileData = ages.map((age, ai) => {
+    const vals = availableMatrix.map((col) => col[ai]).sort((a, b) => a - b);
+    return {
+      age,
+      p10: pctile(vals, 10),
+      p25: pctile(vals, 25),
+      p50: pctile(vals, 50),
+      p75: pctile(vals, 75),
+      p90: pctile(vals, 90),
+    };
+  });
+
   const repPaths = {};
   for (const p of PCTS) {
     repPaths[p] = successful[repTrialIdx[p]].yearlyBreakdown;
@@ -352,6 +378,7 @@ export function runMonteCarlo(profile, baseRates, pots, retirementOpts, opts = {
 
   return {
     percentileData,
+    availablePercentileData,
     repPaths,
     trialCount: successful.length,
     portfolioMatrix,
