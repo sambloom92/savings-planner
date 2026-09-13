@@ -132,9 +132,18 @@ const DEFAULTS = {
   mcCrisisPersistence: 0.6,
 };
 
+// The manual employee contribution percentage, floored at the employer's match
+// threshold when matching is on: contributing less than the required minimum
+// would forfeit the whole employer contribution, so we never let it go lower.
+function manualEmployeePensionPct(p) {
+  return p.employerMatch
+    ? Math.max(p.employeePensionPct, p.employerMatchThreshold)
+    : p.employeePensionPct;
+}
+
 // The employee salary-sacrifice rate the projection actually uses: either the
-// manual slider value, or — in Auto mode — the tax-optimal rate solved from the
-// current salary and employer contribution (see optimalEmployeePensionContribution).
+// (floored) manual slider value, or — in Auto mode — the tax-optimal rate solved
+// from the current salary and employer contribution.
 function effectiveEmployeePensionRate(p) {
   if (p.employeePensionAuto) {
     return optimalEmployeePensionContribution(p.grossIncome, p.employerPensionPct / 100, {
@@ -142,7 +151,7 @@ function effectiveEmployeePensionRate(p) {
       employerMatchThreshold: p.employerMatchThreshold / 100,
     }).employeeRate;
   }
-  return p.employeePensionPct / 100;
+  return manualEmployeePensionPct(p) / 100;
 }
 
 // ── Small components ──────────────────────────────────────────────────────────
@@ -1147,7 +1156,7 @@ function TabContent({ tab, p, set }) {
               onChange={set('employerMatchThreshold')}
               color="#4f8ef7"
               allowInput
-              help="The minimum you must contribute to receive the full employer contribution above. For a tiered scheme, enter the employee percentage for the top tier you'll take (e.g. 6% to earn 12%). Contribute less than this and the employer pays nothing in this model. In Auto mode the app contributes at least this much to capture the full employer offer."
+              help="The minimum you must contribute to receive the full employer contribution above. For a tiered scheme, enter the employee percentage for the top tier you'll take (e.g. 6% to earn 12%). Your employee contribution is floored at this minimum in both Manual and Auto modes, since contributing less would forfeit the whole employer contribution."
             />
           )}
           <Toggle
@@ -1163,15 +1172,23 @@ function TabContent({ tab, p, set }) {
           ) : (
             <Slider
               label="Employee Contribution"
-              value={p.employeePensionPct}
-              min={0}
+              value={manualEmployeePensionPct(p)}
+              min={p.employerMatch ? p.employerMatchThreshold : 0}
               max={50}
               step={0.5}
               format={fmtPct}
-              onChange={set('employeePensionPct')}
+              onChange={(v) =>
+                set('employeePensionPct')(
+                  p.employerMatch ? Math.max(v, p.employerMatchThreshold) : v
+                )
+              }
               color="#4f8ef7"
               allowInput
-              help="Your pension contribution as a percentage of gross salary, paid via salary sacrifice. This reduces your taxable income, saving income tax and National Insurance."
+              help={
+                p.employerMatch
+                  ? `Your pension contribution as a percentage of gross salary, paid via salary sacrifice (income tax + NI relief). It can't go below the ${fmtPct(p.employerMatchThreshold)} your employer requires for its match: contributing less would forfeit the whole employer contribution, so it's floored at the required minimum.`
+                  : 'Your pension contribution as a percentage of gross salary, paid via salary sacrifice. This reduces your taxable income, saving income tax and National Insurance.'
+              }
             />
           )}
           <Slider
