@@ -25,6 +25,19 @@ const TABS = [
   'Simulation',
 ];
 
+// One-line description of each settings tab, shown as a hover tooltip on its button.
+const TAB_HELP = {
+  Personal: 'Age, salary, living expenses, National Insurance and state pension',
+  Pension: 'Pension contributions (employee & employer), starting pot and access age',
+  Savings: 'Starting ISA and GIA balances, and GIA cost basis for CGT',
+  Events: 'One-off windfalls, expenses and working-hours changes at chosen ages',
+  Mortgage: 'Mortgage balance, term, type, interest rate and overpayments',
+  Debts: 'Unsecured debts (cards, loans) and student loan repayment plan',
+  Rates: 'Investment returns, wage growth, inflation, glide path and fiscal drag',
+  Retire: 'Retirement spending target, model horizon and tax-free lump sum',
+  Simulation: 'Monte Carlo settings (trials, volatility, downturns) and mortality basis',
+};
+
 const PLAN_OPTIONS = [
   { value: '', label: 'None' },
   { value: 'plan1', label: 'Plan 1 (pre-2012)' },
@@ -75,6 +88,7 @@ const DEFAULTS = {
   employeePensionPct: 5,
   employeePensionAuto: false, // when true, employee % is solved for tax-optimality
   employerPensionPct: 3,
+  employerMatch: false, // when true, employer pays min(employerPct, employeePct)
   pensionBalance: 10_000,
   equityReturnPct: 7,
   bondReturnPct: 3,
@@ -129,8 +143,9 @@ const PENSION_BAND_LABELS = {
 // current salary and employer contribution (see optimalEmployeePensionContribution).
 function effectiveEmployeePensionRate(p) {
   if (p.employeePensionAuto) {
-    return optimalEmployeePensionContribution(p.grossIncome, p.employerPensionPct / 100)
-      .employeeRate;
+    return optimalEmployeePensionContribution(p.grossIncome, p.employerPensionPct / 100, {
+      employerMatch: p.employerMatch,
+    }).employeeRate;
   }
   return p.employeePensionPct / 100;
 }
@@ -911,7 +926,9 @@ function EventsEditor({ p, set }) {
 function AutoContributionReadout({ p }) {
   let auto;
   try {
-    auto = optimalEmployeePensionContribution(p.grossIncome, p.employerPensionPct / 100);
+    auto = optimalEmployeePensionContribution(p.grossIncome, p.employerPensionPct / 100, {
+      employerMatch: p.employerMatch,
+    });
   } catch {
     return <InfoBox>Enter a valid salary to compute the tax-optimal contribution.</InfoBox>;
   }
@@ -922,6 +939,41 @@ function AutoContributionReadout({ p }) {
     bands.length <= 1
       ? bands.join('')
       : `${bands.slice(0, -1).join(', ')} and ${bands[bands.length - 1]}`;
+
+  // Full match = the employee sacrifices at least the cap, so the employer pays
+  // its maximum. The small tolerance absorbs rounding of the rate to 4dp.
+  const fullMatch =
+    auto.employerMatched && auto.effectiveEmployerRate + 0.0001 >= auto.employerRate;
+
+  let explanation;
+  if (auto.employeeContribution === 0) {
+    explanation =
+      `At ${fmtGBP(p.grossIncome)} your taxable pay is already within the basic-rate band, so there ` +
+      `is no higher-rate or personal-allowance cliff to escape. Further salary sacrifice would earn ` +
+      `only 20% income-tax relief (plus 8% NI)` +
+      (auto.employerMatched ? ', and there is no employer match to capture, ' : ', ') +
+      `so the tax-optimal contribution is 0%. `;
+  } else {
+    const matchClause = auto.employerMatched
+      ? fullMatch
+        ? ` — the full ${(auto.employerRate * 100).toFixed(1)}% employer match is captured`
+        : ` — the employer match is capped at ${(auto.effectiveEmployerRate * 100).toFixed(1)}% by the annual allowance`
+      : '';
+    // Only add a general allowance note when a capped (partial) match hasn't
+    // already explained the cap above.
+    const cappedNote =
+      auto.cappedByAllowance && !(auto.employerMatched && !fullMatch)
+        ? ` The ${fmtGBP(auto.annualAllowance)} annual allowance is the binding limit, so the sacrifice stops short of the ${fmtGBP(auto.targetIncome)} target. `
+        : ' ';
+    explanation =
+      `Sacrificing ${pct}% (${fmtGBP(auto.employeeContribution)}/yr) brings your taxable pay from ` +
+      `${fmtGBP(p.grossIncome)} to ${fmtGBP(auto.adjustedGrossIncome)}` +
+      (bandList ? `, cutting the tax you pay in ${bandList}` : '') +
+      `. Total pension input ${fmtGBP(auto.totalContribution)}/yr (incl. ${fmtGBP(auto.employerContribution)} employer)` +
+      matchClause +
+      `.` +
+      cappedNote;
+  }
 
   return (
     <>
@@ -961,24 +1013,7 @@ function AutoContributionReadout({ p }) {
         </div>
       </div>
       <InfoBox>
-        {auto.employeeContribution === 0 ? (
-          <>
-            At {fmtGBP(p.grossIncome)} your taxable pay is already within the basic-rate band, so
-            there is no higher-rate or personal-allowance cliff to escape. Further salary sacrifice
-            would earn only 20% income-tax relief (plus 8% NI), so the tax-optimal contribution is{' '}
-            <strong>0%</strong>.{' '}
-          </>
-        ) : (
-          <>
-            Sacrificing <strong>{pct}%</strong> ({fmtGBP(auto.employeeContribution)}/yr) takes your
-            taxable pay from {fmtGBP(p.grossIncome)} to {fmtGBP(auto.adjustedGrossIncome)}
-            {bandList ? <>, clearing {bandList}</> : null}. Total pension input{' '}
-            {fmtGBP(auto.totalContribution)}/yr (incl. {fmtGBP(auto.employerContribution)} employer)
-            {auto.cappedByAllowance
-              ? ` — the full sacrifice is limited by the ${fmtGBP(auto.annualAllowance)} annual allowance. `
-              : '. '}
-          </>
-        )}
+        {explanation}
         Based on today&apos;s salary and 2025/26 thresholds; the rate is held constant as your pay
         grows, and affordability is not considered.
       </InfoBox>
@@ -1080,7 +1115,7 @@ function TabContent({ tab, p, set }) {
             optA={{ value: 'manual', label: 'Manual' }}
             optB={{ value: 'auto', label: 'Auto (tax-optimal)' }}
             onChange={(v) => set('employeePensionAuto')(v === 'auto')}
-            help="Manual: set your salary-sacrifice percentage yourself. Auto (tax-optimal): the app solves for the employee contribution that strips out every pound taxed above the basic rate — escaping the 45% additional rate, the 60% personal-allowance trap (£100k–£125,140) and the 40% higher-rate band — using your salary, your employer contribution and the £60,000 annual allowance (tapered for high earners). It never sacrifices below the tax-free personal allowance. Based on today's salary and 2025/26 thresholds; affordability is not considered."
+            help="Manual: set your salary-sacrifice percentage yourself. Auto (tax-optimal): the app solves for the employee contribution that strips out every pound taxed above the basic rate — escaping the 45% additional rate, the 60% personal-allowance trap (£100k–£125,140) and the 40% higher-rate band — using your salary, your employer contribution and the £60,000 annual allowance (tapered for high earners). It never sacrifices below the tax-free personal allowance. When your employer contribution is set to Matched, it also contributes at least up to the match cap to capture all the free employer money. Based on today's salary and 2025/26 thresholds; affordability is not considered."
           />
           {p.employeePensionAuto ? (
             <AutoContributionReadout p={p} />
@@ -1098,8 +1133,16 @@ function TabContent({ tab, p, set }) {
               help="Your pension contribution as a percentage of gross salary, paid via salary sacrifice. This reduces your taxable income, saving income tax and National Insurance."
             />
           )}
+          <Toggle
+            label="Employer Type"
+            value={p.employerMatch ? 'matched' : 'fixed'}
+            optA={{ value: 'fixed', label: 'Fixed' }}
+            optB={{ value: 'matched', label: 'Matched' }}
+            onChange={(v) => set('employerMatch')(v === 'matched')}
+            help="Fixed: your employer always contributes the percentage below, regardless of what you pay in. Matched: your employer pays the lesser of that percentage and your own contribution — so a 3% employer rate matches you pound-for-pound up to 3%, and if you contribute nothing, the employer contributes nothing. Matching is common in UK workplace schemes; contributing at least up to the match is usually the single best-value thing you can do, which is why Auto mode targets it."
+          />
           <Slider
-            label="Employer Contribution"
+            label={p.employerMatch ? 'Employer Match (up to)' : 'Employer Contribution'}
             value={p.employerPensionPct}
             min={0}
             max={20}
@@ -1108,7 +1151,11 @@ function TabContent({ tab, p, set }) {
             onChange={set('employerPensionPct')}
             color="#4f8ef7"
             allowInput
-            help="Your employer's pension contribution as a percentage of your gross salary. This is paid on top of your salary and doesn't cost you anything directly — sometimes called 'free money'."
+            help={
+              p.employerMatch
+                ? "The most your employer will contribute, as a percentage of gross salary. The actual contribution is the lesser of this and your own contribution — matched pound-for-pound up to this cap. It's free money added on top of your salary, so aim to contribute at least this much yourself."
+                : "Your employer's pension contribution as a percentage of your gross salary. This is paid on top of your salary and doesn't cost you anything directly — sometimes called 'free money'."
+            }
           />
           <Slider
             label="Starting Balance"
@@ -2708,6 +2755,7 @@ export default function App() {
         annualLivingExpenses: p.annualLivingExpenses,
         employeePensionRate: effectiveEmployeePensionRate(p),
         employerPensionRate: p.employerPensionPct / 100,
+        employerMatch: p.employerMatch,
         niContributionYears: p.niContributionYears,
         statePensionAge: p.statePensionAge,
         statePensionDeferralYears: p.statePensionDeferralYears,
@@ -2793,6 +2841,7 @@ export default function App() {
           annualLivingExpenses: p.annualLivingExpenses,
           employeePensionRate: effectiveEmployeePensionRate(p),
           employerPensionRate: p.employerPensionPct / 100,
+          employerMatch: p.employerMatch,
           niContributionYears: p.niContributionYears,
           statePensionAge: p.statePensionAge,
           statePensionDeferralYears: p.statePensionDeferralYears,
@@ -3219,6 +3268,7 @@ Use Available funds to see whether an early-retirement plan can bridge the gap u
             {TABS.map((tab) => (
               <button
                 key={tab}
+                title={TAB_HELP[tab]}
                 onClick={() => {
                   if (mobile) {
                     if (activeTab === tab && sidebarOpen) setSidebarOpen(false);
@@ -3330,13 +3380,25 @@ Use Available funds to see whether an early-retirement plan can bridge the gap u
                 {/* Copy / Paste JSON */}
                 <div style={{ display: 'flex', gap: 8 }}>
                   {[
-                    { label: 'Copy JSON', msg: copyMsg, handler: handleCopy },
-                    { label: 'Paste JSON', msg: pasteMsg, handler: handlePaste },
-                  ].map(({ label, msg, handler }) => {
+                    {
+                      label: 'Copy JSON',
+                      title:
+                        'Copy all current parameters to the clipboard as JSON, to save or share this scenario',
+                      msg: copyMsg,
+                      handler: handleCopy,
+                    },
+                    {
+                      label: 'Paste JSON',
+                      title: 'Replace all parameters with a scenario JSON from the clipboard',
+                      msg: pasteMsg,
+                      handler: handlePaste,
+                    },
+                  ].map(({ label, title, msg, handler }) => {
                     const isError = msg === 'Failed' || msg === 'Invalid JSON';
                     return (
                       <button
                         key={label}
+                        title={title}
                         onClick={handler}
                         style={{
                           flex: 1,
@@ -3371,6 +3433,7 @@ Use Available funds to see whether an early-retirement plan can bridge the gap u
                 </div>
                 {/* Reset */}
                 <button
+                  title="Reset every parameter back to its default value"
                   onClick={() => {
                     replaceP(DEFAULTS);
                     setActiveTab('Personal');

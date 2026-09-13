@@ -883,16 +883,90 @@ describe('optimalEmployeePensionContribution — targetIncome override', () => {
   });
 });
 
+describe('optimalEmployeePensionContribution — employer matching', () => {
+  it('validates employerMatch is a boolean', () => {
+    assert.throws(
+      () => optimalEmployeePensionContribution(50_000, 0.03, { employerMatch: 'yes' }),
+      TypeError
+    );
+  });
+
+  it('reports whether matching was applied', () => {
+    assert.equal(optimalEmployeePensionContribution(70_000, 0.03).employerMatched, false);
+    assert.equal(
+      optimalEmployeePensionContribution(70_000, 0.03, { employerMatch: true }).employerMatched,
+      true
+    );
+  });
+
+  it('a basic-rate taxpayer contributes up to the match cap to capture free money', () => {
+    // Unconditional: 0% is tax-optimal. Matched: contribute the 3% cap so the
+    // employer matches it — the free money dwarfs the relief forgone.
+    const unconditional = optimalEmployeePensionContribution(45_000, 0.03);
+    assert.equal(unconditional.employeeContribution, 0);
+
+    const matched = optimalEmployeePensionContribution(45_000, 0.03, { employerMatch: true });
+    assertApprox(matched.employeeRate, 0.03, 'employeeRate matches the cap');
+    assertApprox(matched.employeeContribution, 45_000 * 0.03, 'employeeContribution');
+    assertApprox(matched.employerContribution, 45_000 * 0.03, 'employerContribution (full match)');
+    assertApprox(matched.totalContribution, 45_000 * 0.06, 'total is employee + equal match');
+    assert.equal(matched.cappedByAllowance, false);
+  });
+
+  it('a higher-rate taxpayer already past the cap captures the full match', () => {
+    // 28.2% employee sacrifice far exceeds the 3% cap, so the employer pays 3%.
+    const r = optimalEmployeePensionContribution(70_000, 0.03, { employerMatch: true });
+    assertApprox(r.adjustedGrossIncome, HRT, 'still targets the higher-rate threshold');
+    assertApprox(r.effectiveEmployerRate, 0.03, 'employer pays the full 3% cap');
+    assertApprox(r.employerContribution, 70_000 * 0.03, 'employerContribution');
+  });
+
+  it('matching with a zero employer cap behaves like no employer contribution', () => {
+    const matched = optimalEmployeePensionContribution(60_000, 0, { employerMatch: true });
+    assert.equal(matched.employerContribution, 0);
+    assertApprox(matched.adjustedGrossIncome, HRT, 'targets the higher-rate threshold');
+  });
+
+  it('caps the match at half the allowance when matching the full cap would breach it', () => {
+    // 40% match cap on £100k = £40,000. Matching it needs £40k employee + £40k
+    // employer = £80k > £60k allowance. The solver settles at £30k each side
+    // (allowance ÷ 2), the most the allowance permits, and flags the cap.
+    const r = optimalEmployeePensionContribution(100_000, 0.4, { employerMatch: true });
+    assertApprox(r.employeeContribution, 30_000, 'employee = allowance / 2');
+    assertApprox(r.employerContribution, 30_000, 'employer = allowance / 2');
+    assertApprox(r.totalContribution, PENSION_CONSTANTS.annualAllowance, 'total = allowance');
+    assert.ok(r.effectiveEmployerRate < r.employerRate, 'match is partial (below the 40% cap)');
+    assert.equal(r.cappedByAllowance, true);
+  });
+
+  it('never lets a matched total exceed the annual allowance', () => {
+    for (const [g, er] of [
+      [80_000, 0.1],
+      [150_000, 0.06],
+      [250_000, 0.2],
+      [300_000, 0.05],
+    ]) {
+      const r = optimalEmployeePensionContribution(g, er, { employerMatch: true });
+      assert.ok(
+        r.totalContribution <= r.annualAllowance + 0.01,
+        `gross ${g}, cap ${er}: total ${r.totalContribution} exceeds allowance ${r.annualAllowance}`
+      );
+    }
+  });
+});
+
 describe('optimalEmployeePensionContribution — result shape', () => {
   it('returns all documented fields and the tax year', () => {
     const r = optimalEmployeePensionContribution(70_000, 0.03);
     for (const key of [
       'grossIncome',
       'employerRate',
+      'employerMatched',
       'targetIncome',
       'employeeRate',
       'employeeContribution',
       'employerContribution',
+      'effectiveEmployerRate',
       'totalContribution',
       'adjustedGrossIncome',
       'annualAllowance',
