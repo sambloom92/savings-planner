@@ -131,13 +131,6 @@ const DEFAULTS = {
   mcCrisisPersistence: 0.6,
 };
 
-// Human-readable names for the high-tax bands the auto-optimiser can clear.
-const PENSION_BAND_LABELS = {
-  additionalRate: 'the 45% additional-rate band',
-  paTaper: 'the 60% personal-allowance trap',
-  higherRate: 'the 40% higher-rate band',
-};
-
 // The employee salary-sacrifice rate the projection actually uses: either the
 // manual slider value, or — in Auto mode — the tax-optimal rate solved from the
 // current salary and employer contribution (see optimalEmployeePensionContribution).
@@ -934,45 +927,53 @@ function AutoContributionReadout({ p }) {
   }
 
   const pct = (auto.employeeRate * 100).toFixed(1);
-  const bands = auto.bandsCleared.map((b) => PENSION_BAND_LABELS[b] ?? b);
-  const bandList =
-    bands.length <= 1
-      ? bands.join('')
-      : `${bands.slice(0, -1).join(', ')} and ${bands[bands.length - 1]}`;
+  const gross = fmtGBP(p.grossIncome);
+  const target = fmtGBP(auto.targetIncome); // £100,000 at today's thresholds
+  const emp = fmtGBP(auto.employeeContribution);
+  const total = fmtGBP(auto.totalContribution);
+  const employer = fmtGBP(auto.employerContribution);
+  const erPct = (auto.employerRate * 100).toFixed(1);
 
   // Full match = the employee sacrifices at least the cap, so the employer pays
   // its maximum. The small tolerance absorbs rounding of the rate to 4dp.
   const fullMatch =
     auto.employerMatched && auto.effectiveEmployerRate + 0.0001 >= auto.employerRate;
+  const matchClause = auto.employerMatched
+    ? fullMatch
+      ? `, the full ${erPct}% match`
+      : `, a partial match capped by the annual allowance`
+    : '';
 
+  const abovePA = p.grossIncome > auto.targetIncome + 0.5;
   let explanation;
-  if (auto.employeeContribution === 0) {
+  if (!abovePA) {
+    // Income at/below £100,000 — the personal allowance is safe already.
+    if (auto.employeeContribution === 0) {
+      explanation =
+        `At ${gross} your income is below ${target}, so your full tax-free personal allowance is ` +
+        `already safe — there is nothing to protect` +
+        (auto.employerMatched ? ', and no employer match to capture' : '') +
+        `. The tax-optimal contribution is 0%. `;
+    } else {
+      // Matched: contribute up to the cap to capture the free employer money.
+      explanation =
+        `At ${gross} your personal allowance is already safe (income below ${target}). You contribute ` +
+        `${pct}% (${emp}/yr) to capture ${fullMatch ? `the full ${erPct}%` : 'the'} employer match — ` +
+        `${total}/yr into your pension in total. `;
+    }
+  } else if (auto.adjustedGrossIncome <= auto.targetIncome + 0.5) {
+    // Income above £100,000, and the sacrifice reaches the target.
     explanation =
-      `At ${fmtGBP(p.grossIncome)} your taxable pay is already within the basic-rate band, so there ` +
-      `is no higher-rate or personal-allowance cliff to escape. Further salary sacrifice would earn ` +
-      `only 20% income-tax relief (plus 8% NI)` +
-      (auto.employerMatched ? ', and there is no employer match to capture, ' : ', ') +
-      `so the tax-optimal contribution is 0%. `;
+      `Sacrificing ${pct}% (${emp}/yr) brings your taxable income from ${gross} down to ${target}, ` +
+      `reclaiming your full tax-free personal allowance. Total pension input ${total}/yr ` +
+      `(incl. ${employer} employer${matchClause}). `;
   } else {
-    const matchClause = auto.employerMatched
-      ? fullMatch
-        ? ` — the full ${(auto.employerRate * 100).toFixed(1)}% employer match is captured`
-        : ` — the employer match is capped at ${(auto.effectiveEmployerRate * 100).toFixed(1)}% by the annual allowance`
-      : '';
-    // Only add a general allowance note when a capped (partial) match hasn't
-    // already explained the cap above.
-    const cappedNote =
-      auto.cappedByAllowance && !(auto.employerMatched && !fullMatch)
-        ? ` The ${fmtGBP(auto.annualAllowance)} annual allowance is the binding limit, so the sacrifice stops short of the ${fmtGBP(auto.targetIncome)} target. `
-        : ' ';
+    // The annual allowance stops the sacrifice reaching £100,000.
     explanation =
-      `Sacrificing ${pct}% (${fmtGBP(auto.employeeContribution)}/yr) brings your taxable pay from ` +
-      `${fmtGBP(p.grossIncome)} to ${fmtGBP(auto.adjustedGrossIncome)}` +
-      (bandList ? `, cutting the tax you pay in ${bandList}` : '') +
-      `. Total pension input ${fmtGBP(auto.totalContribution)}/yr (incl. ${fmtGBP(auto.employerContribution)} employer)` +
-      matchClause +
-      `.` +
-      cappedNote;
+      `Sacrificing ${pct}% (${emp}/yr) brings your taxable income from ${gross} down to ` +
+      `${fmtGBP(auto.adjustedGrossIncome)}, but the ${fmtGBP(auto.annualAllowance)} annual allowance ` +
+      `stops it reaching ${target}, so part of your personal allowance is still tapered away. Total ` +
+      `pension input ${total}/yr (incl. ${employer} employer${matchClause}). `;
   }
 
   return (
@@ -1109,32 +1110,9 @@ function TabContent({ tab, p, set }) {
     case 'Pension':
       return (
         <>
+          {/* Employer contribution first — it's an input the employee optimiser uses. */}
           <Toggle
-            label="Contribution Mode"
-            value={p.employeePensionAuto ? 'auto' : 'manual'}
-            optA={{ value: 'manual', label: 'Manual' }}
-            optB={{ value: 'auto', label: 'Auto (tax-optimal)' }}
-            onChange={(v) => set('employeePensionAuto')(v === 'auto')}
-            help="Manual: set your salary-sacrifice percentage yourself. Auto (tax-optimal): the app solves for the employee contribution that strips out every pound taxed above the basic rate — escaping the 45% additional rate, the 60% personal-allowance trap (£100k–£125,140) and the 40% higher-rate band — using your salary, your employer contribution and the £60,000 annual allowance (tapered for high earners). It never sacrifices below the tax-free personal allowance. When your employer contribution is set to Matched, it also contributes at least up to the match cap to capture all the free employer money. Based on today's salary and 2025/26 thresholds; affordability is not considered."
-          />
-          {p.employeePensionAuto ? (
-            <AutoContributionReadout p={p} />
-          ) : (
-            <Slider
-              label="Employee Contribution"
-              value={p.employeePensionPct}
-              min={0}
-              max={50}
-              step={0.5}
-              format={fmtPct}
-              onChange={set('employeePensionPct')}
-              color="#4f8ef7"
-              allowInput
-              help="Your pension contribution as a percentage of gross salary, paid via salary sacrifice. This reduces your taxable income, saving income tax and National Insurance."
-            />
-          )}
-          <Toggle
-            label="Employer Type"
+            label="Employer Contribution Type"
             value={p.employerMatch ? 'matched' : 'fixed'}
             optA={{ value: 'fixed', label: 'Fixed' }}
             optB={{ value: 'matched', label: 'Matched' }}
@@ -1157,6 +1135,30 @@ function TabContent({ tab, p, set }) {
                 : "Your employer's pension contribution as a percentage of your gross salary. This is paid on top of your salary and doesn't cost you anything directly — sometimes called 'free money'."
             }
           />
+          <Toggle
+            label="Contribution Mode"
+            value={p.employeePensionAuto ? 'auto' : 'manual'}
+            optA={{ value: 'manual', label: 'Manual' }}
+            optB={{ value: 'auto', label: 'Auto (tax-optimal)' }}
+            onChange={(v) => set('employeePensionAuto')(v === 'auto')}
+            help="Manual: set your salary-sacrifice percentage yourself. Auto (tax-optimal): the app solves for the employee contribution that protects your tax-free personal allowance — it brings your taxable income down to £100,000, the point above which the allowance tapers away (an effective 60% marginal rate up to £125,140). It uses your salary, your employer contribution and the £60,000 annual allowance (tapered for high earners), and never sacrifices below the personal allowance. If your income is already below £100,000 there is nothing to protect, so it recommends 0%. When your employer contribution is Matched, it also contributes at least up to the match cap to capture all the free employer money. Based on today's salary and 2025/26 thresholds; affordability is not considered."
+          />
+          {p.employeePensionAuto ? (
+            <AutoContributionReadout p={p} />
+          ) : (
+            <Slider
+              label="Employee Contribution"
+              value={p.employeePensionPct}
+              min={0}
+              max={50}
+              step={0.5}
+              format={fmtPct}
+              onChange={set('employeePensionPct')}
+              color="#4f8ef7"
+              allowInput
+              help="Your pension contribution as a percentage of gross salary, paid via salary sacrifice. This reduces your taxable income, saving income tax and National Insurance."
+            />
+          )}
           <Slider
             label="Starting Balance"
             value={p.pensionBalance}

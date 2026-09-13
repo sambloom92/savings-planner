@@ -116,25 +116,23 @@ function assertNonNegativeFinite(value, name) {
 /**
  * Tax-optimal EMPLOYEE pension contribution (salary sacrifice) for one year.
  *
- * "Tax-optimal" here means: sacrifice enough salary to strip out every pound
- * that would otherwise be taxed above the basic rate — i.e. bring taxable pay
- * down to the higher-rate threshold (£50,270 in 2025/26). This single move
- * captures relief on, in order of value:
- *   • the 60% effective band where the personal allowance tapers (£100,000–£125,140),
- *   • the 45% additional-rate band (above £125,140),
- *   • the 40% higher-rate band (£50,270–£100,000),
- * plus the 8% → 2% step in employee National Insurance, which falls away at the
- * Upper Earnings Limit (coinciding with the higher-rate threshold). Below
- * £50,270 a further pound of sacrifice earns only 20% income-tax relief, so the
- * threshold is the natural stopping point.
+ * The goal is to protect the tax-free personal allowance: it tapers away by £1
+ * for every £2 of income above £100,000, fully gone by £125,140, which makes
+ * that band an effective 60% marginal rate. The solver sacrifices just enough
+ * salary to bring taxable pay down to £100,000 (2025/26), reclaiming the whole
+ * allowance. Income below £100,000 keeps the full allowance already, so no
+ * sacrifice is needed for this purpose. The target is the taper threshold, not
+ * the higher-rate threshold: the aim is the personal allowance, not stripping
+ * out all higher-rate tax.
  *
  * Two hard limits apply:
  *   • The annual allowance caps TOTAL (employee + employer) contributions at
  *     £60,000, tapered down to £10,000 for high earners. The employee figure is
- *     reduced so employee + employer never exceeds the (tapered) allowance.
+ *     reduced so employee + employer never exceeds the (tapered) allowance —
+ *     which can leave part of the personal allowance unrecovered.
  *   • The sacrifice never takes taxable pay below the personal allowance
  *     (£12,570): pounds inside the personal allowance bear no income tax, so
- *     sacrificing them earns no income-tax relief. (For the default higher-rate
+ *     sacrificing them earns no income-tax relief. (For the default £100,000
  *     target this floor never binds; it guards a custom targetIncome.)
  *
  * Employer contributions are "free money" added on top of salary. How they
@@ -169,7 +167,7 @@ function assertNonNegativeFinite(value, name) {
  * @param {{
  *   scaleFactor?:   number,   - Threshold scale factor for fiscal drag (> 0, default 1)
  *   targetIncome?:  number,   - Override the taxable-pay target the solver aims
- *                              for (GBP). Defaults to the scaled higher-rate
+ *                              for (GBP). Defaults to the scaled £100,000 taper
  *                              threshold; floored at the personal allowance.
  *   employerMatch?: boolean   - Treat employerRate as a match cap: employer pays
  *                              min(employerRate, employeeRate). Default false.
@@ -214,8 +212,9 @@ export function optimalEmployeePensionContribution(grossIncome, employerRate, op
   const additionalRateThreshold = round2(INCOME_TAX_BANDS.additionalRateThreshold * scaleFactor);
   const taperThreshold = round2(INCOME_TAX_BANDS.taperThreshold * scaleFactor);
 
-  // Default target: strip out all income taxed above the basic rate.
-  let targetIncome = targetOverride ?? higherRateThreshold;
+  // Default target: £100,000, where the personal allowance starts to taper.
+  // Sacrificing down to here reclaims the full tax-free personal allowance.
+  let targetIncome = targetOverride ?? taperThreshold;
   if (typeof targetIncome !== 'number' || !isFinite(targetIncome) || targetIncome < 0)
     throw new RangeError('options.targetIncome must be a non-negative finite number');
   // Never sacrifice below the personal allowance — no income-tax relief there.
