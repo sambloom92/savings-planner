@@ -289,7 +289,12 @@ function applyGIAWithdrawal(bal, costBasis, gross) {
  *   annualLivingExpenses?:  number,         - Non-debt living costs at today's prices (£, default 0)
  *                                             Inflated each year; savings = disposable − living expenses.
  *   employeePensionRate:    number,         - Employee pension as fraction of gross (0–1)
- *   employerPensionRate:    number,         - Employer pension as fraction of gross (0–1)
+ *   employerPensionRate:    number,         - Employer pension as fraction of gross (0–1).
+ *                                             With employerMatch, this is the maximum matched rate.
+ *   employerMatch?:         boolean,        - When true, the employer pays min(employerPensionRate,
+ *                                             employeePensionRate) — a matched contribution that is
+ *                                             zero if the employee contributes nothing. Default false
+ *                                             (unconditional employer contribution at employerPensionRate).
  *   niContributionYears:    number,         - Existing NI qualifying years already accrued
  *   statePensionAge?:       number,         - State pension age (default 67)
  *   statePensionDeferralYears?: number,     - Years to defer the state pension past
@@ -395,6 +400,12 @@ export function projectLifecycle(
     annualLivingExpenses = 0, // non-debt living costs in today's £; inflated each year
     employeePensionRate,
     employerPensionRate,
+    // When true, the employer contribution is a MATCH: the employer pays the
+    // lesser of employerPensionRate and employeePensionRate, so a 3% employer
+    // rate with a 2% employee contribution pays 2%, and an employee who
+    // contributes nothing receives nothing. When false (default) the employer
+    // contribution is unconditional at employerPensionRate.
+    employerMatch = false,
     niContributionYears,
     statePensionAge = LIFECYCLE_CONSTANTS.statePension.defaultStatePensionAge,
     statePensionDeferralYears = 0,
@@ -419,6 +430,12 @@ export function projectLifecycle(
   assertNonNegativeFinite(employerPensionRate, 'employerPensionRate');
   if (employeePensionRate > 1) throw new RangeError('employeePensionRate must be <= 1');
   if (employerPensionRate > 1) throw new RangeError('employerPensionRate must be <= 1');
+  if (typeof employerMatch !== 'boolean') throw new TypeError('employerMatch must be a boolean');
+
+  // Effective employer rate: capped by the employee contribution when matching.
+  const effectiveEmployerRate = employerMatch
+    ? Math.min(employerPensionRate, employeePensionRate)
+    : employerPensionRate;
 
   assertNonNegativeInteger(niContributionYears, 'niContributionYears');
   assertPositiveInteger(statePensionAge, 'statePensionAge');
@@ -695,8 +712,11 @@ export function projectLifecycle(
     const effectiveIncome = round2(income * hoursFraction);
 
     // ── Pension (salary sacrifice) ──────────────────────────────────────
+    // Employer contribution uses the effective rate: with matching enabled it
+    // is capped at the employee rate (both scale with the same income, so the
+    // per-year min of the amounts equals the min of the rates).
     const employeeContrib = round2(effectiveIncome * employeePensionRate);
-    const employerContrib = round2(effectiveIncome * employerPensionRate);
+    const employerContrib = round2(effectiveIncome * effectiveEmployerRate);
     const totalPensionContrib = round2(employeeContrib + employerContrib);
 
     // Adjusted gross income after salary sacrifice

@@ -1364,6 +1364,51 @@ describe('glide path', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Employer matching
+// ---------------------------------------------------------------------------
+
+describe('employer matching', () => {
+  it('throws TypeError for a non-boolean employerMatch', () => {
+    assert.throws(() => run({ ...baseProfile, employerMatch: 'yes' }), TypeError);
+  });
+
+  it('unconditional (default): employer pays its full rate regardless of the employee', () => {
+    // employee 1%, employer 3% unconditional → employer still pays 3% of 40k = 1,200
+    const y = run({ ...baseProfile, employeePensionRate: 0.01 }).yearlyBreakdown[0];
+    assertApprox(y.employeeContribution, 400, 'employeeContrib');
+    assertApprox(y.employerContribution, 1_200, 'employerContrib (unconditional 3%)');
+  });
+
+  it('matched: employer is capped at the employee rate', () => {
+    // employee 1%, employer match cap 3% → employer pays min(3%,1%) = 1% = 400
+    const y = run({
+      ...baseProfile,
+      employeePensionRate: 0.01,
+      employerMatch: true,
+    }).yearlyBreakdown[0];
+    assertApprox(y.employeeContribution, 400, 'employeeContrib');
+    assertApprox(y.employerContribution, 400, 'employerContrib (matched down to 1%)');
+  });
+
+  it('matched: employer pays its full cap once the employee exceeds it', () => {
+    // employee 5%, employer match cap 3% → employer pays the full 3% = 1,200
+    const y = run({ ...baseProfile, employerMatch: true }).yearlyBreakdown[0];
+    assertApprox(y.employeeContribution, 2_000, 'employeeContrib (5%)');
+    assertApprox(y.employerContribution, 1_200, 'employerContrib (full 3% match)');
+  });
+
+  it('matched: a zero employee contribution means a zero employer contribution', () => {
+    const y = run({
+      ...baseProfile,
+      employeePensionRate: 0,
+      employerMatch: true,
+    }).yearlyBreakdown[0];
+    assertApprox(y.employeeContribution, 0, 'employeeContrib');
+    assertApprox(y.employerContribution, 0, 'employerContrib (no match without employee)');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Summary
 // ---------------------------------------------------------------------------
 

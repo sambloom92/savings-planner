@@ -27,6 +27,23 @@ const BASIC_RATE = 0.2;
 const HIGHER_RATE = 0.4;
 const ADDITIONAL_RATE = 0.45;
 
+/**
+ * Published 2025/26 income-tax thresholds and rates, exposed so other modules
+ * (e.g. the tax-optimal pension contribution solver) can reason about the band
+ * boundaries without duplicating the numbers. All thresholds are the unscaled
+ * 2025/26 figures; multiply by a scaleFactor to model fiscal drag, exactly as
+ * calculateIncomeTax does internally.
+ */
+export const INCOME_TAX_BANDS = Object.freeze({
+  personalAllowance: PERSONAL_ALLOWANCE, // £12,570 tax-free (before the £100k taper)
+  basicRateLimit: BASIC_RATE_LIMIT, // £50,270 — top of the 20% band / start of 40%
+  additionalRateThreshold: ADDITIONAL_RATE_THRESHOLD, // £125,140 — start of the 45% band
+  taperThreshold: TAPER_THRESHOLD, // £100,000 — personal allowance starts to taper here
+  basicRate: BASIC_RATE, // 20%
+  higherRate: HIGHER_RATE, // 40%
+  additionalRate: ADDITIONAL_RATE, // 45%
+});
+
 function round2(n) {
   return Math.round(n * 100) / 100;
 }
