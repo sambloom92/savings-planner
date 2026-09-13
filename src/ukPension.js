@@ -116,46 +116,45 @@ function assertNonNegativeFinite(value, name) {
 /**
  * Tax-optimal EMPLOYEE pension contribution (salary sacrifice) for one year.
  *
- * "Tax-optimal" here means: sacrifice enough salary to strip out every pound
- * that would otherwise be taxed above the basic rate — i.e. bring taxable pay
- * down to the higher-rate threshold (£50,270 in 2025/26). This single move
- * captures relief on, in order of value:
- *   • the 60% effective band where the personal allowance tapers (£100,000–£125,140),
- *   • the 45% additional-rate band (above £125,140),
- *   • the 40% higher-rate band (£50,270–£100,000),
- * plus the 8% → 2% step in employee National Insurance, which falls away at the
- * Upper Earnings Limit (coinciding with the higher-rate threshold). Below
- * £50,270 a further pound of sacrifice earns only 20% income-tax relief, so the
- * threshold is the natural stopping point.
+ * The goal is to protect the tax-free personal allowance: it tapers away by £1
+ * for every £2 of income above £100,000, fully gone by £125,140, which makes
+ * that band an effective 60% marginal rate. The solver sacrifices just enough
+ * salary to bring taxable pay down to £100,000 (2025/26), reclaiming the whole
+ * allowance. Income below £100,000 keeps the full allowance already, so no
+ * sacrifice is needed for this purpose. The target is the taper threshold, not
+ * the higher-rate threshold: the aim is the personal allowance, not stripping
+ * out all higher-rate tax.
  *
  * Two hard limits apply:
  *   • The annual allowance caps TOTAL (employee + employer) contributions at
  *     £60,000, tapered down to £10,000 for high earners. The employee figure is
- *     reduced so employee + employer never exceeds the (tapered) allowance.
+ *     reduced so employee + employer never exceeds the (tapered) allowance —
+ *     which can leave part of the personal allowance unrecovered.
  *   • The sacrifice never takes taxable pay below the personal allowance
  *     (£12,570): pounds inside the personal allowance bear no income tax, so
- *     sacrificing them earns no income-tax relief. (For the default higher-rate
+ *     sacrificing them earns no income-tax relief. (For the default £100,000
  *     target this floor never binds; it guards a custom targetIncome.)
  *
  * Employer contributions are "free money" added on top of salary. How they
  * enter the calculation depends on employerMatch:
  *   • Unconditional (default): the employer always pays employerRate of gross,
- *     independent of the employee's choice — relevant here only because it
- *     consumes part of the shared annual allowance.
- *   • Matched: the employer pays min(employerRate, employeeRate) of gross, so a
- *     larger employee contribution unlocks more employer money (up to the cap).
- *     The solver then contributes AT LEAST the match cap even when the pure
- *     tax-relief argument would suggest less (e.g. a basic-rate taxpayer whose
- *     tax-optimal sacrifice is zero should still contribute up to the cap,
- *     because the employer money it unlocks dwarfs the relief forgone).
+ *     independent of the employee's choice.
+ *   • Matched: the employer pays its full employerRate only when the employee
+ *     contributes at least employerMatchThreshold of gross, and nothing below
+ *     it. This collapses any scheme — 1:1, non-1:1, or tiered — to its top rung:
+ *     the minimum employee contribution that unlocks the maximum employer one
+ *     (e.g. "put in 6% to get 12%" → threshold 0.06, employerRate 0.12). Assuming
+ *     the saver maximises the offer, the solver contributes AT LEAST the
+ *     threshold so the full employer amount is earned, even where there is no
+ *     personal allowance to protect (income below £100,000).
  *
- * The annual allowance is the one place where maximising the match can bite: a
- * matched contribution counts twice toward the cap (employee + equal employer),
- * so £1 of employee sacrifice consumes £2 of allowance below the cap. When the
- * cap alone would breach the allowance (2 × cap > allowance) the solver settles
- * at allowance ÷ 2 each side — the most match the allowance permits — rather
- * than exceeding the cap (which would incur an annual-allowance charge on money
- * that never received relief). It never recommends breaching the allowance.
+ * Either way the employer amount is fixed at employerRate here, consuming a fixed
+ * slice of the annual allowance. The employee sacrifice is then capped so the
+ * total stays within the (tapered) allowance — except that, when matching, the
+ * employee is never taken below the threshold (that would forfeit the whole
+ * employer contribution): if the threshold plus the employer amount still exceeds
+ * the allowance, the excess is flagged (annualAllowanceBreached) rather than the
+ * match being abandoned.
  *
  * The solver works from a single year's gross salary at today's thresholds
  * (pass scaleFactor to model fiscal drag). It does not optimise across future
@@ -169,28 +168,32 @@ function assertNonNegativeFinite(value, name) {
  * @param {{
  *   scaleFactor?:   number,   - Threshold scale factor for fiscal drag (> 0, default 1)
  *   targetIncome?:  number,   - Override the taxable-pay target the solver aims
- *                              for (GBP). Defaults to the scaled higher-rate
+ *                              for (GBP). Defaults to the scaled £100,000 taper
  *                              threshold; floored at the personal allowance.
- *   employerMatch?: boolean   - Treat employerRate as a match cap: employer pays
- *                              min(employerRate, employeeRate). Default false.
+ *   employerMatch?: boolean,  - Treat employerRate as a matched maximum earned by
+ *                              contributing at least employerMatchThreshold. Default false.
+ *   employerMatchThreshold?: number - Minimum employee fraction of gross (0–1) that
+ *                              unlocks the full employer contribution when matching. Default 0.
  * }} [options]
  * @returns {{
- *   grossIncome:           number,
- *   employerRate:          number,
- *   employerMatched:       boolean,   - Whether the employer contribution was matched
- *   targetIncome:          number,    - Taxable pay the solver aimed to reach
- *   employeeRate:          number,    - Optimal employee fraction of gross (0–1)
- *   employeeContribution:  number,    - Optimal employee contribution (£)
- *   employerContribution:  number,    - Resulting employer contribution (£)
- *   effectiveEmployerRate: number,    - employerContribution / gross (0–1)
- *   totalContribution:     number,    - employee + employer (£)
- *   adjustedGrossIncome:   number,    - grossIncome − employeeContribution (£)
- *   annualAllowance:       number,    - (Tapered) allowance applied (£)
- *   cappedByAllowance:     boolean,   - True if the annual allowance limited the sacrifice
- *   bandsCleared:          string[],  - High-tax bands the sacrifice escapes (top-down):
- *                                       'additionalRate' | 'paTaper' | 'higherRate'
- *   scaleFactor:           number,
- *   taxYear:               string
+ *   grossIncome:            number,
+ *   employerRate:           number,
+ *   employerMatched:        boolean,   - Whether the employer contribution was matched
+ *   employerMatchThreshold: number,    - Employee fraction required to earn the match (0 if unmatched)
+ *   targetIncome:           number,    - Taxable pay the solver aimed to reach
+ *   employeeRate:           number,    - Optimal employee fraction of gross (0–1)
+ *   employeeContribution:   number,    - Optimal employee contribution (£)
+ *   employerContribution:   number,    - Resulting employer contribution (£)
+ *   effectiveEmployerRate:  number,    - employerContribution / gross (0–1)
+ *   totalContribution:      number,    - employee + employer (£)
+ *   adjustedGrossIncome:    number,    - grossIncome − employeeContribution (£)
+ *   annualAllowance:        number,    - (Tapered) allowance applied (£)
+ *   cappedByAllowance:      boolean,   - True if the annual allowance limited the sacrifice
+ *   annualAllowanceBreached: boolean,  - True if total contributions exceed the allowance
+ *   bandsCleared:           string[],  - High-tax bands the sacrifice reaches into (top-down):
+ *                                        'additionalRate' | 'paTaper' | 'higherRate'
+ *   scaleFactor:            number,
+ *   taxYear:                string
  * }}
  */
 export function optimalEmployeePensionContribution(grossIncome, employerRate, options = {}) {
@@ -203,61 +206,76 @@ export function optimalEmployeePensionContribution(grossIncome, employerRate, op
   )
     throw new RangeError('employerRate must be a number between 0 and 1');
 
-  const { scaleFactor = 1, targetIncome: targetOverride, employerMatch = false } = options;
+  const {
+    scaleFactor = 1,
+    targetIncome: targetOverride,
+    employerMatch = false,
+    employerMatchThreshold = 0,
+  } = options;
   if (typeof scaleFactor !== 'number' || !isFinite(scaleFactor) || scaleFactor <= 0)
     throw new RangeError('scaleFactor must be a positive finite number');
   if (typeof employerMatch !== 'boolean')
     throw new TypeError('options.employerMatch must be a boolean');
+  if (
+    typeof employerMatchThreshold !== 'number' ||
+    !isFinite(employerMatchThreshold) ||
+    employerMatchThreshold < 0 ||
+    employerMatchThreshold > 1
+  )
+    throw new RangeError('options.employerMatchThreshold must be a number between 0 and 1');
 
   const personalAllowance = round2(INCOME_TAX_BANDS.personalAllowance * scaleFactor);
   const higherRateThreshold = round2(INCOME_TAX_BANDS.basicRateLimit * scaleFactor);
   const additionalRateThreshold = round2(INCOME_TAX_BANDS.additionalRateThreshold * scaleFactor);
   const taperThreshold = round2(INCOME_TAX_BANDS.taperThreshold * scaleFactor);
 
-  // Default target: strip out all income taxed above the basic rate.
-  let targetIncome = targetOverride ?? higherRateThreshold;
+  // Default target: £100,000, where the personal allowance starts to taper.
+  // Sacrificing down to here reclaims the full tax-free personal allowance.
+  let targetIncome = targetOverride ?? taperThreshold;
   if (typeof targetIncome !== 'number' || !isFinite(targetIncome) || targetIncome < 0)
     throw new RangeError('options.targetIncome must be a non-negative finite number');
   // Never sacrifice below the personal allowance — no income-tax relief there.
   targetIncome = Math.max(targetIncome, personalAllowance);
 
-  // The match cap in £ — the most the employer will contribute. With matching
-  // the actual employer contribution is min(capAmt, employee); without it the
-  // employer always pays capAmt regardless of the employee's choice.
-  const capAmt = round2(grossIncome * employerRate);
-  const employerAmountFor = (employee) => (employerMatch ? Math.min(capAmt, employee) : capAmt);
+  // The employer pays its full rate as the maximum offer. We assume the saver
+  // contributes at least the threshold, so the employer amount is fixed at this
+  // maximum (the projection engine still zeroes it if a manual employee
+  // undershoots the threshold).
+  const employerContribution = round2(grossIncome * employerRate);
+  const thresholdAmt = employerMatch ? round2(grossIncome * employerMatchThreshold) : 0;
 
   // Sacrifice needed to reach the tax target (0 if pay is already at/below it).
   const taxDrivenEmployee = Math.max(0, round2(grossIncome - targetIncome));
 
-  // With matching, always contribute at least the match cap: the free employer
-  // money it unlocks dwarfs the basic-rate relief forgone on the extra
-  // sacrifice. Without matching there is no such incentive, so aim only at the
-  // tax target.
-  const desiredEmployee = employerMatch ? Math.max(taxDrivenEmployee, capAmt) : taxDrivenEmployee;
+  // With matching, contribute at least the required minimum to earn the full
+  // employer contribution (we assume the saver maximises the offer). Otherwise
+  // aim only at the personal-allowance target.
+  const desiredEmployee = employerMatch
+    ? Math.max(taxDrivenEmployee, thresholdAmt)
+    : taxDrivenEmployee;
 
-  // Largest employee contribution whose total (employee + employer) stays within
-  // the allowance. With matching, total is 2·employee below the cap and
-  // employee + capAmt above it, so the ceiling is allowance ÷ 2 when the cap
-  // alone would already breach (2·capAmt > allowance) and allowance − capAmt
-  // otherwise. Without matching the employer is fixed, so it is allowance − capAmt.
-  const maxEmployeeFor = (allowance) =>
-    employerMatch && 2 * capAmt > allowance
-      ? Math.max(0, round2(allowance / 2))
-      : Math.max(0, round2(allowance - capAmt));
+  // Adjusted income for the taper = threshold income + all contributions
+  //   = (gross − employee) + (employee + employer) = gross + employer — constant,
+  // because the employer amount is fixed at its maximum here.
+  const adjustedIncomeForTaper = round2(grossIncome + employerContribution);
 
-  // Threshold income (gross − employee) and, when matching, the employer amount
-  // both move with the sacrifice, and the allowance taper depends on both: a
-  // larger sacrifice can lift the allowance (lower threshold income) while a
-  // larger match can lower it (higher adjusted income). Resolve the mutual
+  // Largest employee contribution that keeps the total within the allowance.
+  // When matching, never drop below the threshold — that would forfeit the whole
+  // employer contribution — so the minimum sacrifice that keeps the match wins
+  // even if the employer's own contribution then pushes the total past the
+  // allowance (an excess the model flags but does not quantify).
+  const ceilingFor = (allowance) => {
+    const room = round2(allowance - employerContribution);
+    return employerMatch ? Math.max(thresholdAmt, room) : Math.max(0, room);
+  };
+
+  // Threshold income (gross − employee) moves the allowance taper; resolve the
   // dependence with a fixed-point iteration.
   let employeeContribution = desiredEmployee;
-  for (let i = 0; i < 16; i++) {
+  for (let i = 0; i < 12; i++) {
     const thresholdIncome = Math.max(0, round2(grossIncome - employeeContribution));
-    // Adjusted income = threshold income + all contributions = gross + employer.
-    const adjustedIncome = round2(grossIncome + employerAmountFor(employeeContribution));
-    const allowance = taperedAnnualAllowance(thresholdIncome, adjustedIncome);
-    const next = Math.min(desiredEmployee, maxEmployeeFor(allowance));
+    const allowance = taperedAnnualAllowance(thresholdIncome, adjustedIncomeForTaper);
+    const next = Math.min(desiredEmployee, ceilingFor(allowance));
     if (Math.abs(next - employeeContribution) < 0.005) {
       employeeContribution = next;
       break;
@@ -265,21 +283,21 @@ export function optimalEmployeePensionContribution(grossIncome, employerRate, op
     employeeContribution = next;
   }
 
-  const employerContribution = round2(employerAmountFor(employeeContribution));
-  // Allowance consistent with the settled contribution.
-  const finalThresholdIncome = Math.max(0, round2(grossIncome - employeeContribution));
+  // Allowance consistent with the settled contribution (adjusted income constant).
   const annualAllowance = taperedAnnualAllowance(
-    finalThresholdIncome,
-    round2(grossIncome + employerContribution)
+    Math.max(0, round2(grossIncome - employeeContribution)),
+    adjustedIncomeForTaper
   );
 
+  const totalContribution = round2(employeeContribution + employerContribution);
   const cappedByAllowance = employeeContribution + 0.005 < desiredEmployee;
+  const annualAllowanceBreached = totalContribution > annualAllowance + 0.005;
   const adjustedGrossIncome = round2(grossIncome - employeeContribution);
   const employeeRate = grossIncome > 0 ? round4(employeeContribution / grossIncome) : 0;
   const effectiveEmployerRate = grossIncome > 0 ? round4(employerContribution / grossIncome) : 0;
 
-  // Which high-tax bands the sacrifice actually escapes: a band [lo, hi) is
-  // (partly) cleared when some removed income lay inside it.
+  // Which high-tax bands the sacrifice reaches into: a band [lo, hi) is (partly)
+  // cleared when some removed income lay inside it.
   const removedIn = (lo, hi) =>
     round2(Math.min(grossIncome, hi) - Math.max(adjustedGrossIncome, lo)) > 0.005;
   const bandsCleared = [];
@@ -291,15 +309,17 @@ export function optimalEmployeePensionContribution(grossIncome, employerRate, op
     grossIncome: round2(grossIncome),
     employerRate,
     employerMatched: employerMatch,
+    employerMatchThreshold: employerMatch ? employerMatchThreshold : 0,
     targetIncome,
     employeeRate,
     employeeContribution,
     employerContribution,
     effectiveEmployerRate,
-    totalContribution: round2(employeeContribution + employerContribution),
+    totalContribution,
     adjustedGrossIncome,
     annualAllowance,
     cappedByAllowance,
+    annualAllowanceBreached,
     bandsCleared,
     scaleFactor,
     taxYear: TAX_YEAR,

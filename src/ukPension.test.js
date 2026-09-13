@@ -721,6 +721,7 @@ describe('projectPension — return shape', () => {
 // ---------------------------------------------------------------------------
 
 const HRT = INCOME_TAX_BANDS.basicRateLimit; // £50,270 higher-rate threshold
+const TAPER = INCOME_TAX_BANDS.taperThreshold; // £100,000 personal-allowance taper start
 const PA = INCOME_TAX_BANDS.personalAllowance; // £12,570
 
 describe('optimalEmployeePensionContribution — input validation', () => {
@@ -755,8 +756,9 @@ describe('optimalEmployeePensionContribution — input validation', () => {
   });
 });
 
-describe('optimalEmployeePensionContribution — basic-rate taxpayers', () => {
-  it('recommends nothing when gross is already below the higher-rate threshold', () => {
+describe('optimalEmployeePensionContribution — income below £100,000 (allowance safe)', () => {
+  it('recommends nothing when income is well below £100,000', () => {
+    // £45,000 keeps the full personal allowance already — nothing to protect.
     const r = optimalEmployeePensionContribution(45_000, 0.03);
     assert.equal(r.employeeContribution, 0);
     assert.equal(r.employeeRate, 0);
@@ -765,91 +767,91 @@ describe('optimalEmployeePensionContribution — basic-rate taxpayers', () => {
     assert.equal(r.cappedByAllowance, false);
   });
 
-  it('recommends nothing when gross sits exactly at the threshold', () => {
-    const r = optimalEmployeePensionContribution(HRT, 0.03);
+  it('recommends nothing at a higher-rate salary that is still under £100,000', () => {
+    // £70,000 is a higher-rate taxpayer, but the personal allowance is intact,
+    // so there is nothing for this optimiser to do.
+    const r = optimalEmployeePensionContribution(70_000, 0.03);
     assert.equal(r.employeeContribution, 0);
+    assert.deepEqual(r.bandsCleared, []);
+  });
+
+  it('recommends nothing when income sits exactly at £100,000', () => {
+    const r = optimalEmployeePensionContribution(TAPER, 0.03);
+    assert.equal(r.employeeContribution, 0);
+    assertApprox(r.adjustedGrossIncome, TAPER, 'adjustedGrossIncome');
     assert.deepEqual(r.bandsCleared, []);
   });
 });
 
-describe('optimalEmployeePensionContribution — higher-rate taxpayers', () => {
-  it('sacrifices exactly down to the higher-rate threshold', () => {
-    const r = optimalEmployeePensionContribution(70_000, 0.03);
-    assertApprox(r.employeeContribution, 70_000 - HRT, 'employeeContribution'); // £19,730
-    assertApprox(r.adjustedGrossIncome, HRT, 'adjustedGrossIncome');
-    assertApprox(r.employeeRate, (70_000 - HRT) / 70_000, 'employeeRate');
-    assert.deepEqual(r.bandsCleared, ['higherRate']);
-    assert.equal(r.cappedByAllowance, false);
-  });
-
-  it('adjusted pay lands in the basic-rate band, so no higher-rate tax remains', () => {
-    const r = optimalEmployeePensionContribution(90_000, 0.05);
-    assertApprox(r.adjustedGrossIncome, HRT, 'adjustedGrossIncome');
-    // total contribution (employee + employer) is well within the £60k allowance
-    assert.ok(r.totalContribution <= PENSION_CONSTANTS.annualAllowance);
-  });
-});
-
-describe('optimalEmployeePensionContribution — the 60% personal-allowance trap', () => {
-  it('flags the personal-allowance taper band when gross runs into it', () => {
-    // £110,000 sits inside the £100k–£125,140 taper zone. The full sacrifice to
-    // £50,270 (£59,730) plus a 3% employer contribution exceeds the £60k
-    // allowance, so it is capped — but the sacrifice still clears the taper band
-    // and most of the higher-rate band, never reaching the additional rate.
+describe('optimalEmployeePensionContribution — protecting the personal allowance', () => {
+  it('sacrifices down to £100,000 when income runs into the taper zone', () => {
+    // £110,000 → sacrifice £10,000 to reach £100,000, reclaiming the full PA.
     const r = optimalEmployeePensionContribution(110_000, 0.03);
-    assert.equal(r.cappedByAllowance, true);
-    assert.ok(r.bandsCleared.includes('paTaper'));
-    assert.ok(r.bandsCleared.includes('higherRate'));
-    assert.ok(!r.bandsCleared.includes('additionalRate'));
-  });
-
-  it('reaches the threshold and clears the taper band when the allowance allows', () => {
-    // £108,000 with no employer contribution: desired sacrifice £57,730 ≤ £60k,
-    // so it lands exactly at £50,270 and clears the taper band.
-    const r = optimalEmployeePensionContribution(108_000, 0);
+    assertApprox(r.employeeContribution, 10_000, 'employeeContribution');
+    assertApprox(r.adjustedGrossIncome, TAPER, 'adjustedGrossIncome');
+    assert.deepEqual(r.bandsCleared, ['paTaper']);
     assert.equal(r.cappedByAllowance, false);
-    assertApprox(r.adjustedGrossIncome, HRT, 'adjustedGrossIncome');
-    assert.ok(r.bandsCleared.includes('paTaper'));
-    assert.ok(r.bandsCleared.includes('higherRate'));
   });
 
-  it('clears the additional-rate band for income above £125,140', () => {
-    const r = optimalEmployeePensionContribution(200_000, 0.03);
+  it('sacrifices the whole taper band from the top (income at £125,140)', () => {
+    // At £125,140 the allowance is fully gone; bringing income to £100,000
+    // (a £25,140 sacrifice) restores all of it.
+    const r = optimalEmployeePensionContribution(125_140, 0.03);
+    assertApprox(r.employeeContribution, 125_140 - TAPER, 'employeeContribution');
+    assertApprox(r.adjustedGrossIncome, TAPER, 'adjustedGrossIncome');
+    assert.ok(r.bandsCleared.includes('paTaper'));
+    assert.equal(r.cappedByAllowance, false);
+  });
+
+  it('reaches £100,000 from an additional-rate salary when the allowance allows', () => {
+    // £150k → £50,000 sacrifice to £100,000; + 3% employer £4,500 = £54,500 < £60k.
+    const r = optimalEmployeePensionContribution(150_000, 0.03);
+    assertApprox(r.adjustedGrossIncome, TAPER, 'adjustedGrossIncome');
+    assertApprox(r.employeeContribution, 50_000, 'employeeContribution');
+    assert.ok(r.bandsCleared.includes('paTaper'));
     assert.ok(r.bandsCleared.includes('additionalRate'));
-    // but only as far as the annual allowance permits (see capping tests)
+    assert.equal(r.cappedByAllowance, false);
+  });
+
+  it('does not sacrifice into the higher-rate band below £100,000', () => {
+    // The target is £100,000, never £50,270 — a £110k earner keeps their
+    // higher-rate-band income as take-home.
+    const r = optimalEmployeePensionContribution(110_000, 0.03);
+    assert.ok(!r.bandsCleared.includes('higherRate'));
+    assert.ok(r.adjustedGrossIncome >= TAPER - 0.01, 'never sacrifices below £100k for tax');
   });
 });
 
 describe('optimalEmployeePensionContribution — annual-allowance cap', () => {
   it('never lets employee + employer exceed the £60,000 allowance', () => {
-    const r = optimalEmployeePensionContribution(150_000, 0.05);
-    assert.ok(
-      r.totalContribution <= PENSION_CONSTANTS.annualAllowance + 0.01,
-      `total ${r.totalContribution} exceeds allowance`
-    );
-    assert.equal(r.cappedByAllowance, true);
+    for (const [g, er] of [
+      [150_000, 0.05],
+      [250_000, 0.05],
+      [300_000, 0.03],
+    ]) {
+      const r = optimalEmployeePensionContribution(g, er);
+      assert.ok(
+        r.totalContribution <= r.annualAllowance + 0.01,
+        `gross ${g}: total ${r.totalContribution} exceeds allowance ${r.annualAllowance}`
+      );
+    }
   });
 
-  it('caps the employee figure at allowance minus the employer contribution', () => {
-    // £150k, employer 5% = £7,500. Desired sacrifice would be ~£99,730, far above
-    // the allowance, so employee is capped at £60,000 − £7,500 = £52,500.
-    const r = optimalEmployeePensionContribution(150_000, 0.05);
-    assertApprox(r.employeeContribution, 60_000 - 7_500, 'employeeContribution');
-    assertApprox(r.employerContribution, 7_500, 'employerContribution');
-  });
-
-  it('applies the tapered allowance for very high earners', () => {
+  it('leaves part of the personal allowance unrecovered when the allowance binds', () => {
     // £300k, employer 3% = £9,000 → adjusted income for taper = £309,000.
     // Excess over £260k = £49,000 → reduction £24,500 → allowance £35,500.
+    // Employee capped at £35,500 − £9,000 = £26,500, so adjusted pay is far
+    // above £100,000 and the allowance cannot be fully reclaimed.
     const r = optimalEmployeePensionContribution(300_000, 0.03);
     assertApprox(r.annualAllowance, 35_500, 'annualAllowance');
     assertApprox(r.employeeContribution, 35_500 - 9_000, 'employeeContribution');
+    assert.ok(r.adjustedGrossIncome > TAPER, 'cannot reach the £100k target');
     assert.equal(r.cappedByAllowance, true);
   });
 
   it('recommends zero when the employer contribution alone fills the allowance', () => {
-    // employer 60% of £100k = £60,000 = the whole allowance.
-    const r = optimalEmployeePensionContribution(100_000, 0.6);
+    // employer 60% of £150k = £90,000 > allowance, so no room for the employee.
+    const r = optimalEmployeePensionContribution(150_000, 0.6);
     assert.equal(r.employeeContribution, 0);
     assert.equal(r.employeeRate, 0);
     assert.equal(r.cappedByAllowance, true);
@@ -857,23 +859,22 @@ describe('optimalEmployeePensionContribution — annual-allowance cap', () => {
 });
 
 describe('optimalEmployeePensionContribution — fiscal drag (scaleFactor)', () => {
-  it('scales the target threshold with the scale factor', () => {
+  it('scales the £100,000 target with the scale factor', () => {
     const sf = 0.9; // compressed bands (more drag) → lower thresholds
-    const scaledHRT = Math.round(HRT * sf * 100) / 100;
-    const r = optimalEmployeePensionContribution(70_000, 0.03, { scaleFactor: sf });
-    assertApprox(r.targetIncome, scaledHRT, 'targetIncome');
-    assertApprox(r.adjustedGrossIncome, scaledHRT, 'adjustedGrossIncome');
+    const scaledTaper = Math.round(TAPER * sf * 100) / 100;
+    // Gross chosen to sit above the scaled taper so a sacrifice is needed.
+    const r = optimalEmployeePensionContribution(100_000, 0.03, { scaleFactor: sf });
+    assertApprox(r.targetIncome, scaledTaper, 'targetIncome');
+    assertApprox(r.adjustedGrossIncome, scaledTaper, 'adjustedGrossIncome');
   });
 });
 
 describe('optimalEmployeePensionContribution — targetIncome override', () => {
-  it('honours a custom target above the personal allowance', () => {
-    // Escape only the 60% trap: target £100,000.
-    const r = optimalEmployeePensionContribution(120_000, 0.03, {
-      targetIncome: INCOME_TAX_BANDS.taperThreshold,
-    });
-    assertApprox(r.adjustedGrossIncome, INCOME_TAX_BANDS.taperThreshold, 'adjustedGrossIncome');
-    assertApprox(r.employeeContribution, 120_000 - INCOME_TAX_BANDS.taperThreshold, 'employee');
+  it('honours a custom target below the default (e.g. the higher-rate threshold)', () => {
+    // Override to strip out higher-rate tax too: target £50,270.
+    const r = optimalEmployeePensionContribution(90_000, 0.03, { targetIncome: HRT });
+    assertApprox(r.adjustedGrossIncome, HRT, 'adjustedGrossIncome');
+    assertApprox(r.employeeContribution, 90_000 - HRT, 'employee');
   });
 
   it('floors a below-personal-allowance target at the personal allowance', () => {
@@ -891,67 +892,106 @@ describe('optimalEmployeePensionContribution — employer matching', () => {
     );
   });
 
-  it('reports whether matching was applied', () => {
-    assert.equal(optimalEmployeePensionContribution(70_000, 0.03).employerMatched, false);
-    assert.equal(
-      optimalEmployeePensionContribution(70_000, 0.03, { employerMatch: true }).employerMatched,
-      true
+  it('validates employerMatchThreshold is within [0, 1]', () => {
+    assert.throws(
+      () => optimalEmployeePensionContribution(50_000, 0.03, { employerMatchThreshold: -0.01 }),
+      RangeError
+    );
+    assert.throws(
+      () => optimalEmployeePensionContribution(50_000, 0.03, { employerMatchThreshold: 1.5 }),
+      RangeError
     );
   });
 
-  it('a basic-rate taxpayer contributes up to the match cap to capture free money', () => {
-    // Unconditional: 0% is tax-optimal. Matched: contribute the 3% cap so the
-    // employer matches it — the free money dwarfs the relief forgone.
-    const unconditional = optimalEmployeePensionContribution(45_000, 0.03);
-    assert.equal(unconditional.employeeContribution, 0);
+  it('reports the match flag and threshold', () => {
+    const fixed = optimalEmployeePensionContribution(70_000, 0.03);
+    assert.equal(fixed.employerMatched, false);
+    assert.equal(fixed.employerMatchThreshold, 0);
 
-    const matched = optimalEmployeePensionContribution(45_000, 0.03, { employerMatch: true });
-    assertApprox(matched.employeeRate, 0.03, 'employeeRate matches the cap');
-    assertApprox(matched.employeeContribution, 45_000 * 0.03, 'employeeContribution');
-    assertApprox(matched.employerContribution, 45_000 * 0.03, 'employerContribution (full match)');
-    assertApprox(matched.totalContribution, 45_000 * 0.06, 'total is employee + equal match');
-    assert.equal(matched.cappedByAllowance, false);
+    const matched = optimalEmployeePensionContribution(70_000, 0.12, {
+      employerMatch: true,
+      employerMatchThreshold: 0.06,
+    });
+    assert.equal(matched.employerMatched, true);
+    assertApprox(matched.employerMatchThreshold, 0.06, 'threshold echoed');
   });
 
-  it('a higher-rate taxpayer already past the cap captures the full match', () => {
-    // 28.2% employee sacrifice far exceeds the 3% cap, so the employer pays 3%.
-    const r = optimalEmployeePensionContribution(70_000, 0.03, { employerMatch: true });
-    assertApprox(r.adjustedGrossIncome, HRT, 'still targets the higher-rate threshold');
-    assertApprox(r.effectiveEmployerRate, 0.03, 'employer pays the full 3% cap');
-    assertApprox(r.employerContribution, 70_000 * 0.03, 'employerContribution');
+  it('contributes the threshold to earn the full employer offer (below £100k)', () => {
+    // A 6% → 12% scheme at £45k: no personal allowance to protect, but contribute
+    // the 6% minimum to unlock the full 12% employer contribution.
+    const r = optimalEmployeePensionContribution(45_000, 0.12, {
+      employerMatch: true,
+      employerMatchThreshold: 0.06,
+    });
+    assertApprox(r.employeeRate, 0.06, 'employee meets the 6% threshold');
+    assertApprox(r.employeeContribution, 45_000 * 0.06, 'employeeContribution');
+    assertApprox(r.effectiveEmployerRate, 0.12, 'employer pays the full 12%');
+    assertApprox(r.employerContribution, 45_000 * 0.12, 'employerContribution');
+    assert.equal(r.cappedByAllowance, false);
+    assert.equal(r.annualAllowanceBreached, false);
   });
 
-  it('matching with a zero employer cap behaves like no employer contribution', () => {
-    const matched = optimalEmployeePensionContribution(60_000, 0, { employerMatch: true });
-    assert.equal(matched.employerContribution, 0);
-    assertApprox(matched.adjustedGrossIncome, HRT, 'targets the higher-rate threshold');
+  it('protects the personal allowance and still earns the full match', () => {
+    // £110k, 6% → 12%: reaching £100k needs a £10,000 sacrifice (9.1%), above the
+    // 6% threshold, so the full 12% employer contribution is earned.
+    const r = optimalEmployeePensionContribution(110_000, 0.12, {
+      employerMatch: true,
+      employerMatchThreshold: 0.06,
+    });
+    assertApprox(r.adjustedGrossIncome, TAPER, 'reaches £100,000');
+    assertApprox(r.employeeContribution, 10_000, 'employeeContribution');
+    assertApprox(r.effectiveEmployerRate, 0.12, 'full employer match');
   });
 
-  it('caps the match at half the allowance when matching the full cap would breach it', () => {
-    // 40% match cap on £100k = £40,000. Matching it needs £40k employee + £40k
-    // employer = £80k > £60k allowance. The solver settles at £30k each side
-    // (allowance ÷ 2), the most the allowance permits, and flags the cap.
-    const r = optimalEmployeePensionContribution(100_000, 0.4, { employerMatch: true });
-    assertApprox(r.employeeContribution, 30_000, 'employee = allowance / 2');
-    assertApprox(r.employerContribution, 30_000, 'employer = allowance / 2');
-    assertApprox(r.totalContribution, PENSION_CONSTANTS.annualAllowance, 'total = allowance');
-    assert.ok(r.effectiveEmployerRate < r.employerRate, 'match is partial (below the 40% cap)');
+  it('never drops below the threshold, even when the tax target needs less', () => {
+    // £70k auto-enrolment style (5% → 3%): below £100k the tax target needs
+    // nothing, but the solver still contributes the 5% to earn the 3% match.
+    const r = optimalEmployeePensionContribution(70_000, 0.03, {
+      employerMatch: true,
+      employerMatchThreshold: 0.05,
+    });
+    assertApprox(r.employeeRate, 0.05, 'employee meets the 5% threshold');
+    assertApprox(r.effectiveEmployerRate, 0.03, 'earns the 3% match');
+  });
+
+  it('a generous employer match can eat the allowance, leaving PA partly unrecovered', () => {
+    // £150k, 6% → 12%: the £18,000 employer contribution leaves only £42,000 of
+    // the £60k allowance for the employee, so income only reaches £108,000 —
+    // part of the personal allowance stays tapered.
+    const r = optimalEmployeePensionContribution(150_000, 0.12, {
+      employerMatch: true,
+      employerMatchThreshold: 0.06,
+    });
+    assertApprox(r.employerContribution, 18_000, 'full 12% employer');
+    assertApprox(
+      r.employeeContribution,
+      60_000 - 18_000,
+      'employee capped at allowance − employer'
+    );
+    assert.ok(r.adjustedGrossIncome > TAPER, 'cannot reach £100,000');
     assert.equal(r.cappedByAllowance, true);
   });
 
-  it('never lets a matched total exceed the annual allowance', () => {
-    for (const [g, er] of [
-      [80_000, 0.1],
-      [150_000, 0.06],
-      [250_000, 0.2],
-      [300_000, 0.05],
-    ]) {
-      const r = optimalEmployeePensionContribution(g, er, { employerMatch: true });
-      assert.ok(
-        r.totalContribution <= r.annualAllowance + 0.01,
-        `gross ${g}, cap ${er}: total ${r.totalContribution} exceeds allowance ${r.annualAllowance}`
-      );
-    }
+  it('keeps the match and flags a breach when the employer max exceeds the allowance', () => {
+    // £300k, 6% → 12%: the allowance tapers below the £36k employer contribution,
+    // so earning the match unavoidably breaches it. The solver still contributes
+    // only the threshold and flags the breach rather than abandoning the match.
+    const r = optimalEmployeePensionContribution(300_000, 0.12, {
+      employerMatch: true,
+      employerMatchThreshold: 0.06,
+    });
+    assertApprox(r.employeeContribution, 300_000 * 0.06, 'employee at the threshold');
+    assertApprox(r.employerContribution, 300_000 * 0.12, 'full employer match');
+    assert.equal(r.annualAllowanceBreached, true);
+  });
+
+  it('a zero employer maximum earns nothing but still protects the PA', () => {
+    const r = optimalEmployeePensionContribution(120_000, 0, {
+      employerMatch: true,
+      employerMatchThreshold: 0.06,
+    });
+    assert.equal(r.employerContribution, 0);
+    assertApprox(r.adjustedGrossIncome, TAPER, 'still protects the personal allowance');
   });
 });
 
@@ -962,6 +1002,7 @@ describe('optimalEmployeePensionContribution — result shape', () => {
       'grossIncome',
       'employerRate',
       'employerMatched',
+      'employerMatchThreshold',
       'targetIncome',
       'employeeRate',
       'employeeContribution',
@@ -971,6 +1012,7 @@ describe('optimalEmployeePensionContribution — result shape', () => {
       'adjustedGrossIncome',
       'annualAllowance',
       'cappedByAllowance',
+      'annualAllowanceBreached',
       'bandsCleared',
       'scaleFactor',
       'taxYear',
