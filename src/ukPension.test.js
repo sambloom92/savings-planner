@@ -2,11 +2,13 @@ import assert from 'node:assert/strict';
 import {
   PENSION_CONSTANTS,
   taperedAnnualAllowance,
+  optimalEmployeePensionContribution,
   projectPensionAccumulation,
   calculatePCLS,
   projectPensionDrawdown,
   projectPension,
 } from './ukPension.js';
+import { INCOME_TAX_BANDS } from './ukIncomeTax.js';
 
 // ---------------------------------------------------------------------------
 // Minimal test runner
@@ -711,6 +713,205 @@ describe('projectPension — return shape', () => {
       assert.ok(key in r, `missing field: ${key}`);
     }
     assert.equal(r.taxYear, '2025/26');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// optimalEmployeePensionContribution
+// ---------------------------------------------------------------------------
+
+const HRT = INCOME_TAX_BANDS.basicRateLimit; // £50,270 higher-rate threshold
+const PA = INCOME_TAX_BANDS.personalAllowance; // £12,570
+
+describe('optimalEmployeePensionContribution — input validation', () => {
+  it('throws TypeError for a non-numeric or negative grossIncome', () => {
+    assert.throws(() => optimalEmployeePensionContribution('50000', 0.03), TypeError);
+    assert.throws(() => optimalEmployeePensionContribution(NaN, 0.03), TypeError);
+    assert.throws(() => optimalEmployeePensionContribution(-1, 0.03), TypeError);
+  });
+
+  it('throws RangeError for an employerRate outside [0, 1]', () => {
+    assert.throws(() => optimalEmployeePensionContribution(50_000, -0.01), RangeError);
+    assert.throws(() => optimalEmployeePensionContribution(50_000, 1.01), RangeError);
+    assert.throws(() => optimalEmployeePensionContribution(50_000, NaN), RangeError);
+  });
+
+  it('throws RangeError for a non-positive scaleFactor', () => {
+    assert.throws(
+      () => optimalEmployeePensionContribution(50_000, 0.03, { scaleFactor: 0 }),
+      RangeError
+    );
+    assert.throws(
+      () => optimalEmployeePensionContribution(50_000, 0.03, { scaleFactor: -1 }),
+      RangeError
+    );
+  });
+
+  it('throws RangeError for a negative targetIncome override', () => {
+    assert.throws(
+      () => optimalEmployeePensionContribution(50_000, 0.03, { targetIncome: -1 }),
+      RangeError
+    );
+  });
+});
+
+describe('optimalEmployeePensionContribution — basic-rate taxpayers', () => {
+  it('recommends nothing when gross is already below the higher-rate threshold', () => {
+    const r = optimalEmployeePensionContribution(45_000, 0.03);
+    assert.equal(r.employeeContribution, 0);
+    assert.equal(r.employeeRate, 0);
+    assert.equal(r.adjustedGrossIncome, 45_000);
+    assert.deepEqual(r.bandsCleared, []);
+    assert.equal(r.cappedByAllowance, false);
+  });
+
+  it('recommends nothing when gross sits exactly at the threshold', () => {
+    const r = optimalEmployeePensionContribution(HRT, 0.03);
+    assert.equal(r.employeeContribution, 0);
+    assert.deepEqual(r.bandsCleared, []);
+  });
+});
+
+describe('optimalEmployeePensionContribution — higher-rate taxpayers', () => {
+  it('sacrifices exactly down to the higher-rate threshold', () => {
+    const r = optimalEmployeePensionContribution(70_000, 0.03);
+    assertApprox(r.employeeContribution, 70_000 - HRT, 'employeeContribution'); // £19,730
+    assertApprox(r.adjustedGrossIncome, HRT, 'adjustedGrossIncome');
+    assertApprox(r.employeeRate, (70_000 - HRT) / 70_000, 'employeeRate');
+    assert.deepEqual(r.bandsCleared, ['higherRate']);
+    assert.equal(r.cappedByAllowance, false);
+  });
+
+  it('adjusted pay lands in the basic-rate band, so no higher-rate tax remains', () => {
+    const r = optimalEmployeePensionContribution(90_000, 0.05);
+    assertApprox(r.adjustedGrossIncome, HRT, 'adjustedGrossIncome');
+    // total contribution (employee + employer) is well within the £60k allowance
+    assert.ok(r.totalContribution <= PENSION_CONSTANTS.annualAllowance);
+  });
+});
+
+describe('optimalEmployeePensionContribution — the 60% personal-allowance trap', () => {
+  it('flags the personal-allowance taper band when gross runs into it', () => {
+    // £110,000 sits inside the £100k–£125,140 taper zone. The full sacrifice to
+    // £50,270 (£59,730) plus a 3% employer contribution exceeds the £60k
+    // allowance, so it is capped — but the sacrifice still clears the taper band
+    // and most of the higher-rate band, never reaching the additional rate.
+    const r = optimalEmployeePensionContribution(110_000, 0.03);
+    assert.equal(r.cappedByAllowance, true);
+    assert.ok(r.bandsCleared.includes('paTaper'));
+    assert.ok(r.bandsCleared.includes('higherRate'));
+    assert.ok(!r.bandsCleared.includes('additionalRate'));
+  });
+
+  it('reaches the threshold and clears the taper band when the allowance allows', () => {
+    // £108,000 with no employer contribution: desired sacrifice £57,730 ≤ £60k,
+    // so it lands exactly at £50,270 and clears the taper band.
+    const r = optimalEmployeePensionContribution(108_000, 0);
+    assert.equal(r.cappedByAllowance, false);
+    assertApprox(r.adjustedGrossIncome, HRT, 'adjustedGrossIncome');
+    assert.ok(r.bandsCleared.includes('paTaper'));
+    assert.ok(r.bandsCleared.includes('higherRate'));
+  });
+
+  it('clears the additional-rate band for income above £125,140', () => {
+    const r = optimalEmployeePensionContribution(200_000, 0.03);
+    assert.ok(r.bandsCleared.includes('additionalRate'));
+    // but only as far as the annual allowance permits (see capping tests)
+  });
+});
+
+describe('optimalEmployeePensionContribution — annual-allowance cap', () => {
+  it('never lets employee + employer exceed the £60,000 allowance', () => {
+    const r = optimalEmployeePensionContribution(150_000, 0.05);
+    assert.ok(
+      r.totalContribution <= PENSION_CONSTANTS.annualAllowance + 0.01,
+      `total ${r.totalContribution} exceeds allowance`
+    );
+    assert.equal(r.cappedByAllowance, true);
+  });
+
+  it('caps the employee figure at allowance minus the employer contribution', () => {
+    // £150k, employer 5% = £7,500. Desired sacrifice would be ~£99,730, far above
+    // the allowance, so employee is capped at £60,000 − £7,500 = £52,500.
+    const r = optimalEmployeePensionContribution(150_000, 0.05);
+    assertApprox(r.employeeContribution, 60_000 - 7_500, 'employeeContribution');
+    assertApprox(r.employerContribution, 7_500, 'employerContribution');
+  });
+
+  it('applies the tapered allowance for very high earners', () => {
+    // £300k, employer 3% = £9,000 → adjusted income for taper = £309,000.
+    // Excess over £260k = £49,000 → reduction £24,500 → allowance £35,500.
+    const r = optimalEmployeePensionContribution(300_000, 0.03);
+    assertApprox(r.annualAllowance, 35_500, 'annualAllowance');
+    assertApprox(r.employeeContribution, 35_500 - 9_000, 'employeeContribution');
+    assert.equal(r.cappedByAllowance, true);
+  });
+
+  it('recommends zero when the employer contribution alone fills the allowance', () => {
+    // employer 60% of £100k = £60,000 = the whole allowance.
+    const r = optimalEmployeePensionContribution(100_000, 0.6);
+    assert.equal(r.employeeContribution, 0);
+    assert.equal(r.employeeRate, 0);
+    assert.equal(r.cappedByAllowance, true);
+  });
+});
+
+describe('optimalEmployeePensionContribution — fiscal drag (scaleFactor)', () => {
+  it('scales the target threshold with the scale factor', () => {
+    const sf = 0.9; // compressed bands (more drag) → lower thresholds
+    const scaledHRT = Math.round(HRT * sf * 100) / 100;
+    const r = optimalEmployeePensionContribution(70_000, 0.03, { scaleFactor: sf });
+    assertApprox(r.targetIncome, scaledHRT, 'targetIncome');
+    assertApprox(r.adjustedGrossIncome, scaledHRT, 'adjustedGrossIncome');
+  });
+});
+
+describe('optimalEmployeePensionContribution — targetIncome override', () => {
+  it('honours a custom target above the personal allowance', () => {
+    // Escape only the 60% trap: target £100,000.
+    const r = optimalEmployeePensionContribution(120_000, 0.03, {
+      targetIncome: INCOME_TAX_BANDS.taperThreshold,
+    });
+    assertApprox(r.adjustedGrossIncome, INCOME_TAX_BANDS.taperThreshold, 'adjustedGrossIncome');
+    assertApprox(r.employeeContribution, 120_000 - INCOME_TAX_BANDS.taperThreshold, 'employee');
+  });
+
+  it('floors a below-personal-allowance target at the personal allowance', () => {
+    const r = optimalEmployeePensionContribution(40_000, 0.03, { targetIncome: 0 });
+    assert.equal(r.targetIncome, PA);
+    assertApprox(r.adjustedGrossIncome, PA, 'adjustedGrossIncome');
+  });
+});
+
+describe('optimalEmployeePensionContribution — result shape', () => {
+  it('returns all documented fields and the tax year', () => {
+    const r = optimalEmployeePensionContribution(70_000, 0.03);
+    for (const key of [
+      'grossIncome',
+      'employerRate',
+      'targetIncome',
+      'employeeRate',
+      'employeeContribution',
+      'employerContribution',
+      'totalContribution',
+      'adjustedGrossIncome',
+      'annualAllowance',
+      'cappedByAllowance',
+      'bandsCleared',
+      'scaleFactor',
+      'taxYear',
+    ]) {
+      assert.ok(key in r, `missing field: ${key}`);
+    }
+    assert.equal(r.taxYear, '2025/26');
+    assert.ok(Array.isArray(r.bandsCleared));
+  });
+
+  it('handles a zero gross income without dividing by zero', () => {
+    const r = optimalEmployeePensionContribution(0, 0.03);
+    assert.equal(r.employeeContribution, 0);
+    assert.equal(r.employeeRate, 0);
+    assert.equal(r.employerContribution, 0);
   });
 });
 

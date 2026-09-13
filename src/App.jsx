@@ -1,6 +1,7 @@
 import { useState, useMemo, useRef, useEffect, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import { projectLifecycle } from './ukLifecycle.js';
+import { optimalEmployeePensionContribution } from './ukPension.js';
 import { runMonteCarlo } from './ukMonteCarlo.js';
 import { FanChart } from './FanChart.jsx';
 import { fmtGBPLarge } from './formatters.js';
@@ -72,6 +73,7 @@ const DEFAULTS = {
   oneOffExpenses: [],
   employmentChanges: [],
   employeePensionPct: 5,
+  employeePensionAuto: false, // when true, employee % is solved for tax-optimality
   employerPensionPct: 3,
   pensionBalance: 10_000,
   equityReturnPct: 7,
@@ -114,6 +116,24 @@ const DEFAULTS = {
   mcBearSeverity: 0.15,
   mcCrisisPersistence: 0.6,
 };
+
+// Human-readable names for the high-tax bands the auto-optimiser can clear.
+const PENSION_BAND_LABELS = {
+  additionalRate: 'the 45% additional-rate band',
+  paTaper: 'the 60% personal-allowance trap',
+  higherRate: 'the 40% higher-rate band',
+};
+
+// The employee salary-sacrifice rate the projection actually uses: either the
+// manual slider value, or — in Auto mode — the tax-optimal rate solved from the
+// current salary and employer contribution (see optimalEmployeePensionContribution).
+function effectiveEmployeePensionRate(p) {
+  if (p.employeePensionAuto) {
+    return optimalEmployeePensionContribution(p.grossIncome, p.employerPensionPct / 100)
+      .employeeRate;
+  }
+  return p.employeePensionPct / 100;
+}
 
 // ── Small components ──────────────────────────────────────────────────────────
 
@@ -884,6 +904,88 @@ function EventsEditor({ p, set }) {
   );
 }
 
+// Read-only display of the tax-optimal employee contribution (Auto mode).
+// Solves the optimal salary-sacrifice rate from the current salary and employer
+// rate, then explains what it did — the value used by the projection comes from
+// the same solver via effectiveEmployeePensionRate.
+function AutoContributionReadout({ p }) {
+  let auto;
+  try {
+    auto = optimalEmployeePensionContribution(p.grossIncome, p.employerPensionPct / 100);
+  } catch {
+    return <InfoBox>Enter a valid salary to compute the tax-optimal contribution.</InfoBox>;
+  }
+
+  const pct = (auto.employeeRate * 100).toFixed(1);
+  const bands = auto.bandsCleared.map((b) => PENSION_BAND_LABELS[b] ?? b);
+  const bandList =
+    bands.length <= 1
+      ? bands.join('')
+      : `${bands.slice(0, -1).join(', ')} and ${bands[bands.length - 1]}`;
+
+  return (
+    <>
+      <div style={{ marginBottom: 14 }}>
+        <div
+          style={{
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            marginBottom: 4,
+          }}
+        >
+          <span
+            style={{
+              color: 'var(--text-secondary)',
+              fontSize: 11,
+              letterSpacing: '0.07em',
+              textTransform: 'uppercase',
+              fontWeight: 500,
+            }}
+          >
+            Employee Contribution
+          </span>
+          <span
+            style={{
+              color: '#4f8ef7',
+              fontFamily: 'var(--font-mono)',
+              fontSize: 18,
+              fontWeight: 600,
+            }}
+          >
+            {pct}%
+          </span>
+        </div>
+        <div style={{ color: 'var(--text-muted)', fontSize: 11, fontFamily: 'var(--font-mono)' }}>
+          {fmtGBP(auto.employeeContribution)}/yr via salary sacrifice
+        </div>
+      </div>
+      <InfoBox>
+        {auto.employeeContribution === 0 ? (
+          <>
+            At {fmtGBP(p.grossIncome)} your taxable pay is already within the basic-rate band, so
+            there is no higher-rate or personal-allowance cliff to escape. Further salary sacrifice
+            would earn only 20% income-tax relief (plus 8% NI), so the tax-optimal contribution is{' '}
+            <strong>0%</strong>.{' '}
+          </>
+        ) : (
+          <>
+            Sacrificing <strong>{pct}%</strong> ({fmtGBP(auto.employeeContribution)}/yr) takes your
+            taxable pay from {fmtGBP(p.grossIncome)} to {fmtGBP(auto.adjustedGrossIncome)}
+            {bandList ? <>, clearing {bandList}</> : null}. Total pension input{' '}
+            {fmtGBP(auto.totalContribution)}/yr (incl. {fmtGBP(auto.employerContribution)} employer)
+            {auto.cappedByAllowance
+              ? ` — the full sacrifice is limited by the ${fmtGBP(auto.annualAllowance)} annual allowance. `
+              : '. '}
+          </>
+        )}
+        Based on today&apos;s salary and 2025/26 thresholds; the rate is held constant as your pay
+        grows, and affordability is not considered.
+      </InfoBox>
+    </>
+  );
+}
+
 function TabContent({ tab, p, set }) {
   switch (tab) {
     case 'Personal':
@@ -972,18 +1074,30 @@ function TabContent({ tab, p, set }) {
     case 'Pension':
       return (
         <>
-          <Slider
-            label="Employee Contribution"
-            value={p.employeePensionPct}
-            min={0}
-            max={50}
-            step={0.5}
-            format={fmtPct}
-            onChange={set('employeePensionPct')}
-            color="#4f8ef7"
-            allowInput
-            help="Your pension contribution as a percentage of gross salary, paid via salary sacrifice. This reduces your taxable income, saving income tax and National Insurance."
+          <Toggle
+            label="Contribution Mode"
+            value={p.employeePensionAuto ? 'auto' : 'manual'}
+            optA={{ value: 'manual', label: 'Manual' }}
+            optB={{ value: 'auto', label: 'Auto (tax-optimal)' }}
+            onChange={(v) => set('employeePensionAuto')(v === 'auto')}
+            help="Manual: set your salary-sacrifice percentage yourself. Auto (tax-optimal): the app solves for the employee contribution that strips out every pound taxed above the basic rate — escaping the 45% additional rate, the 60% personal-allowance trap (£100k–£125,140) and the 40% higher-rate band — using your salary, your employer contribution and the £60,000 annual allowance (tapered for high earners). It never sacrifices below the tax-free personal allowance. Based on today's salary and 2025/26 thresholds; affordability is not considered."
           />
+          {p.employeePensionAuto ? (
+            <AutoContributionReadout p={p} />
+          ) : (
+            <Slider
+              label="Employee Contribution"
+              value={p.employeePensionPct}
+              min={0}
+              max={50}
+              step={0.5}
+              format={fmtPct}
+              onChange={set('employeePensionPct')}
+              color="#4f8ef7"
+              allowInput
+              help="Your pension contribution as a percentage of gross salary, paid via salary sacrifice. This reduces your taxable income, saving income tax and National Insurance."
+            />
+          )}
           <Slider
             label="Employer Contribution"
             value={p.employerPensionPct}
@@ -2592,7 +2706,7 @@ export default function App() {
         retirementAge: p.retirementAge,
         grossIncome: p.grossIncome,
         annualLivingExpenses: p.annualLivingExpenses,
-        employeePensionRate: p.employeePensionPct / 100,
+        employeePensionRate: effectiveEmployeePensionRate(p),
         employerPensionRate: p.employerPensionPct / 100,
         niContributionYears: p.niContributionYears,
         statePensionAge: p.statePensionAge,
@@ -2677,7 +2791,7 @@ export default function App() {
           retirementAge: p.retirementAge,
           grossIncome: p.grossIncome,
           annualLivingExpenses: p.annualLivingExpenses,
-          employeePensionRate: p.employeePensionPct / 100,
+          employeePensionRate: effectiveEmployeePensionRate(p),
           employerPensionRate: p.employerPensionPct / 100,
           niContributionYears: p.niContributionYears,
           statePensionAge: p.statePensionAge,

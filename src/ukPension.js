@@ -41,7 +41,7 @@
  *   gov.uk/guidance/pension-schemes-work-out-your-tapered-annual-allowance
  */
 
-import { calculateIncomeTax } from './ukIncomeTax.js';
+import { calculateIncomeTax, INCOME_TAX_BANDS } from './ukIncomeTax.js';
 
 const TAX_YEAR = '2025/26';
 
@@ -99,6 +99,10 @@ function round2(n) {
   return Math.round(n * 100) / 100;
 }
 
+function round4(n) {
+  return Math.round(n * 10_000) / 10_000;
+}
+
 function assertNonNegativeFinite(value, name) {
   if (typeof value !== 'number' || !isFinite(value) || value < 0) {
     throw new TypeError(`${name} must be a non-negative finite number`);
@@ -108,6 +112,151 @@ function assertNonNegativeFinite(value, name) {
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
+
+/**
+ * Tax-optimal EMPLOYEE pension contribution (salary sacrifice) for one year.
+ *
+ * "Tax-optimal" here means: sacrifice enough salary to strip out every pound
+ * that would otherwise be taxed above the basic rate — i.e. bring taxable pay
+ * down to the higher-rate threshold (£50,270 in 2025/26). This single move
+ * captures relief on, in order of value:
+ *   • the 60% effective band where the personal allowance tapers (£100,000–£125,140),
+ *   • the 45% additional-rate band (above £125,140),
+ *   • the 40% higher-rate band (£50,270–£100,000),
+ * plus the 8% → 2% step in employee National Insurance, which falls away at the
+ * Upper Earnings Limit (coinciding with the higher-rate threshold). Below
+ * £50,270 a further pound of sacrifice earns only 20% income-tax relief, so the
+ * threshold is the natural stopping point.
+ *
+ * Two hard limits apply:
+ *   • The annual allowance caps TOTAL (employee + employer) contributions at
+ *     £60,000, tapered down to £10,000 for high earners. The employee figure is
+ *     reduced so employee + employer never exceeds the (tapered) allowance.
+ *   • The sacrifice never takes taxable pay below the personal allowance
+ *     (£12,570): pounds inside the personal allowance bear no income tax, so
+ *     sacrificing them earns no income-tax relief. (For the default higher-rate
+ *     target this floor never binds; it guards a custom targetIncome.)
+ *
+ * Employer contributions are a given input, unaffected by the employee's
+ * choice — "free money" added on top of salary, relevant here only because they
+ * consume part of the shared annual allowance.
+ *
+ * The solver works from a single year's gross salary at today's thresholds
+ * (pass scaleFactor to model fiscal drag). It does not optimise across future
+ * years of wage growth, and deliberately ignores affordability: it reports the
+ * tax-optimal contribution, which a saver may choose to cap at what their
+ * take-home can support.
+ *
+ * @param {number} grossIncome - Gross annual employment income in GBP (>= 0)
+ * @param {number} employerRate - Employer contribution as a fraction of gross (0–1)
+ * @param {{
+ *   scaleFactor?:  number,   - Threshold scale factor for fiscal drag (> 0, default 1)
+ *   targetIncome?: number    - Override the taxable-pay target the solver aims
+ *                              for (GBP). Defaults to the scaled higher-rate
+ *                              threshold; floored at the personal allowance.
+ * }} [options]
+ * @returns {{
+ *   grossIncome:          number,
+ *   employerRate:         number,
+ *   targetIncome:         number,    - Taxable pay the solver aimed to reach
+ *   employeeRate:         number,    - Optimal employee fraction of gross (0–1)
+ *   employeeContribution: number,    - Optimal employee contribution (£)
+ *   employerContribution: number,    - Employer contribution at employerRate (£)
+ *   totalContribution:    number,    - employee + employer (£)
+ *   adjustedGrossIncome:  number,    - grossIncome − employeeContribution (£)
+ *   annualAllowance:      number,    - (Tapered) allowance applied (£)
+ *   cappedByAllowance:    boolean,   - True if the annual allowance limited the sacrifice
+ *   bandsCleared:         string[],  - High-tax bands the sacrifice escapes (top-down):
+ *                                      'additionalRate' | 'paTaper' | 'higherRate'
+ *   scaleFactor:          number,
+ *   taxYear:              string
+ * }}
+ */
+export function optimalEmployeePensionContribution(grossIncome, employerRate, options = {}) {
+  assertNonNegativeFinite(grossIncome, 'grossIncome');
+  if (
+    typeof employerRate !== 'number' ||
+    !isFinite(employerRate) ||
+    employerRate < 0 ||
+    employerRate > 1
+  )
+    throw new RangeError('employerRate must be a number between 0 and 1');
+
+  const { scaleFactor = 1, targetIncome: targetOverride } = options;
+  if (typeof scaleFactor !== 'number' || !isFinite(scaleFactor) || scaleFactor <= 0)
+    throw new RangeError('scaleFactor must be a positive finite number');
+
+  const personalAllowance = round2(INCOME_TAX_BANDS.personalAllowance * scaleFactor);
+  const higherRateThreshold = round2(INCOME_TAX_BANDS.basicRateLimit * scaleFactor);
+  const additionalRateThreshold = round2(INCOME_TAX_BANDS.additionalRateThreshold * scaleFactor);
+  const taperThreshold = round2(INCOME_TAX_BANDS.taperThreshold * scaleFactor);
+
+  // Default target: strip out all income taxed above the basic rate.
+  let targetIncome = targetOverride ?? higherRateThreshold;
+  if (typeof targetIncome !== 'number' || !isFinite(targetIncome) || targetIncome < 0)
+    throw new RangeError('options.targetIncome must be a non-negative finite number');
+  // Never sacrifice below the personal allowance — no income-tax relief there.
+  targetIncome = Math.max(targetIncome, personalAllowance);
+
+  const employerContribution = round2(grossIncome * employerRate);
+
+  // Desired sacrifice to reach the target taxable pay (0 if already at/below it).
+  const desiredEmployee = Math.max(0, round2(grossIncome - targetIncome));
+
+  // Adjusted income for the annual-allowance taper is threshold income + all
+  // pension contributions = (gross − employee) + (employee + employer)
+  //                       = gross + employer — independent of the employee split.
+  const adjustedIncomeForTaper = round2(grossIncome + employerContribution);
+
+  // Threshold income (gross − employee) DOES depend on the sacrifice, and a
+  // larger sacrifice can lift the allowance by dropping threshold income below
+  // £200k. Resolve the mutual dependence with a short fixed-point iteration.
+  let employeeContribution = desiredEmployee;
+  for (let i = 0; i < 8; i++) {
+    const thresholdIncome = Math.max(0, round2(grossIncome - employeeContribution));
+    const allowance = taperedAnnualAllowance(thresholdIncome, adjustedIncomeForTaper);
+    const maxEmployee = Math.max(0, round2(allowance - employerContribution));
+    const next = Math.min(desiredEmployee, maxEmployee);
+    if (Math.abs(next - employeeContribution) < 0.005) {
+      employeeContribution = next;
+      break;
+    }
+    employeeContribution = next;
+  }
+
+  // Allowance consistent with the settled contribution.
+  const finalThresholdIncome = Math.max(0, round2(grossIncome - employeeContribution));
+  const annualAllowance = taperedAnnualAllowance(finalThresholdIncome, adjustedIncomeForTaper);
+
+  const cappedByAllowance = employeeContribution + 0.005 < desiredEmployee;
+  const adjustedGrossIncome = round2(grossIncome - employeeContribution);
+  const employeeRate = grossIncome > 0 ? round4(employeeContribution / grossIncome) : 0;
+
+  // Which high-tax bands the sacrifice actually escapes: a band [lo, hi) is
+  // (partly) cleared when some removed income lay inside it.
+  const removedIn = (lo, hi) =>
+    round2(Math.min(grossIncome, hi) - Math.max(adjustedGrossIncome, lo)) > 0.005;
+  const bandsCleared = [];
+  if (removedIn(additionalRateThreshold, Infinity)) bandsCleared.push('additionalRate');
+  if (removedIn(taperThreshold, additionalRateThreshold)) bandsCleared.push('paTaper');
+  if (removedIn(higherRateThreshold, taperThreshold)) bandsCleared.push('higherRate');
+
+  return {
+    grossIncome: round2(grossIncome),
+    employerRate,
+    targetIncome,
+    employeeRate,
+    employeeContribution,
+    employerContribution,
+    totalContribution: round2(employeeContribution + employerContribution),
+    adjustedGrossIncome,
+    annualAllowance,
+    cappedByAllowance,
+    bandsCleared,
+    scaleFactor,
+    taxYear: TAX_YEAR,
+  };
+}
 
 /**
  * Projects a DC pension during the accumulation (pre-retirement) phase.
