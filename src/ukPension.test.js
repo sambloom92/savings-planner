@@ -892,68 +892,106 @@ describe('optimalEmployeePensionContribution — employer matching', () => {
     );
   });
 
-  it('reports whether matching was applied', () => {
-    assert.equal(optimalEmployeePensionContribution(70_000, 0.03).employerMatched, false);
-    assert.equal(
-      optimalEmployeePensionContribution(70_000, 0.03, { employerMatch: true }).employerMatched,
-      true
+  it('validates employerMatchThreshold is within [0, 1]', () => {
+    assert.throws(
+      () => optimalEmployeePensionContribution(50_000, 0.03, { employerMatchThreshold: -0.01 }),
+      RangeError
+    );
+    assert.throws(
+      () => optimalEmployeePensionContribution(50_000, 0.03, { employerMatchThreshold: 1.5 }),
+      RangeError
     );
   });
 
-  it('a basic-rate taxpayer contributes up to the match cap to capture free money', () => {
-    // Unconditional: 0% is tax-optimal. Matched: contribute the 3% cap so the
-    // employer matches it — the free money dwarfs the relief forgone.
-    const unconditional = optimalEmployeePensionContribution(45_000, 0.03);
-    assert.equal(unconditional.employeeContribution, 0);
+  it('reports the match flag and threshold', () => {
+    const fixed = optimalEmployeePensionContribution(70_000, 0.03);
+    assert.equal(fixed.employerMatched, false);
+    assert.equal(fixed.employerMatchThreshold, 0);
 
-    const matched = optimalEmployeePensionContribution(45_000, 0.03, { employerMatch: true });
-    assertApprox(matched.employeeRate, 0.03, 'employeeRate matches the cap');
-    assertApprox(matched.employeeContribution, 45_000 * 0.03, 'employeeContribution');
-    assertApprox(matched.employerContribution, 45_000 * 0.03, 'employerContribution (full match)');
-    assertApprox(matched.totalContribution, 45_000 * 0.06, 'total is employee + equal match');
-    assert.equal(matched.cappedByAllowance, false);
+    const matched = optimalEmployeePensionContribution(70_000, 0.12, {
+      employerMatch: true,
+      employerMatchThreshold: 0.06,
+    });
+    assert.equal(matched.employerMatched, true);
+    assertApprox(matched.employerMatchThreshold, 0.06, 'threshold echoed');
   });
 
-  it('an earner whose PA-protecting sacrifice exceeds the cap captures the full match', () => {
-    // £150k → £50,000 sacrifice to reach £100,000, far above the 3% cap, so the
-    // employer pays its full 3%.
-    const r = optimalEmployeePensionContribution(150_000, 0.03, { employerMatch: true });
-    assertApprox(r.adjustedGrossIncome, TAPER, 'still targets £100,000');
-    assertApprox(r.effectiveEmployerRate, 0.03, 'employer pays the full 3% cap');
-    assertApprox(r.employerContribution, 150_000 * 0.03, 'employerContribution');
+  it('contributes the threshold to earn the full employer offer (below £100k)', () => {
+    // A 6% → 12% scheme at £45k: no personal allowance to protect, but contribute
+    // the 6% minimum to unlock the full 12% employer contribution.
+    const r = optimalEmployeePensionContribution(45_000, 0.12, {
+      employerMatch: true,
+      employerMatchThreshold: 0.06,
+    });
+    assertApprox(r.employeeRate, 0.06, 'employee meets the 6% threshold');
+    assertApprox(r.employeeContribution, 45_000 * 0.06, 'employeeContribution');
+    assertApprox(r.effectiveEmployerRate, 0.12, 'employer pays the full 12%');
+    assertApprox(r.employerContribution, 45_000 * 0.12, 'employerContribution');
+    assert.equal(r.cappedByAllowance, false);
+    assert.equal(r.annualAllowanceBreached, false);
   });
 
-  it('matching with a zero employer cap behaves like no employer contribution', () => {
-    const matched = optimalEmployeePensionContribution(120_000, 0, { employerMatch: true });
-    assert.equal(matched.employerContribution, 0);
-    assertApprox(matched.adjustedGrossIncome, TAPER, 'targets £100,000');
+  it('protects the personal allowance and still earns the full match', () => {
+    // £110k, 6% → 12%: reaching £100k needs a £10,000 sacrifice (9.1%), above the
+    // 6% threshold, so the full 12% employer contribution is earned.
+    const r = optimalEmployeePensionContribution(110_000, 0.12, {
+      employerMatch: true,
+      employerMatchThreshold: 0.06,
+    });
+    assertApprox(r.adjustedGrossIncome, TAPER, 'reaches £100,000');
+    assertApprox(r.employeeContribution, 10_000, 'employeeContribution');
+    assertApprox(r.effectiveEmployerRate, 0.12, 'full employer match');
   });
 
-  it('caps the match at half the allowance when matching the full cap would breach it', () => {
-    // 40% match cap on £100k = £40,000. Matching it needs £40k employee + £40k
-    // employer = £80k > £60k allowance. The solver settles at £30k each side
-    // (allowance ÷ 2), the most the allowance permits, and flags the cap.
-    const r = optimalEmployeePensionContribution(100_000, 0.4, { employerMatch: true });
-    assertApprox(r.employeeContribution, 30_000, 'employee = allowance / 2');
-    assertApprox(r.employerContribution, 30_000, 'employer = allowance / 2');
-    assertApprox(r.totalContribution, PENSION_CONSTANTS.annualAllowance, 'total = allowance');
-    assert.ok(r.effectiveEmployerRate < r.employerRate, 'match is partial (below the 40% cap)');
+  it('never drops below the threshold, even when the tax target needs less', () => {
+    // £70k auto-enrolment style (5% → 3%): below £100k the tax target needs
+    // nothing, but the solver still contributes the 5% to earn the 3% match.
+    const r = optimalEmployeePensionContribution(70_000, 0.03, {
+      employerMatch: true,
+      employerMatchThreshold: 0.05,
+    });
+    assertApprox(r.employeeRate, 0.05, 'employee meets the 5% threshold');
+    assertApprox(r.effectiveEmployerRate, 0.03, 'earns the 3% match');
+  });
+
+  it('a generous employer match can eat the allowance, leaving PA partly unrecovered', () => {
+    // £150k, 6% → 12%: the £18,000 employer contribution leaves only £42,000 of
+    // the £60k allowance for the employee, so income only reaches £108,000 —
+    // part of the personal allowance stays tapered.
+    const r = optimalEmployeePensionContribution(150_000, 0.12, {
+      employerMatch: true,
+      employerMatchThreshold: 0.06,
+    });
+    assertApprox(r.employerContribution, 18_000, 'full 12% employer');
+    assertApprox(
+      r.employeeContribution,
+      60_000 - 18_000,
+      'employee capped at allowance − employer'
+    );
+    assert.ok(r.adjustedGrossIncome > TAPER, 'cannot reach £100,000');
     assert.equal(r.cappedByAllowance, true);
   });
 
-  it('never lets a matched total exceed the annual allowance', () => {
-    for (const [g, er] of [
-      [80_000, 0.1],
-      [150_000, 0.06],
-      [250_000, 0.2],
-      [300_000, 0.05],
-    ]) {
-      const r = optimalEmployeePensionContribution(g, er, { employerMatch: true });
-      assert.ok(
-        r.totalContribution <= r.annualAllowance + 0.01,
-        `gross ${g}, cap ${er}: total ${r.totalContribution} exceeds allowance ${r.annualAllowance}`
-      );
-    }
+  it('keeps the match and flags a breach when the employer max exceeds the allowance', () => {
+    // £300k, 6% → 12%: the allowance tapers below the £36k employer contribution,
+    // so earning the match unavoidably breaches it. The solver still contributes
+    // only the threshold and flags the breach rather than abandoning the match.
+    const r = optimalEmployeePensionContribution(300_000, 0.12, {
+      employerMatch: true,
+      employerMatchThreshold: 0.06,
+    });
+    assertApprox(r.employeeContribution, 300_000 * 0.06, 'employee at the threshold');
+    assertApprox(r.employerContribution, 300_000 * 0.12, 'full employer match');
+    assert.equal(r.annualAllowanceBreached, true);
+  });
+
+  it('a zero employer maximum earns nothing but still protects the PA', () => {
+    const r = optimalEmployeePensionContribution(120_000, 0, {
+      employerMatch: true,
+      employerMatchThreshold: 0.06,
+    });
+    assert.equal(r.employerContribution, 0);
+    assertApprox(r.adjustedGrossIncome, TAPER, 'still protects the personal allowance');
   });
 });
 
@@ -964,6 +1002,7 @@ describe('optimalEmployeePensionContribution — result shape', () => {
       'grossIncome',
       'employerRate',
       'employerMatched',
+      'employerMatchThreshold',
       'targetIncome',
       'employeeRate',
       'employeeContribution',
@@ -973,6 +1012,7 @@ describe('optimalEmployeePensionContribution — result shape', () => {
       'adjustedGrossIncome',
       'annualAllowance',
       'cappedByAllowance',
+      'annualAllowanceBreached',
       'bandsCleared',
       'scaleFactor',
       'taxYear',

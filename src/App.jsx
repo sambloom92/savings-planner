@@ -88,7 +88,8 @@ const DEFAULTS = {
   employeePensionPct: 5,
   employeePensionAuto: false, // when true, employee % is solved for tax-optimality
   employerPensionPct: 3,
-  employerMatch: false, // when true, employer pays min(employerPct, employeePct)
+  employerMatch: false, // when true, employer pays its rate only if employee ≥ threshold
+  employerMatchThreshold: 5, // employee % required to earn the full employer contribution
   pensionBalance: 10_000,
   equityReturnPct: 7,
   bondReturnPct: 3,
@@ -138,6 +139,7 @@ function effectiveEmployeePensionRate(p) {
   if (p.employeePensionAuto) {
     return optimalEmployeePensionContribution(p.grossIncome, p.employerPensionPct / 100, {
       employerMatch: p.employerMatch,
+      employerMatchThreshold: p.employerMatchThreshold / 100,
     }).employeeRate;
   }
   return p.employeePensionPct / 100;
@@ -921,6 +923,7 @@ function AutoContributionReadout({ p }) {
   try {
     auto = optimalEmployeePensionContribution(p.grossIncome, p.employerPensionPct / 100, {
       employerMatch: p.employerMatch,
+      employerMatchThreshold: p.employerMatchThreshold / 100,
     });
   } catch {
     return <InfoBox>Enter a valid salary to compute the tax-optimal contribution.</InfoBox>;
@@ -930,18 +933,16 @@ function AutoContributionReadout({ p }) {
   const gross = fmtGBP(p.grossIncome);
   const target = fmtGBP(auto.targetIncome); // £100,000 at today's thresholds
   const emp = fmtGBP(auto.employeeContribution);
+  const adjusted = fmtGBP(auto.adjustedGrossIncome);
   const total = fmtGBP(auto.totalContribution);
   const employer = fmtGBP(auto.employerContribution);
   const erPct = (auto.employerRate * 100).toFixed(1);
 
-  // Full match = the employee sacrifices at least the cap, so the employer pays
-  // its maximum. The small tolerance absorbs rounding of the rate to 4dp.
-  const fullMatch =
-    auto.employerMatched && auto.effectiveEmployerRate + 0.0001 >= auto.employerRate;
-  const matchClause = auto.employerMatched
-    ? fullMatch
-      ? `, the full ${erPct}% match`
-      : `, a partial match capped by the annual allowance`
+  // With matching the employer pays its full rate once the required minimum is
+  // met (which Auto always does), so the match is never partial.
+  const matchClause = auto.employerMatched ? `, the full ${erPct}% employer match` : '';
+  const breachNote = auto.annualAllowanceBreached
+    ? ` This exceeds the ${fmtGBP(auto.annualAllowance)} annual allowance, so an annual-allowance charge would apply to the excess.`
     : '';
 
   const abovePA = p.grossIncome > auto.targetIncome + 0.5;
@@ -955,25 +956,25 @@ function AutoContributionReadout({ p }) {
         (auto.employerMatched ? ', and no employer match to capture' : '') +
         `. The tax-optimal contribution is 0%. `;
     } else {
-      // Matched: contribute up to the cap to capture the free employer money.
+      // Matched below £100k: contribute the required minimum to earn the match.
       explanation =
         `At ${gross} your personal allowance is already safe (income below ${target}). You contribute ` +
-        `${pct}% (${emp}/yr) to capture ${fullMatch ? `the full ${erPct}%` : 'the'} employer match — ` +
-        `${total}/yr into your pension in total. `;
+        `${pct}% (${emp}/yr) to earn the full ${erPct}% employer match — ${total}/yr into your ` +
+        `pension in total. `;
     }
   } else if (auto.adjustedGrossIncome <= auto.targetIncome + 0.5) {
     // Income above £100,000, and the sacrifice reaches the target.
     explanation =
       `Sacrificing ${pct}% (${emp}/yr) brings your taxable income from ${gross} down to ${target}, ` +
       `reclaiming your full tax-free personal allowance. Total pension input ${total}/yr ` +
-      `(incl. ${employer} employer${matchClause}). `;
+      `(incl. ${employer} employer${matchClause}).${breachNote} `;
   } else {
     // The annual allowance stops the sacrifice reaching £100,000.
     explanation =
-      `Sacrificing ${pct}% (${emp}/yr) brings your taxable income from ${gross} down to ` +
-      `${fmtGBP(auto.adjustedGrossIncome)}, but the ${fmtGBP(auto.annualAllowance)} annual allowance ` +
-      `stops it reaching ${target}, so part of your personal allowance is still tapered away. Total ` +
-      `pension input ${total}/yr (incl. ${employer} employer${matchClause}). `;
+      `Sacrificing ${pct}% (${emp}/yr) brings your taxable income from ${gross} down to ${adjusted}. ` +
+      `The ${fmtGBP(auto.annualAllowance)} annual allowance stops it reaching ${target}, so part of ` +
+      `your personal allowance stays tapered away. Total pension input ${total}/yr ` +
+      `(incl. ${employer} employer${matchClause}).${breachNote} `;
   }
 
   return (
@@ -1117,10 +1118,10 @@ function TabContent({ tab, p, set }) {
             optA={{ value: 'fixed', label: 'Fixed' }}
             optB={{ value: 'matched', label: 'Matched' }}
             onChange={(v) => set('employerMatch')(v === 'matched')}
-            help="Fixed: your employer always contributes the percentage below, regardless of what you pay in. Matched: your employer pays the lesser of that percentage and your own contribution — so a 3% employer rate matches you pound-for-pound up to 3%, and if you contribute nothing, the employer contributes nothing. Matching is common in UK workplace schemes; contributing at least up to the match is usually the single best-value thing you can do, which is why Auto mode targets it."
+            help="Fixed: your employer always contributes the percentage below, regardless of what you pay in. Matched: your employer pays that percentage only if you contribute at least the required minimum (set below), and nothing if you fall short. This captures real schemes — including non-1:1 and tiered offers — by their best rung: the smallest employee contribution that unlocks the largest employer one (e.g. put in 6% to get 12%). Auto mode assumes you take the full offer."
           />
           <Slider
-            label={p.employerMatch ? 'Employer Match (up to)' : 'Employer Contribution'}
+            label={p.employerMatch ? 'Employer Contribution (max)' : 'Employer Contribution'}
             value={p.employerPensionPct}
             min={0}
             max={20}
@@ -1131,17 +1132,31 @@ function TabContent({ tab, p, set }) {
             allowInput
             help={
               p.employerMatch
-                ? "The most your employer will contribute, as a percentage of gross salary. The actual contribution is the lesser of this and your own contribution — matched pound-for-pound up to this cap. It's free money added on top of your salary, so aim to contribute at least this much yourself."
+                ? "The maximum your employer contributes, as a percentage of gross salary — paid in full once you meet the required employee minimum below, and not at all if you fall short (partial tiers are not modelled). It's free money added on top of your salary."
                 : "Your employer's pension contribution as a percentage of your gross salary. This is paid on top of your salary and doesn't cost you anything directly — sometimes called 'free money'."
             }
           />
+          {p.employerMatch && (
+            <Slider
+              label="Employee Contribution Required"
+              value={p.employerMatchThreshold}
+              min={0}
+              max={20}
+              step={0.5}
+              format={fmtPct}
+              onChange={set('employerMatchThreshold')}
+              color="#4f8ef7"
+              allowInput
+              help="The minimum you must contribute to receive the full employer contribution above. For a tiered scheme, enter the employee percentage for the top tier you'll take (e.g. 6% to earn 12%). Contribute less than this and the employer pays nothing in this model. In Auto mode the app contributes at least this much to capture the full employer offer."
+            />
+          )}
           <Toggle
             label="Contribution Mode"
             value={p.employeePensionAuto ? 'auto' : 'manual'}
             optA={{ value: 'manual', label: 'Manual' }}
             optB={{ value: 'auto', label: 'Auto (tax-optimal)' }}
             onChange={(v) => set('employeePensionAuto')(v === 'auto')}
-            help="Manual: set your salary-sacrifice percentage yourself. Auto (tax-optimal): the app solves for the employee contribution that protects your tax-free personal allowance — it brings your taxable income down to £100,000, the point above which the allowance tapers away (an effective 60% marginal rate up to £125,140). It uses your salary, your employer contribution and the £60,000 annual allowance (tapered for high earners), and never sacrifices below the personal allowance. If your income is already below £100,000 there is nothing to protect, so it recommends 0%. When your employer contribution is Matched, it also contributes at least up to the match cap to capture all the free employer money. Based on today's salary and 2025/26 thresholds; affordability is not considered."
+            help="Manual: set your salary-sacrifice percentage yourself. Auto (tax-optimal): the app solves for the employee contribution that protects your tax-free personal allowance — it brings your taxable income down to £100,000, the point above which the allowance tapers away (an effective 60% marginal rate up to £125,140). It uses your salary, your employer contribution and the £60,000 annual allowance (tapered for high earners), and never sacrifices below the personal allowance. If your income is already below £100,000 there is nothing to protect, so it recommends 0%. When your employer contribution is Matched, it also contributes at least the required minimum to earn the full employer contribution. Based on today's salary and 2025/26 thresholds; affordability is not considered."
           />
           {p.employeePensionAuto ? (
             <AutoContributionReadout p={p} />
@@ -2758,6 +2773,7 @@ export default function App() {
         employeePensionRate: effectiveEmployeePensionRate(p),
         employerPensionRate: p.employerPensionPct / 100,
         employerMatch: p.employerMatch,
+        employerMatchThreshold: p.employerMatchThreshold / 100,
         niContributionYears: p.niContributionYears,
         statePensionAge: p.statePensionAge,
         statePensionDeferralYears: p.statePensionDeferralYears,
@@ -2844,6 +2860,7 @@ export default function App() {
           employeePensionRate: effectiveEmployeePensionRate(p),
           employerPensionRate: p.employerPensionPct / 100,
           employerMatch: p.employerMatch,
+          employerMatchThreshold: p.employerMatchThreshold / 100,
           niContributionYears: p.niContributionYears,
           statePensionAge: p.statePensionAge,
           statePensionDeferralYears: p.statePensionDeferralYears,

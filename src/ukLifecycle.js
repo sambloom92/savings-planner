@@ -291,10 +291,14 @@ function applyGIAWithdrawal(bal, costBasis, gross) {
  *   employeePensionRate:    number,         - Employee pension as fraction of gross (0–1)
  *   employerPensionRate:    number,         - Employer pension as fraction of gross (0–1).
  *                                             With employerMatch, this is the maximum matched rate.
- *   employerMatch?:         boolean,        - When true, the employer pays min(employerPensionRate,
- *                                             employeePensionRate) — a matched contribution that is
- *                                             zero if the employee contributes nothing. Default false
- *                                             (unconditional employer contribution at employerPensionRate).
+ *   employerMatch?:         boolean,        - When true, the employer pays employerPensionRate only if
+ *                                             the employee contributes at least employerMatchThreshold,
+ *                                             and 0 otherwise (partial tiers are not modelled). Default
+ *                                             false (unconditional employer contribution).
+ *   employerMatchThreshold?: number,        - Minimum employee fraction of gross (0–1) that unlocks the
+ *                                             full employer contribution when employerMatch is true.
+ *                                             Default 0. Models any scheme by its top rung, e.g. "put in
+ *                                             6% to get 12%" → threshold 0.06, employerPensionRate 0.12.
  *   niContributionYears:    number,         - Existing NI qualifying years already accrued
  *   statePensionAge?:       number,         - State pension age (default 67)
  *   statePensionDeferralYears?: number,     - Years to defer the state pension past
@@ -400,12 +404,15 @@ export function projectLifecycle(
     annualLivingExpenses = 0, // non-debt living costs in today's £; inflated each year
     employeePensionRate,
     employerPensionRate,
-    // When true, the employer contribution is a MATCH: the employer pays the
-    // lesser of employerPensionRate and employeePensionRate, so a 3% employer
-    // rate with a 2% employee contribution pays 2%, and an employee who
-    // contributes nothing receives nothing. When false (default) the employer
-    // contribution is unconditional at employerPensionRate.
+    // When true, the employer contribution is a MATCH: the employer pays its full
+    // employerPensionRate only if the employee contributes at least
+    // employerMatchThreshold, and nothing otherwise. This models real schemes —
+    // including non-1:1 and tiered offers — collapsed to their top rung: the
+    // minimum employee contribution that unlocks the maximum employer one (e.g.
+    // "put in 6% to get 12%" → threshold 0.06, employerPensionRate 0.12). When
+    // false (default) the employer contribution is unconditional.
     employerMatch = false,
+    employerMatchThreshold = 0,
     niContributionYears,
     statePensionAge = LIFECYCLE_CONSTANTS.statePension.defaultStatePensionAge,
     statePensionDeferralYears = 0,
@@ -431,11 +438,15 @@ export function projectLifecycle(
   if (employeePensionRate > 1) throw new RangeError('employeePensionRate must be <= 1');
   if (employerPensionRate > 1) throw new RangeError('employerPensionRate must be <= 1');
   if (typeof employerMatch !== 'boolean') throw new TypeError('employerMatch must be a boolean');
+  assertNonNegativeFinite(employerMatchThreshold, 'employerMatchThreshold');
+  if (employerMatchThreshold > 1) throw new RangeError('employerMatchThreshold must be <= 1');
 
-  // Effective employer rate: capped by the employee contribution when matching.
-  const effectiveEmployerRate = employerMatch
-    ? Math.min(employerPensionRate, employeePensionRate)
-    : employerPensionRate;
+  // Effective employer rate. With matching, the employer pays its full rate only
+  // when the employee meets the required threshold, and nothing below it (partial
+  // tiers are not modelled — see the profile note). The 1e-4 tolerance absorbs
+  // rounding of a solver-derived employee rate to 4 decimal places.
+  const effectiveEmployerRate =
+    employerMatch && employeePensionRate + 1e-4 < employerMatchThreshold ? 0 : employerPensionRate;
 
   assertNonNegativeInteger(niContributionYears, 'niContributionYears');
   assertPositiveInteger(statePensionAge, 'statePensionAge');

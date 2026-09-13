@@ -1372,6 +1372,13 @@ describe('employer matching', () => {
     assert.throws(() => run({ ...baseProfile, employerMatch: 'yes' }), TypeError);
   });
 
+  it('throws RangeError for an employerMatchThreshold above 1', () => {
+    assert.throws(
+      () => run({ ...baseProfile, employerMatch: true, employerMatchThreshold: 1.5 }),
+      RangeError
+    );
+  });
+
   it('unconditional (default): employer pays its full rate regardless of the employee', () => {
     // employee 1%, employer 3% unconditional → employer still pays 3% of 40k = 1,200
     const y = run({ ...baseProfile, employeePensionRate: 0.01 }).yearlyBreakdown[0];
@@ -1379,29 +1386,48 @@ describe('employer matching', () => {
     assertApprox(y.employerContribution, 1_200, 'employerContrib (unconditional 3%)');
   });
 
-  it('matched: employer is capped at the employee rate', () => {
-    // employee 1%, employer match cap 3% → employer pays min(3%,1%) = 1% = 400
+  it('matched: employer pays its full rate when the employee meets the threshold', () => {
+    // employee 5% ≥ 5% threshold → employer pays its full 3% = 1,200
     const y = run({
       ...baseProfile,
-      employeePensionRate: 0.01,
       employerMatch: true,
+      employerMatchThreshold: 0.05,
     }).yearlyBreakdown[0];
-    assertApprox(y.employeeContribution, 400, 'employeeContrib');
-    assertApprox(y.employerContribution, 400, 'employerContrib (matched down to 1%)');
-  });
-
-  it('matched: employer pays its full cap once the employee exceeds it', () => {
-    // employee 5%, employer match cap 3% → employer pays the full 3% = 1,200
-    const y = run({ ...baseProfile, employerMatch: true }).yearlyBreakdown[0];
     assertApprox(y.employeeContribution, 2_000, 'employeeContrib (5%)');
-    assertApprox(y.employerContribution, 1_200, 'employerContrib (full 3% match)');
+    assertApprox(y.employerContribution, 1_200, 'employerContrib (full 3%)');
   });
 
-  it('matched: a zero employee contribution means a zero employer contribution', () => {
+  it('matched: employer pays nothing when the employee is below the threshold', () => {
+    // employee 4% < 5% threshold → employer pays 0 (partial tiers not modelled)
+    const y = run({
+      ...baseProfile,
+      employeePensionRate: 0.04,
+      employerMatch: true,
+      employerMatchThreshold: 0.05,
+    }).yearlyBreakdown[0];
+    assertApprox(y.employeeContribution, 1_600, 'employeeContrib');
+    assertApprox(y.employerContribution, 0, 'employerContrib (threshold not met)');
+  });
+
+  it('matched: models a tiered top rung (6% earns 12%)', () => {
+    // employee 6% ≥ 6% threshold → employer pays 12% of 40,000 = 4,800
+    const y = run({
+      ...baseProfile,
+      employeePensionRate: 0.06,
+      employerPensionRate: 0.12,
+      employerMatch: true,
+      employerMatchThreshold: 0.06,
+    }).yearlyBreakdown[0];
+    assertApprox(y.employeeContribution, 2_400, 'employeeContrib (6%)');
+    assertApprox(y.employerContribution, 4_800, 'employerContrib (12%)');
+  });
+
+  it('matched: a zero employee contribution earns no employer contribution', () => {
     const y = run({
       ...baseProfile,
       employeePensionRate: 0,
       employerMatch: true,
+      employerMatchThreshold: 0.05,
     }).yearlyBreakdown[0];
     assertApprox(y.employeeContribution, 0, 'employeeContrib');
     assertApprox(y.employerContribution, 0, 'employerContrib (no match without employee)');
