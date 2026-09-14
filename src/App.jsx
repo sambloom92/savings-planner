@@ -1067,7 +1067,60 @@ function ManualAllowanceWarning({ p }) {
   );
 }
 
-function TabContent({ tab, p, set }) {
+// Read-only display of the annual savings the expenses input implies, closing
+// the feedback loop for the residual (expenses → savings) model: savings is
+// whatever's left of net take-home after debt payments and living expenses.
+// Shown for the first projected year, in today's money.
+function DerivedSavingsReadout({ derived }) {
+  if (!derived) return null;
+  const { amount, netTakeHome } = derived;
+  const rate = netTakeHome > 0 ? Math.round((amount / netTakeHome) * 100) : 0;
+  return (
+    <div style={{ marginTop: -8, marginBottom: 20 }}>
+      <div
+        style={{
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'baseline',
+          marginBottom: 3,
+        }}
+      >
+        <span
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            color: 'var(--text-secondary)',
+            fontSize: 11,
+            letterSpacing: '0.07em',
+            textTransform: 'uppercase',
+            fontWeight: 500,
+          }}
+        >
+          Derived Annual Savings
+          <HelpTip text="What's left of your net take-home after debt payments and living expenses each year — the model invests it (ISA first, then GIA). This is not a separate input: change your living expenses (or debts) to change it. Shown for the first year in today's money; it varies over time as your salary, debts and expenses evolve." />
+        </span>
+        <span
+          style={{
+            color: '#34d399',
+            fontFamily: 'var(--font-mono)',
+            fontSize: 16,
+            fontWeight: 600,
+          }}
+        >
+          {fmtGBP(amount)}
+          <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>/yr</span>
+        </span>
+      </div>
+      <div style={{ color: 'var(--text-muted)', fontSize: 11, fontFamily: 'var(--font-mono)' }}>
+        {amount === 0
+          ? "today's money · nothing left to save — lower expenses or debt to free up savings"
+          : `${netTakeHome > 0 ? `${rate}% of take-home · ` : ''}today's money`}
+      </div>
+    </div>
+  );
+}
+
+function TabContent({ tab, p, set, derived }) {
   switch (tab) {
     case 'Personal':
       return (
@@ -1119,6 +1172,7 @@ function TabContent({ tab, p, set }) {
             allowInput
             help="Your annual non-debt living costs during the working years, in today's money — food, utilities, transport, insurance, leisure, etc. Do not include mortgage or debt repayments; those are entered separately. This amount is inflated each year to keep real purchasing power constant. Annual savings are derived automatically as: net take-home − debt payments − living expenses. Retirement spending is a separate parameter in the Retire tab."
           />
+          <DerivedSavingsReadout derived={derived} />
           <Slider
             label="NI Qualifying Years"
             value={p.niContributionYears}
@@ -2887,6 +2941,13 @@ export default function App() {
     }
   }, [p]);
 
+  // First projected year's surplus (today's money — year 0 is unscaled), surfaced
+  // in the Personal tab so the savings implied by the expenses input is visible.
+  const firstYearDetail = chartData[0]?._detail ?? null;
+  const derivedSavings = firstYearDetail
+    ? { amount: firstYearDetail.availableForSavings, netTakeHome: firstYearDetail.netTakeHome }
+    : null;
+
   // ── Monte Carlo stochastic modelling ───────────────────────────────────────
   // All setState calls live inside the timeout callback (not the effect body)
   // to avoid the react-hooks/set-state-in-effect lint rule.
@@ -3381,7 +3442,7 @@ Use Available funds to see whether an early-retirement plan can bridge the gap u
               display: mobile && !sidebarOpen ? 'none' : 'block',
             }}
           >
-            <TabContent tab={activeTab} p={p} set={set} />
+            <TabContent tab={activeTab} p={p} set={set} derived={derivedSavings} />
           </div>
 
           {/* Footer actions */}
