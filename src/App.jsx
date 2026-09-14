@@ -1,7 +1,7 @@
 import { useState, useMemo, useRef, useEffect, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import { projectLifecycle } from './ukLifecycle.js';
-import { optimalEmployeePensionContribution } from './ukPension.js';
+import { optimalEmployeePensionContribution, taperedAnnualAllowance } from './ukPension.js';
 import { runMonteCarlo } from './ukMonteCarlo.js';
 import { FanChart } from './FanChart.jsx';
 import { fmtGBPLarge } from './formatters.js';
@@ -152,6 +152,25 @@ function effectiveEmployeePensionRate(p) {
     }).employeeRate;
   }
   return manualEmployeePensionPct(p) / 100;
+}
+
+// First-year annual-allowance check for the MANUAL employee contribution: does
+// employee + employer exceed the (tapered) £60k allowance at today's salary? The
+// projection flags this per year but doesn't apply the charge; this surfaces it
+// in the Pension tab. Returns { breached, total, allowance } (all £, first year).
+function manualAllowanceStatus(p) {
+  try {
+    const employee = Math.round(p.grossIncome * (manualEmployeePensionPct(p) / 100) * 100) / 100;
+    // Manual mode floors the employee at the match threshold, so a matched
+    // employer is always paid in full; a fixed employer is always paid.
+    const employer = Math.round(p.grossIncome * (p.employerPensionPct / 100) * 100) / 100;
+    const total = Math.round((employee + employer) * 100) / 100;
+    const thresholdIncome = Math.max(0, p.grossIncome - employee);
+    const allowance = taperedAnnualAllowance(thresholdIncome, p.grossIncome + employer);
+    return { breached: total > allowance + 0.005, total, allowance };
+  } catch {
+    return { breached: false, total: 0, allowance: 0 };
+  }
 }
 
 // ── Small components ──────────────────────────────────────────────────────────
@@ -494,17 +513,18 @@ function Toggle({ label, value, optA, optB, onChange, help }) {
   );
 }
 
-function InfoBox({ children }) {
+function InfoBox({ children, tone }) {
+  const warn = tone === 'warn';
   return (
     <div
       style={{
-        background: 'var(--bg-input)',
-        border: '1px solid var(--border)',
+        background: warn ? 'rgba(244, 63, 94, 0.08)' : 'var(--bg-input)',
+        border: `1px solid ${warn ? 'rgba(244, 63, 94, 0.5)' : 'var(--border)'}`,
         borderRadius: 6,
         padding: '8px 12px',
         marginBottom: 20,
         fontSize: 11,
-        color: 'var(--text-secondary)',
+        color: warn ? '#f87171' : 'var(--text-secondary)',
         fontFamily: 'var(--font-mono)',
         lineHeight: 1.65,
       }}
@@ -1032,6 +1052,21 @@ function AutoContributionReadout({ p }) {
   );
 }
 
+// Warns (without capping) when a manual employee + employer contribution exceeds
+// the annual allowance in the first year. Auto mode carries its own breach note.
+function ManualAllowanceWarning({ p }) {
+  const { breached, total, allowance } = manualAllowanceStatus(p);
+  if (!breached) return null;
+  return (
+    <InfoBox tone="warn">
+      ⚠ Your employee + employer contributions total {fmtGBP(total)} this year — above the{' '}
+      {fmtGBP(allowance)} annual allowance. The excess would normally face an annual-allowance
+      charge, which this model flags but doesn&apos;t apply (nor does it model carrying forward
+      unused allowance from the past three years). Based on today&apos;s salary.
+    </InfoBox>
+  );
+}
+
 function TabContent({ tab, p, set }) {
   switch (tab) {
     case 'Personal':
@@ -1191,6 +1226,7 @@ function TabContent({ tab, p, set }) {
               }
             />
           )}
+          {!p.employeePensionAuto && <ManualAllowanceWarning p={p} />}
           <Slider
             label="Starting Balance"
             value={p.pensionBalance}
