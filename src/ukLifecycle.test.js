@@ -1435,6 +1435,132 @@ describe('employer matching', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Voluntary Class 3 state pension top-up
+// ---------------------------------------------------------------------------
+
+describe('voluntary Class 3 state pension top-up', () => {
+  // Retire at 55 short of 35 years, with pots big enough to fund the bridge.
+  // 15 initial NI years + 10 working years (45→55) = 25 accrued; 12 bridge years
+  // (55→67), so up to 10 buyable → reaches the full 35.
+  const topUpRetOpts = { targetNetAnnualExpenses: 20_000, maxAge: 90, takePCLS: true };
+  const topUpProfile = {
+    ...baseProfile,
+    currentAge: 45,
+    retirementAge: 55,
+    niContributionYears: 15,
+    statePensionAge: 67,
+  };
+  const topUpPots = { pensionBalance: 300_000, isaBalance: 150_000, giaBalance: 20_000 };
+  const runTopUp = (over = {}, pots = topUpPots) =>
+    projectLifecycle({ ...topUpProfile, ...over }, baseRates, pots, topUpRetOpts);
+
+  it('throws TypeError for a non-boolean topUpStatePension', () => {
+    assert.throws(() => runTopUp({ topUpStatePension: 'yes' }), TypeError);
+  });
+
+  it('off by default: no years bought, pension based on accrued years only', () => {
+    const r = runTopUp();
+    assert.equal(r.summary.class3YearsBought, 0);
+    assert.equal(r.summary.class3TotalCost, 0);
+    assert.equal(r.summary.niYearsAccrued, 25);
+    assert.equal(r.summary.niYearsWithTopUp, 25);
+  });
+
+  it('on: buys the shortfall years up to 35 and raises the state pension', () => {
+    const off = runTopUp({ topUpStatePension: false });
+    const on = runTopUp({ topUpStatePension: true });
+    assert.equal(on.summary.class3YearsBought, 10, 'buys 10 to reach 35');
+    assert.equal(on.summary.niYearsWithTopUp, 35);
+    assert.ok(on.summary.class3TotalCost > 0, 'cost is charged');
+    assert.ok(
+      on.summary.projectedStatePension > off.summary.projectedStatePension,
+      'topped-up pension is higher'
+    );
+    // Full 35/35 vs accrued 25/35 → 40% higher (before rounding).
+    assertApprox(
+      on.summary.projectedStatePension / off.summary.projectedStatePension,
+      35 / 25,
+      'pension ratio'
+    );
+  });
+
+  it('on: the cost is funded from the pots (bought years carry a contribution)', () => {
+    const on = runTopUp({ topUpStatePension: true });
+    const bought = on.yearlyBreakdown.filter((row) => row.class3YearBought);
+    assert.equal(bought.length, 10);
+    for (const row of bought) assert.ok(row.class3Contribution > 0);
+    // Summary total equals the sum of yearly contributions.
+    const summed = round2Test(
+      on.yearlyBreakdown.reduce((s, row) => s + (row.class3Contribution || 0), 0)
+    );
+    assertApprox(summed, on.summary.class3TotalCost, 'summed contributions');
+  });
+
+  it('on: buys nothing when already at or above 35 years', () => {
+    // 30 initial + 10 working = 40 accrued → no shortfall.
+    const on = runTopUp({ topUpStatePension: true, niContributionYears: 30 });
+    assert.equal(on.summary.class3YearsBought, 0);
+    assert.equal(on.summary.class3TotalCost, 0);
+  });
+
+  it('on: buys nothing when the top-up cannot reach the 10-year minimum', () => {
+    // Retire at 66 (SPA 67) with 6 accrued years and a 1-year bridge → can reach
+    // at most 7 years, below the 10 needed for any pension, so buying is pointless.
+    const on = projectLifecycle(
+      {
+        ...baseProfile,
+        currentAge: 60,
+        retirementAge: 66,
+        niContributionYears: 0,
+        statePensionAge: 67,
+        topUpStatePension: true,
+      },
+      baseRates,
+      { pensionBalance: 300_000, isaBalance: 100_000 },
+      { targetNetAnnualExpenses: 10_000, maxAge: 90, takePCLS: true }
+    );
+    assert.equal(on.summary.class3YearsBought, 0);
+  });
+
+  it('handles a cash-starved bridge: buys only what it can afford, no negative pots', () => {
+    // Short accumulation, small pots, high spend → the bridge runs dry.
+    const on = projectLifecycle(
+      {
+        ...baseProfile,
+        currentAge: 54,
+        retirementAge: 55,
+        grossIncome: 30_000,
+        niContributionYears: 20,
+        statePensionAge: 67,
+        topUpStatePension: true,
+      },
+      baseRates,
+      { pensionBalance: 30_000, isaBalance: 10_000 },
+      { targetNetAnnualExpenses: 30_000, maxAge: 90, takePCLS: true }
+    );
+    // 15 short of 35 with a 12-year bridge → up to 12 buyable, but the pots can't
+    // fund them all, so fewer are bought — never fabricated.
+    assert.ok(on.summary.class3YearsBought < 12, 'buys fewer than the full shortfall');
+    assert.ok(on.summary.class3YearsBought >= 0);
+    const anyNegative = on.yearlyBreakdown.some(
+      (row) =>
+        row.pension.closingBalance < 0 || row.isa.closingBalance < 0 || row.gia.closingBalance < 0
+    );
+    assert.equal(anyNegative, false, 'no pot is driven negative');
+    // The essential shortfall is real (the plan is under-funded).
+    assert.ok(
+      on.yearlyBreakdown.some((row) => row.phase === 'retirement' && row.shortfall > 0),
+      'essential shortfall surfaces'
+    );
+  });
+});
+
+// Small local rounding helper mirroring the module's round2, for test sums.
+function round2Test(n) {
+  return Math.round(n * 100) / 100;
+}
+
+// ---------------------------------------------------------------------------
 // Summary
 // ---------------------------------------------------------------------------
 

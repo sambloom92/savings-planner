@@ -80,6 +80,7 @@ const DEFAULTS = {
   niContributionYears: 3,
   statePensionAge: 67,
   statePensionDeferralYears: 0,
+  topUpStatePension: false, // auto-buy voluntary Class 3 NI years to reach the full 35
   pensionAccessAge: 57, // NMPA — earliest age the DC pension can be accessed
   sex: 'neutral', // mortality basis for the lifetime-solvency metric
   windfalls: [],
@@ -1120,7 +1121,43 @@ function DerivedSavingsReadout({ derived }) {
   );
 }
 
-function TabContent({ tab, p, set, derived }) {
+// Read-only display of the voluntary Class 3 state-pension top-up result (from
+// the deterministic projection). Explains what was bought, its cost, or why
+// nothing was bought.
+function TopUpReadout({ p, topUp }) {
+  if (!topUp) return null;
+  const { yearsBought, totalCost, niAccrued, niWithTopUp } = topUp;
+  const full = 35;
+  const minY = 10;
+  let msg;
+  if (yearsBought > 0) {
+    msg =
+      `Buys ${yearsBought} voluntary Class 3 year${yearsBought === 1 ? '' : 's'} between retirement ` +
+      `and state pension age, lifting you to ${niWithTopUp}/${full} qualifying years. About £923/yr ` +
+      `(today's money); ${fmtGBP(totalCost)} in total funded from your pots over the bridge years.`;
+  } else if (niAccrued >= full) {
+    msg = `You already have ${niAccrued} qualifying years — the full state pension needs ${full}, so there's nothing to top up.`;
+  } else {
+    const bridge = Math.max(0, p.statePensionAge - p.retirementAge);
+    const reachable = niAccrued + Math.min(full - niAccrued, bridge);
+    if (bridge <= 0) {
+      msg =
+        'No years bought: you reach state pension age at (or before) retirement, so there are no ' +
+        'bridge years to fill. Add pre-retirement gap years to NI Qualifying Years instead.';
+    } else if (reachable < minY) {
+      msg =
+        `No years bought: even filling every available year you'd reach only ${reachable}/${full}, ` +
+        `below the ${minY} needed for any state pension.`;
+    } else {
+      msg =
+        "No years bought: your pots can't afford the contributions on top of your spending. Free " +
+        'up funds or lower expenses to enable it.';
+    }
+  }
+  return <InfoBox>{msg}</InfoBox>;
+}
+
+function TabContent({ tab, p, set, derived, topUp }) {
   switch (tab) {
     case 'Personal':
       return (
@@ -1181,7 +1218,7 @@ function TabContent({ tab, p, set, derived }) {
             step={1}
             format={fmtYrs}
             onChange={set('niContributionYears')}
-            help="National Insurance qualifying years already accrued before the projection starts. Each working year above the Lower Earnings Limit (£6,500 in 2025/26) adds one year. Full state pension requires 35 qualifying years; at least 10 are needed for any entitlement. If you plan to buy voluntary Class 3 top-ups for missing years, include those years here — each year currently costs around £900 and adds 1/35th of the full pension for life."
+            help="National Insurance qualifying years already accrued before the projection starts. Each working year above the Lower Earnings Limit (£6,500 in 2025/26) adds one year. Full state pension requires 35 qualifying years; at least 10 are needed for any entitlement. To model buying voluntary Class 3 years for the gap between retirement and state pension age, use the State Pension Top-up toggle below (it costs and funds them automatically). For gaps from before now, add those years here — each adds 1/35th of the full pension for life."
           />
           <Slider
             label="State Pension Age"
@@ -1203,6 +1240,15 @@ function TabContent({ tab, p, set, derived }) {
             onChange={set('statePensionDeferralYears')}
             help="Years to defer claiming your state pension past state pension age. Each deferred year permanently increases the amount by about 5.8% (1% per 9 weeks, new state pension rules). Deferring means more income later at the cost of drawing more from your pots in the gap years."
           />
+          <Toggle
+            label="State Pension Top-up (Class 3)"
+            value={p.topUpStatePension ? 'on' : 'off'}
+            optA={{ value: 'off', label: 'Off' }}
+            optB={{ value: 'on', label: 'Auto top-up' }}
+            onChange={(v) => set('topUpStatePension')(v === 'on')}
+            help="Off: your state pension reflects only the NI years you accrue by retirement. Auto top-up: the app buys voluntary Class 3 contributions to fill the gap toward the full 35 qualifying years — for the years between retirement and state pension age (when the gaps arise), and only if it can reach the 10-year minimum. Each year costs about £923 (2025/26), funded from your pots like any other spending, so it buys fewer years if you can't afford them, and never fabricates money. It recalculates automatically whenever you change your inputs. Gaps from before retirement aren't modelled here — add those to NI Qualifying Years above. Informational, not advice; check your own forecast at gov.uk/check-state-pension."
+          />
+          {p.topUpStatePension && <TopUpReadout p={p} topUp={topUp} />}
         </>
       );
 
@@ -2884,6 +2930,7 @@ export default function App() {
         niContributionYears: p.niContributionYears,
         statePensionAge: p.statePensionAge,
         statePensionDeferralYears: p.statePensionDeferralYears,
+        topUpStatePension: p.topUpStatePension,
         pensionAccessAge: p.pensionAccessAge,
         studentLoanPlan: p.studentLoanPlan || null,
         windfalls: p.windfalls,
@@ -2948,6 +2995,16 @@ export default function App() {
     ? { amount: firstYearDetail.availableForSavings, netTakeHome: firstYearDetail.netTakeHome }
     : null;
 
+  // Voluntary Class 3 state-pension top-up result, surfaced in the Personal tab.
+  const topUpInfo = summary
+    ? {
+        yearsBought: summary.class3YearsBought,
+        totalCost: summary.class3TotalCost,
+        niAccrued: summary.niYearsAccrued,
+        niWithTopUp: summary.niYearsWithTopUp,
+      }
+    : null;
+
   // ── Monte Carlo stochastic modelling ───────────────────────────────────────
   // All setState calls live inside the timeout callback (not the effect body)
   // to avoid the react-hooks/set-state-in-effect lint rule.
@@ -2978,6 +3035,7 @@ export default function App() {
           niContributionYears: p.niContributionYears,
           statePensionAge: p.statePensionAge,
           statePensionDeferralYears: p.statePensionDeferralYears,
+          topUpStatePension: p.topUpStatePension,
           pensionAccessAge: p.pensionAccessAge,
           studentLoanPlan: p.studentLoanPlan || null,
           windfalls: p.windfalls,
@@ -3442,7 +3500,13 @@ Use Available funds to see whether an early-retirement plan can bridge the gap u
               display: mobile && !sidebarOpen ? 'none' : 'block',
             }}
           >
-            <TabContent tab={activeTab} p={p} set={set} derived={derivedSavings} />
+            <TabContent
+              tab={activeTab}
+              p={p}
+              set={set}
+              derived={derivedSavings}
+              topUp={topUpInfo}
+            />
           </div>
 
           {/* Footer actions */}
@@ -3734,14 +3798,21 @@ Use Available funds to see whether an early-retirement plan can bridge the gap u
                     color={
                       displaySummary.projectedStatePension > 0 ? '#a78bfa' : 'var(--text-muted)'
                     }
-                    subtitle={
-                      displaySummary.projectedStatePension > 0
-                        ? displaySummary.statePensionEligibleAtRetirement
-                          ? `From age ${displaySummary.statePensionStartAge ?? displaySummary.statePensionAge} · ${displaySummary.niYearsAccrued} NI yrs`
-                          : `Starts age ${displaySummary.statePensionStartAge ?? displaySummary.statePensionAge} · ${displaySummary.niYearsAccrued} NI yrs`
-                        : `Only ${displaySummary.niYearsAccrued} qualifying NI yrs — need 10`
-                    }
-                    help="Your projected state pension, based on total NI qualifying years accrued by retirement. This is a real government entitlement (inflation-linked via triple lock), not an investment return. It offsets retirement expenses before drawing from personal pots."
+                    subtitle={(() => {
+                      const niShown =
+                        displaySummary.niYearsWithTopUp ?? displaySummary.niYearsAccrued;
+                      const bought = displaySummary.class3YearsBought ?? 0;
+                      const niLabel = `${niShown} NI yrs${bought > 0 ? ` (incl. ${bought} Class 3)` : ''}`;
+                      const startAge =
+                        displaySummary.statePensionStartAge ?? displaySummary.statePensionAge;
+                      if (displaySummary.projectedStatePension > 0) {
+                        return displaySummary.statePensionEligibleAtRetirement
+                          ? `From age ${startAge} · ${niLabel}`
+                          : `Starts age ${startAge} · ${niLabel}`;
+                      }
+                      return `Only ${niShown} qualifying NI yrs — need 10`;
+                    })()}
+                    help="Your projected state pension, based on total NI qualifying years accrued by retirement (plus any voluntary Class 3 years bought via the top-up toggle). This is a real government entitlement (inflation-linked via triple lock), not an investment return. It offsets retirement expenses before drawing from personal pots."
                   />
                 </div>
               );

@@ -56,6 +56,10 @@ export const LIFECYCLE_CONSTANTS = {
     // New state pension deferral: +1% per 9 weeks deferred ≈ 5.78%/year (linear,
     // non-compounding). Source: gov.uk/deferring-state-pension
     deferralUpliftPerYear: 0.0578,
+    // Voluntary Class 3 NI: cost of buying one qualifying year (2025/26:
+    // £17.75/week × 52). Today's money — inflated when paid. Each year bought
+    // adds 1/35 of the full state pension. Source: gov.uk/voluntary-national-insurance-contributions
+    class3AnnualCost: 923,
   },
   pension: {
     // Normal Minimum Pension Age (NMPA): earliest age a DC pension is accessible.
@@ -305,6 +309,12 @@ function applyGIAWithdrawal(bal, costBasis, gross) {
  *                                             statePensionAge (default 0). Each deferred
  *                                             year raises the weekly amount by 1% per
  *                                             9 weeks ≈ 5.8% (new state pension rules).
+ *   topUpStatePension?:     boolean,        - Buy voluntary Class 3 NI years during the
+ *                                             retirement→state-pension-age bridge to reach the
+ *                                             35 qualifying years for the full state pension.
+ *                                             Cost funded from the pots; buys fewer years if
+ *                                             unaffordable, never below the 10-year minimum
+ *                                             benefit. Default false.
  *   pensionAccessAge?:      number,         - Earliest age the DC pension can be accessed
  *                                             (NMPA; default 57). Before it, no PCLS or
  *                                             pension drawdown — spending is bridged from
@@ -416,6 +426,11 @@ export function projectLifecycle(
     niContributionYears,
     statePensionAge = LIFECYCLE_CONSTANTS.statePension.defaultStatePensionAge,
     statePensionDeferralYears = 0,
+    // When true, buy voluntary Class 3 NI years during the bridge between
+    // retirement and state pension age to top the state pension up toward the
+    // full 35 qualifying years. Cost is funded from the pots; see the retirement
+    // phase. Default false. Only meaningful with a retirement phase.
+    topUpStatePension = false,
     // Normal Minimum Pension Age — the earliest age a DC pension can be accessed
     // (2025/26: 55, rising to 57 in April 2028). Before it, no PCLS or drawdown.
     pensionAccessAge = LIFECYCLE_CONSTANTS.pension.defaultAccessAge,
@@ -447,6 +462,9 @@ export function projectLifecycle(
   // rounding of a solver-derived employee rate to 4 decimal places.
   const effectiveEmployerRate =
     employerMatch && employeePensionRate + 1e-4 < employerMatchThreshold ? 0 : employerPensionRate;
+
+  if (typeof topUpStatePension !== 'boolean')
+    throw new TypeError('topUpStatePension must be a boolean');
 
   assertNonNegativeInteger(niContributionYears, 'niContributionYears');
   assertPositiveInteger(statePensionAge, 'statePensionAge');
@@ -1129,6 +1147,12 @@ export function projectLifecycle(
   let retEntryMortgage = null;
   let retEntryUnsecured = null;
 
+  // Voluntary Class 3 NI years actually bought during the bridge, and their total
+  // (nominal) cost. Declared here so the summary can read them whether or not a
+  // retirement phase runs (they stay 0 without one).
+  let class3YearsBought = 0;
+  let class3TotalCost = 0;
+
   // ── Retirement phase ─────────────────────────────────────────────────────
   if (retirementOptions != null) {
     const {
@@ -1188,6 +1212,25 @@ export function projectLifecycle(
     // The PCLS path consumes the LSA upfront via calculatePCLS, so no tracking needed there.
     let remainingLSA = takePCLS ? 0 : PENSION_CONSTANTS.lumpSumAllowance;
 
+    // ── Voluntary Class 3 NI top-up target ───────────────────────────────────
+    // Fill the gap toward the 35 qualifying years for the full state pension by
+    // buying years during the bridge between retirement and state pension age —
+    // the years no longer worked, which is when these gaps arise. The number
+    // buyable is capped by that bridge window, and we only start buying if the
+    // topped-up total can clear the 10-year minimum (below which the pension is
+    // £0, so buying would be wasted). Contributions before state pension age
+    // never overlap the pension income, so affordability (below) doesn't depend
+    // on the benefit — no circularity. Past gap years before retirement aren't
+    // modelled here; represent those via the NI Qualifying Years input instead.
+    const { qualifyingYearsForFull, minimumQualifyingYears, class3AnnualCost } =
+      LIFECYCLE_CONSTANTS.statePension;
+    const bridgeYears = Math.max(0, statePensionAge - retirementAge);
+    const maxBuyableYears = Math.min(Math.max(0, qualifyingYearsForFull - niYears), bridgeYears);
+    let class3YearsRemaining =
+      topUpStatePension && niYears + maxBuyableYears >= minimumQualifyingYears
+        ? maxBuyableYears
+        : 0;
+
     // ── Year-by-year loop ───────────────────────────────────────────────────
     for (let rAge = retirementAge; rAge <= maxAge; rAge++) {
       const rYear = retirementYear + (rAge - retirementAge);
@@ -1231,9 +1274,13 @@ export function projectLifecycle(
       const spStartAge = statePensionAge + statePensionDeferralYears;
       const spDeferralUplift =
         1 + LIFECYCLE_CONSTANTS.statePension.deferralUpliftPerYear * statePensionDeferralYears;
+      // Qualifying years including any Class 3 years bought so far. All buying
+      // finishes before statePensionAge (≤ spStartAge), so by the time the
+      // pension turns on this count is final.
+      const effectiveNiYears = niYears + class3YearsBought;
       const spGross =
-        rAge >= spStartAge && niYears >= LIFECYCLE_CONSTANTS.statePension.minimumQualifyingYears
-          ? round2(computeStatePension(niYears) * cumulTriplelock * spDeferralUplift)
+        rAge >= spStartAge && effectiveNiYears >= minimumQualifyingYears
+          ? round2(computeStatePension(effectiveNiYears) * cumulTriplelock * spDeferralUplift)
           : 0;
       const spTax = round2(calculateIncomeTax(spGross, retThresholdScale).totalTax);
       const spNet = round2(spGross - spTax);
@@ -1333,15 +1380,26 @@ export function projectLifecycle(
         pclsThisYear = true;
       }
 
+      // ── Voluntary Class 3 NI purchase (this year) ─────────────────────────
+      // A bridge year (before state pension age) buys one qualifying year while
+      // any remain to buy. The cost joins the funding need below at LOWEST
+      // priority, so essential spending is always funded first; the year is only
+      // "bought" if the whole need — including this cost — is met (see after the
+      // drawdown). Cost is today's money inflated to this year, like expenses.
+      const class3BuyYear = class3YearsRemaining > 0 && rAge < statePensionAge;
+      const class3CostThisYear = class3BuyYear ? round2(class3AnnualCost * cumulInflation) : 0;
+
       // ── Drawdown strategy ─────────────────────────────────────────────────
       // Priority: tax-free pension → CGT-exempt GIA harvest → ISA → taxable GIA → taxable pension
       // Mortgage, unsecured debt payments, and one-off expenses are added on top of
-      // living expenses so the full drawdown need is accounted for.
+      // living expenses so the full drawdown need is accounted for. Any voluntary
+      // Class 3 cost is added last (lowest priority).
       let remaining = round2(
         Math.max(0, targetExpenses - spNet) +
           mortgagePaymentThisRetYear +
           retUnsecuredPayments +
-          retExpenseAmt
+          retExpenseAmt +
+          class3CostThisYear
       );
 
       // 1. Pension: fill remaining personal allowance after state pension (no tax)
@@ -1468,7 +1526,22 @@ export function projectLifecycle(
       const totalIncomeTax = round2(
         calculateIncomeTax(spGross + pensionTaxableIncome, retThresholdScale).totalTax
       );
-      const shortfall = round2(Math.max(0, remaining));
+      const unmet = round2(Math.max(0, remaining));
+      // The Class 3 cost sat at the bottom of the need, so any unmet amount eats
+      // it first: the year is bought only if the whole need (including the cost)
+      // was funded. If pots run dry partway through the cost, the year isn't
+      // bought — any partial draw (< one year's cost, only in a near-exhausted
+      // year) is absorbed, keeping the essential-spending shortfall below honest.
+      const class3Unfunded = round2(Math.min(class3CostThisYear, unmet));
+      const class3YearBought = class3CostThisYear > 0 && class3Unfunded <= 0.005; // whole cost funded
+      const class3ContributionThisYear = class3YearBought ? class3CostThisYear : 0;
+      if (class3YearBought) {
+        class3YearsBought += 1;
+        class3YearsRemaining -= 1;
+        class3TotalCost = round2(class3TotalCost + class3ContributionThisYear);
+      }
+      // Essential shortfall excludes the discretionary (and possibly skipped) Class 3.
+      const shortfall = round2(Math.max(0, unmet - class3Unfunded));
       // A large one-off expense can push the shortfall past the year's target
       // expenses; net income achieved is floored at 0 rather than reported negative.
       const netAchieved = round2(Math.max(0, targetExpenses - shortfall));
@@ -1552,6 +1625,8 @@ export function projectLifecycle(
         incomeTax: totalIncomeTax,
         netIncomeAchieved: netAchieved,
         shortfall,
+        class3Contribution: class3ContributionThisYear,
+        class3YearBought,
 
         windfall: retWindfallAmt,
         windfallLabels: retWindfall?.labels ?? [],
@@ -1621,8 +1696,10 @@ export function projectLifecycle(
   const summaryStartAge = statePensionAge + statePensionDeferralYears;
   const summaryDeferralUplift =
     1 + LIFECYCLE_CONSTANTS.statePension.deferralUpliftPerYear * statePensionDeferralYears;
+  // Qualifying years including any Class 3 years bought in the retirement phase.
+  const niYearsWithTopUp = niYears + class3YearsBought;
   const projectedStatePension = round2(
-    computeStatePension(niYears) *
+    computeStatePension(niYearsWithTopUp) *
       Math.pow(1 + baseTriplelockForSummary, Math.max(0, summaryStartAge - currentAge)) *
       summaryDeferralUplift
   );
@@ -1649,6 +1726,9 @@ export function projectLifecycle(
       totalDebt,
       netWorth: round2(totalSavings - totalDebt),
       niYearsAccrued: niYears,
+      class3YearsBought,
+      class3TotalCost,
+      niYearsWithTopUp,
       projectedStatePension,
       statePensionAge,
       statePensionStartAge: summaryStartAge,
