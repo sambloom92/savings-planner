@@ -1555,6 +1555,164 @@ describe('voluntary Class 3 state pension top-up', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Flexible (dynamic) retirement date
+// ---------------------------------------------------------------------------
+
+describe('flexible (dynamic) retirement date', () => {
+  // An under-funded plan: small pots + high target spend → off track at 65.
+  const flexProfile = {
+    ...baseProfile,
+    currentAge: 60,
+    retirementAge: 65,
+    grossIncome: 60_000,
+    annualLivingExpenses: 20_000,
+    employeePensionRate: 0.1,
+    employerPensionRate: 0.05,
+    niContributionYears: 35,
+  };
+  const flexRates = {
+    savingsRate: 0.05,
+    retirementRate: 0.04,
+    wageGrowthRate: 0.03,
+    inflationRate: 0.025,
+    boeRate: 0.0475,
+  };
+  const underfundedPots = { pensionBalance: 50_000, isaBalance: 30_000 };
+  const underfundedRetOpts = { targetNetAnnualExpenses: 35_000, maxAge: 90, takePCLS: true };
+
+  it('off by default: retires at the target age with no delay', () => {
+    const r = projectLifecycle(flexProfile, flexRates, underfundedPots, underfundedRetOpts);
+    assert.equal(r.summary.retirementAge, 65);
+    assert.equal(r.summary.nominalRetirementAge, 65);
+    assert.equal(r.summary.retirementDelayYears, 0);
+    assert.equal(r.summary.flexibleRetirement, false);
+  });
+
+  it('flexibleRetirement with a 0-year cap is an exact no-op', () => {
+    const fixed = projectLifecycle(flexProfile, flexRates, underfundedPots, underfundedRetOpts);
+    const flex0 = projectLifecycle(flexProfile, flexRates, underfundedPots, {
+      ...underfundedRetOpts,
+      flexibleRetirement: true,
+      maxRetirementDelayYears: 0,
+    });
+    assert.equal(flex0.summary.retirementAge, fixed.summary.retirementAge);
+    assert.equal(flex0.summary.retirementDelayYears, 0);
+    assert.equal(flex0.yearlyBreakdown.length, fixed.yearlyBreakdown.length);
+  });
+
+  it('postpones retirement when the plan is clearly off track at the target age', () => {
+    const flex = projectLifecycle(flexProfile, flexRates, underfundedPots, {
+      ...underfundedRetOpts,
+      flexibleRetirement: true,
+      maxRetirementDelayYears: 5,
+    });
+    assert.ok(flex.summary.retirementDelayYears > 0, 'retirement is delayed');
+    assert.equal(flex.summary.retirementAge, 65 + flex.summary.retirementDelayYears);
+    assert.equal(flex.summary.flexibleRetirement, true);
+    // Still accumulating (working) at the original target age.
+    const rowAt65 = flex.yearlyBreakdown.find((row) => row.age === 65);
+    assert.ok(rowAt65 && rowAt65.phase !== 'retirement', 'still working at age 65');
+    // The first retirement row starts at the delayed actual age.
+    const firstRet = flex.yearlyBreakdown.find((row) => row.phase === 'retirement');
+    assert.equal(firstRet.age, flex.summary.retirementAge);
+    // Delaying builds a larger pot at retirement entry than retiring on time.
+    const fixed = projectLifecycle(flexProfile, flexRates, underfundedPots, underfundedRetOpts);
+    assert.ok(flex.summary.pensionPot > fixed.summary.pensionPot, 'bigger pot from working longer');
+  });
+
+  it('does not postpone a well-funded plan even with flexibility on', () => {
+    const rich = projectLifecycle(
+      flexProfile,
+      flexRates,
+      { pensionBalance: 800_000, isaBalance: 400_000, giaBalance: 100_000 },
+      {
+        targetNetAnnualExpenses: 25_000,
+        maxAge: 90,
+        takePCLS: true,
+        flexibleRetirement: true,
+        maxRetirementDelayYears: 5,
+      }
+    );
+    assert.equal(rich.summary.retirementDelayYears, 0);
+    assert.equal(rich.summary.retirementAge, 65);
+  });
+
+  it('stops as soon as the plan is fundable — a partial delay below the cap', () => {
+    // Borderline funding: on track after a couple of extra years, not the full cap.
+    const partial = projectLifecycle(
+      {
+        ...flexProfile,
+        grossIncome: 70_000,
+        annualLivingExpenses: 18_000,
+        employeePensionRate: 0.15,
+        employerPensionRate: 0.08,
+      },
+      { ...flexRates, savingsRate: 0.06, retirementRate: 0.045 },
+      { pensionBalance: 250_000, isaBalance: 120_000, giaBalance: 20_000 },
+      {
+        targetNetAnnualExpenses: 48_000,
+        maxAge: 92,
+        takePCLS: true,
+        flexibleRetirement: true,
+        maxRetirementDelayYears: 8,
+      }
+    );
+    assert.ok(partial.summary.retirementDelayYears > 0, 'some delay');
+    assert.ok(partial.summary.retirementDelayYears < 8, 'stops before the cap');
+  });
+
+  it('does not change the projection horizon — the last row is still maxAge', () => {
+    const flex = projectLifecycle(flexProfile, flexRates, underfundedPots, {
+      ...underfundedRetOpts,
+      flexibleRetirement: true,
+      maxRetirementDelayYears: 5,
+    });
+    const rows = flex.yearlyBreakdown;
+    assert.equal(rows[rows.length - 1].age, underfundedRetOpts.maxAge);
+    // One row per year from currentAge to maxAge inclusive, regardless of the split.
+    assert.equal(rows.length, underfundedRetOpts.maxAge - flexProfile.currentAge + 1);
+  });
+
+  it('is deterministic under central assumptions (same inputs → same delay)', () => {
+    const opts = {
+      ...underfundedRetOpts,
+      flexibleRetirement: true,
+      maxRetirementDelayYears: 6,
+    };
+    const a = projectLifecycle(flexProfile, flexRates, underfundedPots, opts);
+    const b = projectLifecycle(flexProfile, flexRates, underfundedPots, opts);
+    assert.equal(a.summary.retirementDelayYears, b.summary.retirementDelayYears);
+  });
+
+  it('validates the flexible-retirement options', () => {
+    assert.throws(
+      () =>
+        projectLifecycle(flexProfile, flexRates, underfundedPots, {
+          ...underfundedRetOpts,
+          flexibleRetirement: 'yes',
+        }),
+      /flexibleRetirement must be a boolean/
+    );
+    assert.throws(
+      () =>
+        projectLifecycle(flexProfile, flexRates, underfundedPots, {
+          ...underfundedRetOpts,
+          maxRetirementDelayYears: -1,
+        }),
+      /maxRetirementDelayYears must be a non-negative integer/
+    );
+    assert.throws(
+      () =>
+        projectLifecycle(flexProfile, flexRates, underfundedPots, {
+          ...underfundedRetOpts,
+          maxRetirementDelayYears: 2.5,
+        }),
+      /maxRetirementDelayYears must be a non-negative integer/
+    );
+  });
+});
+
 // Small local rounding helper mirroring the module's round2, for test sums.
 function round2Test(n) {
   return Math.round(n * 100) / 100;

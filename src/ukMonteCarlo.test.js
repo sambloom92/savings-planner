@@ -305,6 +305,80 @@ describe('solvency metrics', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Flexible (dynamic) retirement date
+// ---------------------------------------------------------------------------
+
+describe('flexible retirement date', () => {
+  // A deliberately marginal plan so a meaningful fraction of trials go off track.
+  const flexProfile = {
+    currentAge: 55,
+    retirementAge: 62,
+    currentYear: 2025,
+    grossIncome: 65_000,
+    annualLivingExpenses: 18_000,
+    employeePensionRate: 0.12,
+    employerPensionRate: 0.06,
+    niContributionYears: 33,
+    pensionAccessAge: 57,
+  };
+  const flexPots = { pensionBalance: 200_000, isaBalance: 90_000, giaBalance: 10_000 };
+  const flexRet = { targetNetAnnualExpenses: 30_000, maxAge: 92, takePCLS: true };
+  const flexOpts = {
+    trials: 400,
+    seed: 12345,
+    preRetirementEquity: 0.8,
+    postRetirementEquity: 0.4,
+  };
+
+  it('reports a retirement distribution collapsed to the target when flexibility is off', () => {
+    const r = runMonteCarlo(flexProfile, rates, flexPots, { ...flexRet }, flexOpts);
+    assert.ok(r.retirement, 'retirement summary present');
+    assert.equal(r.retirement.flexible, false);
+    assert.equal(r.retirement.nominalAge, 62);
+    assert.equal(r.retirement.fractionDelayed, 0);
+    assert.equal(r.retirement.latestAge, 62);
+    assert.equal(r.retirement.distribution.length, 1);
+    assert.equal(r.retirement.distribution[0].age, 62);
+  });
+
+  it('postpones a fraction of trials and spreads the retirement age when flexible', () => {
+    const r = runMonteCarlo(
+      flexProfile,
+      rates,
+      flexPots,
+      { ...flexRet, flexibleRetirement: true, maxRetirementDelayYears: 5 },
+      flexOpts
+    );
+    assert.equal(r.retirement.flexible, true);
+    assert.ok(r.retirement.fractionDelayed > 0, 'some trials delayed');
+    assert.ok(r.retirement.fractionDelayed < 1, 'not all trials delayed');
+    assert.ok(r.retirement.latestAge > 62, 'at least one trial retires later');
+    assert.ok(r.retirement.latestAge <= 67, 'never beyond the cap (62 + 5)');
+    assert.ok(r.retirement.meanAge >= 62, 'mean age at or above the target');
+    // Distribution fractions cover every trial exactly once.
+    const totalFrac = r.retirement.distribution.reduce((s, d) => s + d.fraction, 0);
+    assert.ok(Math.abs(totalFrac - 1) < 1e-9, `fractions sum to 1, got ${totalFrac}`);
+    const totalCount = r.retirement.distribution.reduce((s, d) => s + d.count, 0);
+    assert.equal(totalCount, r.trialCount);
+  });
+
+  it('improves lifetime solvency versus retiring on time', () => {
+    const fixed = runMonteCarlo(flexProfile, rates, flexPots, { ...flexRet }, flexOpts);
+    const flex = runMonteCarlo(
+      flexProfile,
+      rates,
+      flexPots,
+      { ...flexRet, flexibleRetirement: true, maxRetirementDelayYears: 5 },
+      flexOpts
+    );
+    assert.ok(
+      flex.solvency.solventForLife >= fixed.solvency.solventForLife,
+      `flex ${flex.solvency.solventForLife} should beat fixed ${fixed.solvency.solventForLife}`
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Summary
 // ---------------------------------------------------------------------------
 
