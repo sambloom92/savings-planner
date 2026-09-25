@@ -135,6 +135,22 @@ const DEFAULTS = {
   // are clearly off track at the target age, up to the cap, before retiring.
   flexibleRetirement: false,
   maxRetirementDelayYears: 3,
+  // Spending guardrails (Monte Carlo only): flex retirement spending toward the
+  // sustainable level within a floor (£, essential spend) and ceiling (% of
+  // target; 100 = recovery-only). Sensitivity picks the drift band + step size.
+  spendingGuardrails: false,
+  spendingFloor: 20_000,
+  spendingCeilingPct: 100,
+  guardrailSensitivity: 'standard', // 'gentle' | 'standard' | 'responsive'
+};
+
+// Guardrail sensitivity presets → (band, step) for the engine. Band is how far
+// spending may drift from the sustainable rate before acting; step is the size
+// of each annual cut/raise.
+const GUARDRAIL_PRESETS = {
+  gentle: { band: 0.25, step: 0.05 },
+  standard: { band: 0.2, step: 0.1 },
+  responsive: { band: 0.15, step: 0.1 },
 };
 
 // The manual employee contribution percentage, floored at the employer's match
@@ -563,6 +579,87 @@ function SecHead({ children }) {
         {children}
       </span>
     </div>
+  );
+}
+
+// Compact spending fan for the guardrails readout: percentile bands of the
+// guardrail-allowed real spend across trials, with floor / target / ceiling
+// reference lines. Always in today's money (the budget is a real figure), so it
+// ignores the real/nominal toggle by design.
+function SpendingFan({ data, target, floor, ceilingPct, mobile }) {
+  if (!data || data.length < 2) return null;
+  const W = 480;
+  const H = mobile ? 150 : 180;
+  const padL = 8;
+  const padR = 92;
+  const padT = 12;
+  const padB = 22;
+  const kGBP = (v) => `£${Math.round(v / 1000)}k`;
+  const ages = data.map((d) => d.age);
+  const ageMin = ages[0];
+  const ageMax = ages[ages.length - 1];
+  const ceilVal = (ceilingPct / 100) * target;
+  const yMax = Math.max(target, ceilVal) * 1.04;
+  const yMin = Math.max(0, floor * 0.96);
+  const xOf = (age) => padL + ((age - ageMin) / (ageMax - ageMin || 1)) * (W - padL - padR);
+  const yOf = (v) => padT + ((yMax - v) / (yMax - yMin || 1)) * (H - padT - padB);
+  const band = (loKey, hiKey) => {
+    const top = data.map((d) => `${xOf(d.age).toFixed(1)},${yOf(d[hiKey]).toFixed(1)}`);
+    const bot = data.map((d) => `${xOf(d.age).toFixed(1)},${yOf(d[loKey]).toFixed(1)}`).reverse();
+    return `M${top.join(' L')} L${bot.join(' L')} Z`;
+  };
+  const poly = (key) =>
+    `M${data.map((d) => `${xOf(d.age).toFixed(1)},${yOf(d[key]).toFixed(1)}`).join(' L')}`;
+  const gold = '#d4af37';
+  const xTicks = [ageMin, Math.round((ageMin + ageMax) / 2), ageMax];
+  const refs = [
+    { v: target, color: 'var(--text-secondary)', label: `Target ${kGBP(target)}` },
+    { v: floor, color: '#f43f5e', label: `Floor ${kGBP(floor)}` },
+  ];
+  if (ceilingPct > 100) refs.push({ v: ceilVal, color: gold, label: `Ceiling ${kGBP(ceilVal)}` });
+  return (
+    <svg
+      viewBox={`0 0 ${W} ${H}`}
+      style={{ width: '100%', height: 'auto', display: 'block' }}
+      role="img"
+      aria-label="Distribution of guardrail-adjusted retirement spending by age"
+    >
+      <path d={band('p10', 'p90')} fill="rgba(212,175,55,0.13)" />
+      <path d={band('p25', 'p75')} fill="rgba(212,175,55,0.28)" />
+      <path d={poly('p50')} fill="none" style={{ stroke: gold }} strokeWidth="1.5" />
+      {refs.map((r) => (
+        <g key={r.label}>
+          <line
+            x1={padL}
+            x2={W - padR}
+            y1={yOf(r.v)}
+            y2={yOf(r.v)}
+            stroke={r.color}
+            strokeWidth="1"
+            strokeDasharray="3 3"
+            opacity="0.8"
+          />
+          <text
+            x={W - padR + 5}
+            y={yOf(r.v) + 3}
+            style={{ fill: r.color, fontSize: 10, fontFamily: 'var(--font-mono)' }}
+          >
+            {r.label}
+          </text>
+        </g>
+      ))}
+      {xTicks.map((age) => (
+        <text
+          key={age}
+          x={xOf(age)}
+          y={H - 6}
+          textAnchor={age === ageMin ? 'start' : age === ageMax ? 'end' : 'middle'}
+          style={{ fill: 'var(--text-muted)', fontSize: 10, fontFamily: 'var(--font-mono)' }}
+        >
+          {age}
+        </text>
+      ))}
+    </svg>
   );
 }
 
@@ -2007,6 +2104,109 @@ function TabContent({ tab, p, set, derived, topUp }) {
               'The de-risking glide path stays anchored to your original target age (it can’t depend on a retirement date that itself depends on returns), and the delay never looks into the future — it reacts only to what has already happened by that age.'
             }
           </InfoBox>
+          <SecHead>Spending Guardrails</SecHead>
+          <Toggle
+            label="Flex spending in retirement"
+            value={p.spendingGuardrails ? 'yes' : 'no'}
+            optA={{ value: 'yes', label: 'On' }}
+            optB={{ value: 'no', label: 'Off' }}
+            onChange={(v) => set('spendingGuardrails')(v === 'yes')}
+            help="Models a retiree who adjusts spending to conditions: trim when the pot has fallen behind what it can sustainably support, restore (and optionally raise) when ahead — bounded by a hard floor and a ceiling. Only affects the Monte Carlo fan and solvency; the central projection always spends the target."
+          />
+          {p.spendingGuardrails && (
+            <>
+              <Slider
+                label="Essential expenses (floor)"
+                value={p.spendingFloor}
+                min={5_000}
+                max={p.targetNetExpenses}
+                step={1_000}
+                format={(v) =>
+                  `${fmtGBP(v)} · ${Math.round((100 * v) / (p.targetNetExpenses || 1))}% of target`
+                }
+                onChange={(v) => set('spendingFloor')(Math.min(v, p.targetNetExpenses))}
+                allowInput
+                help="Your non-negotiable spending — the level guardrails will never cut below. Below this a bad trial counts as a genuine shortfall, exactly as today; above it, a squeeze is modelled as reduced spending rather than ruin. In today's money."
+              />
+              <Slider
+                label="Spending ceiling"
+                value={p.spendingCeilingPct}
+                min={100}
+                max={150}
+                step={5}
+                format={(v) =>
+                  `${v}% of target${v > 100 ? ` · ${fmtGBP((v / 100) * p.targetNetExpenses)}` : ' · recovery only'}`
+                }
+                onChange={set('spendingCeilingPct')}
+                allowInput
+                help="The most guardrails will let spending rise to in good times. At 100% (recovery only), raises can restore earlier cuts but never exceed your target — surpluses accrue as a bigger cushion. Above 100% turns on the prosperity rule: strong markets let you spend more, up to this cap (mildly worsens solvency, since spending a surplus re-exposes it)."
+              />
+              {/* Sensitivity preset (band + step) */}
+              <div style={{ marginBottom: 20 }}>
+                <div style={{ marginBottom: 6, display: 'flex', alignItems: 'center' }}>
+                  <span
+                    style={{
+                      color: 'var(--text-secondary)',
+                      fontSize: 11,
+                      letterSpacing: '0.07em',
+                      textTransform: 'uppercase',
+                      fontWeight: 500,
+                    }}
+                  >
+                    Sensitivity
+                  </span>
+                  <HelpTip text="How reactive the guardrails are. Gentle: a wide tolerance band and small 5% steps — spending moves rarely and slowly. Responsive: a narrow band and larger steps — spending tracks the sustainable level more tightly. Standard sits between." />
+                </div>
+                <div
+                  style={{
+                    display: 'flex',
+                    borderRadius: 6,
+                    overflow: 'hidden',
+                    border: '1px solid var(--border-bright)',
+                  }}
+                >
+                  {[
+                    { value: 'gentle', label: 'Gentle' },
+                    { value: 'standard', label: 'Standard' },
+                    { value: 'responsive', label: 'Responsive' },
+                  ].map((opt) => (
+                    <button
+                      key={opt.value}
+                      onClick={() => set('guardrailSensitivity')(opt.value)}
+                      style={{
+                        flex: 1,
+                        padding: '7px 10px',
+                        background:
+                          p.guardrailSensitivity === opt.value
+                            ? 'var(--accent-gold)'
+                            : 'var(--bg-input)',
+                        color:
+                          p.guardrailSensitivity === opt.value
+                            ? 'var(--accent-gold-text)'
+                            : 'var(--text-secondary)',
+                        border: 'none',
+                        cursor: 'pointer',
+                        fontFamily: 'var(--font-body)',
+                        fontSize: 12,
+                        fontWeight: p.guardrailSensitivity === opt.value ? 600 : 400,
+                        transition: 'all 0.15s',
+                      }}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </>
+          )}
+          <InfoBox>
+            {
+              'Each year of each Monte Carlo trial, the model checks what constant spending your current pot could sustain for the rest of the plan under central assumptions — accounting for the state pension and pension-access age, and never peeking at the trial’s own future returns.\n\n'
+            }
+            {
+              'If your spending has drifted above that sustainable level it is trimmed a step; if it is comfortably below, it is restored (up to the ceiling). Cuts stop at your essential-expenses floor. This converts many would-be shortfalls into survivable spending squeezes, so lifetime solvency rises — at the cost of a lower realised standard of living in the bad trials, which the spending fan and summary make explicit.'
+            }
+          </InfoBox>
         </>
       );
 
@@ -3092,6 +3292,15 @@ export default function App() {
           // projection always retires at the target, so it omits these.
           flexibleRetirement: p.flexibleRetirement,
           maxRetirementDelayYears: p.flexibleRetirement ? p.maxRetirementDelayYears : 0,
+          // Spending guardrails — also Monte Carlo only (they react to a trial's
+          // realised path). Omitted from the deterministic projection above.
+          spendingGuardrails: p.spendingGuardrails
+            ? {
+                floor: p.spendingFloor,
+                ceilingPct: p.spendingCeilingPct,
+                ...(GUARDRAIL_PRESETS[p.guardrailSensitivity] ?? GUARDRAIL_PRESETS.standard),
+              }
+            : null,
         };
 
         setMcResults(
@@ -4254,6 +4463,95 @@ Use Available funds to see whether an early-retirement plan can bridge the gap u
                           );
                         })}
                       </div>
+                    )}
+                  </div>
+                )}
+                {/* Spending-guardrails summary + fan */}
+                {mcResults?.spending?.active && (
+                  <div
+                    style={{
+                      margin: '12px 16px 0',
+                      padding: '10px 13px',
+                      borderRadius: 7,
+                      border: '1px solid var(--border)',
+                      background: 'var(--bg-card)',
+                    }}
+                  >
+                    <div
+                      style={{
+                        display: 'flex',
+                        alignItems: 'baseline',
+                        gap: 8,
+                        flexWrap: 'wrap',
+                        marginBottom: 8,
+                      }}
+                    >
+                      <span
+                        style={{
+                          fontSize: 10,
+                          letterSpacing: '0.08em',
+                          textTransform: 'uppercase',
+                          color: 'var(--text-muted)',
+                          fontFamily: 'var(--font-mono)',
+                        }}
+                      >
+                        Spending guardrails
+                      </span>
+                      {mcResults.spending.fractionEverCut > 0 ? (
+                        <span
+                          style={{
+                            fontSize: 12,
+                            color: 'var(--text-secondary)',
+                            fontFamily: 'var(--font-body)',
+                            lineHeight: 1.5,
+                          }}
+                        >
+                          Spending trimmed below target in{' '}
+                          <strong style={{ color: 'var(--accent-gold)' }}>
+                            {fmtPct(mcResults.spending.fractionEverCut * 100)}
+                          </strong>{' '}
+                          of trials · worst 10% cut to{' '}
+                          <strong style={{ color: 'var(--text-primary)' }}>
+                            {fmtPct(mcResults.spending.worstLowestPctOfTarget * 100)}
+                          </strong>{' '}
+                          of target · reached the floor in{' '}
+                          {fmtPct(mcResults.spending.fractionHitFloor * 100)}
+                          {mcResults.spending.ceilingPct > 100 &&
+                            ` · raised above target in ${fmtPct(mcResults.spending.fractionAboveTarget * 100)}`}
+                        </span>
+                      ) : (
+                        <span
+                          style={{
+                            fontSize: 12,
+                            color: 'var(--text-secondary)',
+                            fontFamily: 'var(--font-body)',
+                            lineHeight: 1.5,
+                          }}
+                        >
+                          No trial needed to trim spending — the target held in every trial.
+                        </span>
+                      )}
+                    </div>
+                    {mcResults.spending.percentileData.length > 1 && (
+                      <>
+                        <SpendingFan
+                          data={mcResults.spending.percentileData}
+                          target={mcResults.spending.target}
+                          floor={mcResults.spending.floor}
+                          ceilingPct={mcResults.spending.ceilingPct}
+                          mobile={mobile}
+                        />
+                        <div
+                          style={{
+                            fontSize: 10,
+                            color: 'var(--text-muted)',
+                            fontFamily: 'var(--font-mono)',
+                            marginTop: 2,
+                          }}
+                        >
+                          Guardrail-adjusted spending, today&apos;s £ · band p10–p90, line median
+                        </div>
+                      </>
                     )}
                   </div>
                 )}

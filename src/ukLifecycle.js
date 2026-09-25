@@ -395,6 +395,14 @@ function applyGIAWithdrawal(bal, costBasis, gross) {
  *                                       already happened. Meaningful mainly for stochastic runs.
  *   maxRetirementDelayYears?: number, - Max whole years retirement can be postponed when
  *                                       flexibleRetirement is on (default 0).
+ *   spendingGuardrails?: {            - If present, flex retirement spending each year toward the
+ *     floor:        number,             central-assumptions sustainable level (no peeking), bounded
+ *     ceilingPct?:  number,            below by floor (£/yr, today's money — essential spend) and
+ *     band?:        number,            above by ceilingPct (% of target, ≥100; 100 = recovery-only).
+ *     step?:        number,            band = fractional drift from sustainable before acting
+ *   } | null,                          (default 0.2); step = fractional cut/raise per year (default
+ *                                      0.1). Like flexibleRetirement, only meaningful under Monte
+ *                                      Carlo — it is a behavioural decision rule, simulated in full.
  * } | null} [retirementOptions]
  *
  * @returns {{
@@ -731,14 +739,15 @@ export function projectLifecycle(
   const TEST_PENSION_GROSSUP = 1 / (1 - 0.75 * 0.2);
 
   /**
-   * Decide, using only central assumptions and balances known at `atAge`,
-   * whether the person can fund `targetNetAnnualExpenses` (today's money) for
-   * the rest of the plan. A rough two-bucket real-terms rundown: accessible
-   * pots (ISA + GIA) then the locked pension once past its access age, with the
-   * state pension switched on at its (deferred) start age. Deliberately simple
-   * and slightly conservative — it is a stop-work decision rule, not the model.
+   * Real-terms two-bucket rundown from `atAge`: can the pots fund `spendReal`
+   * (today's money) of net spending every year to the horizon under central
+   * assumptions? Accessible pots (ISA + GIA) are drawn first, then the locked
+   * pension once past its access age (grossed up for tax), with the state
+   * pension switched on at its (deferred) start age and debt cleared from
+   * spendable pots up front. Never peeks at realised future returns — it is a
+   * decision rule, not the model. Deliberately simple and slightly conservative.
    */
-  function onTrackToRetire(
+  function rundownSurvives(
     atAge,
     pension,
     isa,
@@ -746,11 +755,9 @@ export function projectLifecycle(
     mortgage,
     unsecured,
     niYearsNow,
-    cumulInflNow
+    cumulInflNow,
+    spendReal
   ) {
-    if (retirementOptions == null) return true;
-    const targetReal = retirementOptions.targetNetAnnualExpenses ?? 0;
-    if (targetReal <= 0) return true;
     const horizon = retirementOptions.maxAge ?? 90;
     const deflate = cumulInflNow > 0 ? 1 / cumulInflNow : 1;
 
@@ -768,7 +775,7 @@ export function projectLifecycle(
     const spStart = statePensionAge + statePensionDeferralYears;
 
     for (let a = atAge; a <= horizon; a++) {
-      let need = Math.max(0, targetReal - (a >= spStart ? stateReal : 0));
+      let need = Math.max(0, spendReal - (a >= spStart ? stateReal : 0));
       if (need > 0) {
         const fromAccessible = Math.min(accessible, need);
         accessible -= fromAccessible;
@@ -784,6 +791,101 @@ export function projectLifecycle(
       locked *= 1 + centralRealReturn;
     }
     return true;
+  }
+
+  // Flexible-retirement on-track test: can the target spend be funded for life?
+  function onTrackToRetire(
+    atAge,
+    pension,
+    isa,
+    gia,
+    mortgage,
+    unsecured,
+    niYearsNow,
+    cumulInflNow
+  ) {
+    if (retirementOptions == null) return true;
+    const targetReal = retirementOptions.targetNetAnnualExpenses ?? 0;
+    if (targetReal <= 0) return true;
+    return rundownSurvives(
+      atAge,
+      pension,
+      isa,
+      gia,
+      mortgage,
+      unsecured,
+      niYearsNow,
+      cumulInflNow,
+      targetReal
+    );
+  }
+
+  // Largest real (today's-money) net spend the pots can sustain from `atAge` to
+  // the horizon under central assumptions — the spending guardrails steer toward
+  // this. Found by bisection on rundownSurvives, which is monotonic in spend
+  // (more spending is never easier to sustain). ~30 iterations gives sub-pound
+  // resolution on any realistic pot.
+  function sustainableSpendReal(
+    atAge,
+    pension,
+    isa,
+    gia,
+    mortgage,
+    unsecured,
+    niYearsNow,
+    cumulInflNow
+  ) {
+    const deflate = cumulInflNow > 0 ? 1 / cumulInflNow : 1;
+    const totalReal = Math.max(0, (pension + isa + gia) * deflate);
+    // Upper bound: drawing the whole (real) pot plus the state pension in a single
+    // year cannot be sustained beyond it, so this always fails the rundown.
+    let hi = totalReal + computeStatePension(niYearsNow) + 1;
+    let lo = 0;
+    for (let iter = 0; iter < 30; iter++) {
+      const mid = (lo + hi) / 2;
+      if (
+        rundownSurvives(
+          atAge,
+          pension,
+          isa,
+          gia,
+          mortgage,
+          unsecured,
+          niYearsNow,
+          cumulInflNow,
+          mid
+        )
+      ) {
+        lo = mid;
+      } else {
+        hi = mid;
+      }
+    }
+    return lo;
+  }
+
+  // ── Spending guardrails (Monte Carlo behavioural model) ────────────────────
+  // Optionally flex retirement spending each year toward what the current pot can
+  // sustainably support (central assumptions, no peeking): trim when the plan has
+  // fallen behind, restore — and, if the ceiling allows, raise — when ahead,
+  // bounded by a hard £ floor (essential spend) and a ceiling (% of target). Like
+  // flexible retirement this only bites under Monte Carlo, and it is a decision
+  // rule; the resulting spend path is simulated in full. A 100% ceiling is
+  // "recovery only" (raises can restore prior cuts but never exceed the target).
+  let guardrails = null;
+  {
+    const gr = retirementOptions?.spendingGuardrails ?? null;
+    if (gr != null) {
+      const { floor, ceilingPct = 100, band = 0.2, step = 0.1 } = gr;
+      assertNonNegativeFinite(floor, 'retirementOptions.spendingGuardrails.floor');
+      if (!Number.isFinite(band) || band <= 0)
+        throw new RangeError('retirementOptions.spendingGuardrails.band must be a positive number');
+      if (!Number.isFinite(step) || step <= 0 || step >= 1)
+        throw new RangeError('retirementOptions.spendingGuardrails.step must be in (0, 1)');
+      if (!Number.isFinite(ceilingPct) || ceilingPct < 100)
+        throw new RangeError('retirementOptions.spendingGuardrails.ceilingPct must be >= 100');
+      guardrails = { floor, ceilingPct, band, step };
+    }
   }
 
   // Running cumulative factors for year-by-year rate variation.
@@ -1354,6 +1456,16 @@ export function projectLifecycle(
         ? maxBuyableYears
         : 0;
 
+    // ── Spending guardrails state (real, today's money) ──────────────────────
+    // Floor is clamped to the target (a floor above target would be nonsensical);
+    // the current allowed spend starts at the target and flexes within [floor,
+    // ceiling] as the guardrails react to the pot each year.
+    const grFloor = guardrails ? Math.min(guardrails.floor, targetNetAnnualExpenses) : 0;
+    const grCeiling = guardrails
+      ? (guardrails.ceilingPct / 100) * targetNetAnnualExpenses
+      : Infinity;
+    let grSpendReal = targetNetAnnualExpenses;
+
     // ── Year-by-year loop ───────────────────────────────────────────────────
     for (let rAge = actualRetirementAge; rAge <= maxAge; rAge++) {
       const rYear = actualRetirementYear + (rAge - actualRetirementAge);
@@ -1384,9 +1496,38 @@ export function projectLifecycle(
       thresholdScale *= 1 + yrRet.inflationRate - fiscalDragRate;
       cumulTriplelock *= 1 + yrRetTriplelock;
 
+      // ── Spending guardrails ──────────────────────────────────────────────
+      // Flex the real spend toward what the opening pot can sustainably support
+      // (central assumptions, no peeking). Trim if we've drifted above the
+      // sustainable rate by more than the band; restore/raise if below it. The
+      // adjustment is a bounded step so spending moves smoothly, then is clamped
+      // to [floor, ceiling]. Reacts only to what has already happened.
+      let guardrailAction = 'none';
+      if (guardrails) {
+        const sustainable = sustainableSpendReal(
+          rAge,
+          pensionBal,
+          isaBal,
+          giaBal,
+          mortgageBalance,
+          debts.reduce((s, d) => s + d.balance, 0),
+          niYears,
+          cumulInflation
+        );
+        if (grSpendReal > sustainable * (1 + guardrails.band)) {
+          grSpendReal = grSpendReal * (1 - guardrails.step);
+          guardrailAction = 'cut';
+        } else if (grSpendReal < sustainable * (1 - guardrails.band)) {
+          grSpendReal = grSpendReal * (1 + guardrails.step);
+          guardrailAction = 'raise';
+        }
+        grSpendReal = Math.min(grCeiling, Math.max(grFloor, grSpendReal));
+      }
+      const effectiveTargetReal = guardrails ? grSpendReal : targetNetAnnualExpenses;
+
       // Inflation-adjusted target net expenses — inflated from today (currentAge),
       // not from retirement date, so the input figure represents today's purchasing power.
-      const targetExpenses = round2(targetNetAnnualExpenses * cumulInflation);
+      const targetExpenses = round2(effectiveTargetReal * cumulInflation);
 
       // Fiscal-drag-adjusted threshold scale for this retirement year.
       const retThresholdScale = thresholdScale;
@@ -1735,6 +1876,10 @@ export function projectLifecycle(
         phase: 'retirement',
 
         targetNetExpenses: targetExpenses,
+        // Spending-guardrails telemetry (real, today's money). Null-safe: when
+        // guardrails are off, the budget just equals the target and no action fires.
+        spendingBudgetReal: guardrails ? round2(grSpendReal) : null,
+        guardrailAction,
         mortgagePayment: mortgagePaymentThisRetYear,
         unsecuredDebtPayments: retUnsecuredPayments,
         statePensionGross: spGross,

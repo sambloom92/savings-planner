@@ -1713,6 +1713,149 @@ describe('flexible (dynamic) retirement date', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Spending guardrails
+// ---------------------------------------------------------------------------
+
+describe('spending guardrails', () => {
+  const grProfile = {
+    ...baseProfile,
+    currentAge: 60,
+    retirementAge: 65,
+    grossIncome: 60_000,
+    annualLivingExpenses: 20_000,
+    employeePensionRate: 0.1,
+    employerPensionRate: 0.05,
+    niContributionYears: 35,
+  };
+  const grRates = {
+    savingsRate: 0.05,
+    retirementRate: 0.04,
+    wageGrowthRate: 0.03,
+    inflationRate: 0.025,
+    boeRate: 0.0475,
+  };
+  const grPots = { pensionBalance: 200_000, isaBalance: 120_000, giaBalance: 20_000 };
+  const grRet = { targetNetAnnualExpenses: 35_000, maxAge: 90, takePCLS: true };
+
+  // A returns path that crashes in early retirement (sequence risk) then recovers.
+  const totalYears = grRet.maxAge - grProfile.currentAge + 1;
+  const crash = Array.from({ length: totalYears }, (_, i) => {
+    const age = grProfile.currentAge + i;
+    const bad = age >= 65 && age <= 68;
+    return { savingsRate: bad ? -0.15 : 0.04, retirementRate: bad ? -0.15 : 0.04 };
+  });
+  const retBudgets = (r) =>
+    r.yearlyBreakdown.filter((x) => x.phase === 'retirement').map((x) => x.spendingBudgetReal);
+
+  it('off by default: no budget telemetry on retirement rows', () => {
+    const r = projectLifecycle(grProfile, grRates, grPots, grRet, crash);
+    const retRows = r.yearlyBreakdown.filter((x) => x.phase === 'retirement');
+    assert.ok(retRows.every((x) => x.spendingBudgetReal === null));
+    assert.ok(retRows.every((x) => x.guardrailAction === 'none'));
+  });
+
+  it('trims spending after a downturn, cutting the shortfall count', () => {
+    const off = projectLifecycle(grProfile, grRates, grPots, grRet, crash);
+    const on = projectLifecycle(
+      grProfile,
+      grRates,
+      grPots,
+      { ...grRet, spendingGuardrails: { floor: 24_000, ceilingPct: 100 } },
+      crash
+    );
+    const offShort = off.yearlyBreakdown.filter(
+      (x) => x.phase === 'retirement' && x.shortfall > 0
+    ).length;
+    const onShort = on.yearlyBreakdown.filter(
+      (x) => x.phase === 'retirement' && x.shortfall > 0
+    ).length;
+    assert.ok(onShort < offShort, `guardrails should reduce shortfalls (${onShort} < ${offShort})`);
+    const budgets = retBudgets(on);
+    assert.ok(
+      budgets.some((b) => b < grRet.targetNetAnnualExpenses - 1),
+      'spending is trimmed below target in at least one year'
+    );
+    assert.ok(
+      on.yearlyBreakdown.some((x) => x.phase === 'retirement' && x.guardrailAction === 'cut'),
+      'a cut action is recorded'
+    );
+  });
+
+  it('never trims below the floor', () => {
+    const on = projectLifecycle(
+      grProfile,
+      grRates,
+      grPots,
+      { ...grRet, spendingGuardrails: { floor: 24_000, ceilingPct: 100 } },
+      crash
+    );
+    const min = Math.min(...retBudgets(on));
+    assert.ok(min >= 24_000 - 0.5, `budget floored at 24,000, got ${min}`);
+  });
+
+  it('recovery-only (ceiling 100%) never spends above target', () => {
+    const on = projectLifecycle(
+      grProfile,
+      grRates,
+      grPots,
+      { ...grRet, spendingGuardrails: { floor: 24_000, ceilingPct: 100 } },
+      crash
+    );
+    const max = Math.max(...retBudgets(on));
+    assert.ok(max <= grRet.targetNetAnnualExpenses + 0.5, `budget capped at target, got ${max}`);
+  });
+
+  it('prosperity (ceiling > 100%) can raise spending above target in a boom', () => {
+    // Strong returns from age 70 on a well-funded pot → guardrails raise spending.
+    const boom = crash.map((y, i) =>
+      grProfile.currentAge + i >= 70 ? { savingsRate: 0.12, retirementRate: 0.12 } : y
+    );
+    const on = projectLifecycle(
+      grProfile,
+      grRates,
+      { pensionBalance: 600_000, isaBalance: 300_000, giaBalance: 50_000 },
+      { ...grRet, spendingGuardrails: { floor: 24_000, ceilingPct: 130 } },
+      boom
+    );
+    const max = Math.max(...retBudgets(on));
+    assert.ok(max > grRet.targetNetAnnualExpenses + 1, 'spending rises above target');
+    assert.ok(max <= 1.3 * grRet.targetNetAnnualExpenses + 0.5, 'but never above the 130% ceiling');
+  });
+
+  it('a floor at or above target pins spending to the target', () => {
+    const on = projectLifecycle(
+      grProfile,
+      grRates,
+      grPots,
+      { ...grRet, spendingGuardrails: { floor: 40_000, ceilingPct: 100 } },
+      crash
+    );
+    // Floor is clamped to the target, so with a 100% ceiling the budget can't move.
+    assert.ok(retBudgets(on).every((b) => Math.abs(b - grRet.targetNetAnnualExpenses) < 0.5));
+  });
+
+  it('is deterministic under a fixed returns path', () => {
+    const opts = { ...grRet, spendingGuardrails: { floor: 24_000, ceilingPct: 110 } };
+    const a = projectLifecycle(grProfile, grRates, grPots, opts, crash);
+    const b = projectLifecycle(grProfile, grRates, grPots, opts, crash);
+    assert.deepEqual(retBudgets(a), retBudgets(b));
+  });
+
+  it('validates the guardrail options', () => {
+    const bad = (sg, re) =>
+      assert.throws(
+        () => projectLifecycle(grProfile, grRates, grPots, { ...grRet, spendingGuardrails: sg }),
+        re
+      );
+    bad({ floor: -1 }, /spendingGuardrails\.floor/);
+    bad({ floor: 20_000, band: 0 }, /band must be a positive number/);
+    bad({ floor: 20_000, step: 0 }, /step must be in \(0, 1\)/);
+    bad({ floor: 20_000, step: 1 }, /step must be in \(0, 1\)/);
+    bad({ floor: 20_000, ceilingPct: 99 }, /ceilingPct must be >= 100/);
+  });
+});
+
 // Small local rounding helper mirroring the module's round2, for test sums.
 function round2Test(n) {
   return Math.round(n * 100) / 100;
