@@ -301,7 +301,26 @@ function HelpTip({ text }) {
   );
 }
 
-function Slider({ label, value, min, max, step, format, onChange, color, allowInput, help }) {
+function Slider({
+  label,
+  value,
+  min,
+  max,
+  step,
+  format,
+  onChange,
+  color,
+  allowInput,
+  help,
+  // Optional muted caption shown under the track (e.g. "69% of target"). Purely
+  // informational — never part of the editable input, so `format` can stay a
+  // plain, round-trippable numeric string.
+  annotation,
+  // Optional inverse of `format` for the manual input box, for sliders whose
+  // display is scaled/units (e.g. a fraction shown as "pp"). Defaults to
+  // stripping non-numeric characters and parsing.
+  parse,
+}) {
   const [inputStr, setInputStr] = useState(null);
   const inputRef = useRef(null);
 
@@ -310,8 +329,10 @@ function Slider({ label, value, min, max, step, format, onChange, color, allowIn
   const accent = color ?? 'var(--accent-gold)';
 
   function parseCommit(str) {
-    const n = parseFloat(str.replace(/[^0-9.-]/g, ''));
-    if (!isNaN(n)) onChange(n);
+    const n = parse ? parse(str) : parseFloat(str.replace(/[^0-9.-]/g, ''));
+    // Manual entry is intentionally not clamped to [min, max] — the box lets
+    // users go beyond the slider's range; the thumb just pins at the end.
+    if (Number.isFinite(n)) onChange(n);
     setInputStr(null);
   }
 
@@ -432,6 +453,18 @@ function Slider({ label, value, min, max, step, format, onChange, color, allowIn
           {format(max)}
         </span>
       </div>
+      {annotation && (
+        <div
+          style={{
+            color: 'var(--text-muted)',
+            fontSize: 11,
+            fontFamily: 'var(--font-body)',
+            marginTop: 4,
+          }}
+        >
+          {annotation(value)}
+        </div>
+      )}
     </div>
   );
 }
@@ -1991,6 +2024,9 @@ function TabContent({ tab, p, set, derived, topUp }) {
             max={0.4}
             step={0.01}
             format={(v) => `−${(v * 100).toFixed(0)} pp`}
+            // Stored as a fraction but shown in percentage points, so manual
+            // entry ("20") is read back as 0.20 rather than 20.
+            parse={(s) => Math.abs(parseFloat(s.replace(/[^0-9.-]/g, ''))) / 100}
             onChange={set('mcBearSeverity')}
             allowInput
             help={
@@ -2121,12 +2157,13 @@ function TabContent({ tab, p, set, derived, topUp }) {
                 min={5_000}
                 max={p.targetNetExpenses}
                 step={1_000}
-                format={(v) =>
-                  `${fmtGBP(v)} · ${Math.round((100 * v) / (p.targetNetExpenses || 1))}% of target`
+                format={fmtGBP}
+                annotation={(v) =>
+                  `${Math.round((100 * v) / (p.targetNetExpenses || 1))}% of target · today's money`
                 }
                 onChange={(v) => set('spendingFloor')(Math.min(v, p.targetNetExpenses))}
                 allowInput
-                help="Your non-negotiable spending — the level guardrails will never cut below. Below this a bad trial counts as a genuine shortfall, exactly as today; above it, a squeeze is modelled as reduced spending rather than ruin. In today's money."
+                help="Your non-negotiable spending — the level guardrails will never cut below. Below this a bad trial counts as a genuine shortfall, exactly as today; above it, a squeeze is modelled as reduced spending rather than ruin. In today's money. Type a value directly to go beyond the slider range."
               />
               <Slider
                 label="Spending ceiling"
@@ -2134,12 +2171,15 @@ function TabContent({ tab, p, set, derived, topUp }) {
                 min={100}
                 max={150}
                 step={5}
-                format={(v) =>
-                  `${v}% of target${v > 100 ? ` · ${fmtGBP((v / 100) * p.targetNetExpenses)}` : ' · recovery only'}`
+                format={(v) => `${v}%`}
+                annotation={(v) =>
+                  v > 100
+                    ? `${fmtGBP((v / 100) * p.targetNetExpenses)} — prosperity rule on`
+                    : 'Recovery only — raises never exceed your target'
                 }
                 onChange={set('spendingCeilingPct')}
                 allowInput
-                help="The most guardrails will let spending rise to in good times. At 100% (recovery only), raises can restore earlier cuts but never exceed your target — surpluses accrue as a bigger cushion. Above 100% turns on the prosperity rule: strong markets let you spend more, up to this cap (mildly worsens solvency, since spending a surplus re-exposes it)."
+                help="The most guardrails will let spending rise to in good times, as a percentage of your target. At 100% (recovery only), raises can restore earlier cuts but never exceed your target — surpluses accrue as a bigger cushion. Above 100% turns on the prosperity rule: strong markets let you spend more, up to this cap (mildly worsens solvency, since spending a surplus re-exposes it). Type a value directly to go beyond the slider range."
               />
               {/* Sensitivity preset (band + step) */}
               <div style={{ marginBottom: 20 }}>
