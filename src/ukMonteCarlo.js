@@ -385,6 +385,33 @@ export function runMonteCarlo(profile, baseRates, pots, retirementOpts, opts = {
     return { pct, age: need > 0 && ruinSorted.length >= need ? ruinSorted[need - 1] : null };
   });
 
+  // ── Flexible-retirement distribution ────────────────────────────────────────
+  // When flexible retirement is enabled, each trial resolves its own actual
+  // stop-work age (later in trials that were off track at the target). Summarise
+  // that spread so the UI can show how often — and by how much — retirement was
+  // postponed across trials. With flexibility off every trial retires at the
+  // target, so all of this collapses to the nominal age (fractionDelayed = 0).
+  const retirementAges = successful.map((r) => r.summary.retirementAge);
+  const nominalRetAge = successful[0].summary.nominalRetirementAge;
+  const retSorted = [...retirementAges].sort((a, b) => a - b);
+  const distCounts = new Map();
+  for (const a of retirementAges) distCounts.set(a, (distCounts.get(a) ?? 0) + 1);
+  const retirement = {
+    nominalAge: nominalRetAge,
+    flexible: !!retirementOpts.flexibleRetirement,
+    maxDelayYears: retirementOpts.maxRetirementDelayYears ?? 0,
+    fractionDelayed: retirementAges.filter((a) => a > nominalRetAge).length / ranTrials,
+    meanAge: retirementAges.reduce((s, a) => s + a, 0) / ranTrials,
+    medianAge: pctile(retSorted, 50),
+    // 90th-percentile retirement age: only the latest-retiring 10% of trials go
+    // beyond this — a "how bad can the postponement get" figure.
+    p90Age: pctile(retSorted, 90),
+    latestAge: retSorted[retSorted.length - 1],
+    distribution: [...distCounts.entries()]
+      .map(([age, count]) => ({ age, count, fraction: count / ranTrials }))
+      .sort((a, b) => a.age - b.age),
+  };
+
   return {
     percentileData,
     availablePercentileData,
@@ -395,6 +422,7 @@ export function runMonteCarlo(profile, baseRates, pots, retirementOpts, opts = {
     // Per-trial ruin age (Infinity = solvent through the horizon) — used by the
     // locked single-trial view to mark when that trial went insolvent.
     shortfallAges,
+    retirement,
     solvency: {
       sex,
       solventToHorizon,

@@ -131,6 +131,10 @@ const DEFAULTS = {
   mcBearFreq: 12,
   mcBearSeverity: 0.15,
   mcCrisisPersistence: 0.6,
+  // Flexible retirement (Monte Carlo only): postpone retirement in trials that
+  // are clearly off track at the target age, up to the cap, before retiring.
+  flexibleRetirement: false,
+  maxRetirementDelayYears: 3,
 };
 
 // The manual employee contribution percentage, floored at the employer's match
@@ -1970,6 +1974,39 @@ function TabContent({ tab, p, set, derived, topUp }) {
               the aftermath of 2008.
             </p>
           </div>
+          <SecHead>Flexible Retirement Date</SecHead>
+          <Toggle
+            label="Postpone if off track"
+            value={p.flexibleRetirement ? 'yes' : 'no'}
+            optA={{ value: 'yes', label: 'On' }}
+            optB={{ value: 'no', label: 'Off' }}
+            onChange={(v) => set('flexibleRetirement')(v === 'yes')}
+            help="Models a realistic behavioural response: in trials where the plan is clearly off track at your target age (e.g. a downturn just wiped out part of your ISA), keep working a few more years to let things recover rather than retiring into the shortfall. Only affects the Monte Carlo fan and solvency figures — the central projection still retires at your target."
+          />
+          {p.flexibleRetirement && (
+            <Slider
+              label="Max years to postpone"
+              value={p.maxRetirementDelayYears}
+              min={1}
+              max={10}
+              step={1}
+              format={(v) => `${v} yr${v === 1 ? '' : 's'}`}
+              onChange={set('maxRetirementDelayYears')}
+              allowInput
+              help="The most any trial will delay retirement past your target age. Each trial stops as soon as the plan looks fundable under central assumptions, so most delay less than this — the cap only bites in the worst trials."
+            />
+          )}
+          <InfoBox>
+            {
+              'Each Monte Carlo trial checks, at your target retirement age, whether it can fund your target spending for the rest of the plan using central (expected) return assumptions — no peeking at the trial’s own future market path.\n\n'
+            }
+            {
+              'If not, it works one more year and re-checks, up to the cap. Trials that are on track retire exactly on time; only the ones knocked off course by a bad run postpone. This lifts the lower fan bands and lifetime-solvency figure, reflecting that a real person would rarely retire straight into an obvious shortfall.\n\n'
+            }
+            {
+              'The de-risking glide path stays anchored to your original target age (it can’t depend on a retirement date that itself depends on returns), and the delay never looks into the future — it reacts only to what has already happened by that age.'
+            }
+          </InfoBox>
         </>
       );
 
@@ -3050,6 +3087,11 @@ export default function App() {
           takePCLS: p.takePCLS,
           glideStartYears: p.glideStartYears,
           glideEndYears: p.glideEndYears,
+          // Flexible retirement is a Monte Carlo concept — it only bites in
+          // trials that are off track at the target age. The deterministic
+          // projection always retires at the target, so it omits these.
+          flexibleRetirement: p.flexibleRetirement,
+          maxRetirementDelayYears: p.flexibleRetirement ? p.maxRetirementDelayYears : 0,
         };
 
         setMcResults(
@@ -4122,6 +4164,97 @@ Use Available funds to see whether an early-retirement plan can bridge the gap u
                     }}
                   >
                     No results — check inputs
+                  </div>
+                )}
+                {/* Flexible-retirement postponement summary */}
+                {mcResults?.retirement?.flexible && (
+                  <div
+                    style={{
+                      margin: '12px 16px 0',
+                      padding: '10px 13px',
+                      borderRadius: 7,
+                      border: '1px solid var(--border)',
+                      background: 'var(--bg-card)',
+                    }}
+                  >
+                    <div
+                      style={{
+                        display: 'flex',
+                        alignItems: 'baseline',
+                        gap: 8,
+                        flexWrap: 'wrap',
+                        marginBottom: mcResults.retirement.fractionDelayed > 0 ? 8 : 0,
+                      }}
+                    >
+                      <span
+                        style={{
+                          fontSize: 10,
+                          letterSpacing: '0.08em',
+                          textTransform: 'uppercase',
+                          color: 'var(--text-muted)',
+                          fontFamily: 'var(--font-mono)',
+                        }}
+                      >
+                        Flexible retirement
+                      </span>
+                      {mcResults.retirement.fractionDelayed > 0 ? (
+                        <span
+                          style={{
+                            fontSize: 12,
+                            color: 'var(--text-secondary)',
+                            fontFamily: 'var(--font-body)',
+                            lineHeight: 1.5,
+                          }}
+                        >
+                          Postponed past age {mcResults.retirement.nominalAge} in{' '}
+                          <strong style={{ color: 'var(--accent-gold)' }}>
+                            {fmtPct(mcResults.retirement.fractionDelayed * 100)}
+                          </strong>{' '}
+                          of trials · median retirement age{' '}
+                          <strong style={{ color: 'var(--text-primary)' }}>
+                            {Math.round(mcResults.retirement.medianAge)}
+                          </strong>{' '}
+                          · latest-retiring 10% to {Math.round(mcResults.retirement.p90Age)}+ (up to{' '}
+                          {mcResults.retirement.latestAge})
+                        </span>
+                      ) : (
+                        <span
+                          style={{
+                            fontSize: 12,
+                            color: 'var(--text-secondary)',
+                            fontFamily: 'var(--font-body)',
+                            lineHeight: 1.5,
+                          }}
+                        >
+                          No trials needed to postpone — every trial could retire on time at age{' '}
+                          {mcResults.retirement.nominalAge}.
+                        </span>
+                      )}
+                    </div>
+                    {mcResults.retirement.fractionDelayed > 0 && (
+                      <div style={{ display: 'flex', gap: 3, flexWrap: 'wrap' }}>
+                        {mcResults.retirement.distribution.map((d) => {
+                          const delayed = d.age > mcResults.retirement.nominalAge;
+                          return (
+                            <span
+                              key={d.age}
+                              title={`${d.count} trial${d.count === 1 ? '' : 's'}`}
+                              style={{
+                                fontSize: 10,
+                                fontFamily: 'var(--font-mono)',
+                                padding: '2px 6px',
+                                borderRadius: 4,
+                                background: delayed ? 'rgba(212,175,55,0.12)' : 'var(--bg-input)',
+                                color: delayed ? 'var(--accent-gold)' : 'var(--text-muted)',
+                                whiteSpace: 'nowrap',
+                              }}
+                            >
+                              {d.age}: {fmtPct(d.fraction * 100)}
+                            </span>
+                          );
+                        })}
+                      </div>
+                    )}
                   </div>
                 )}
               </>

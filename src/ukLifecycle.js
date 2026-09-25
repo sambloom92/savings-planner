@@ -387,6 +387,14 @@ function applyGIAWithdrawal(bal, costBasis, gross) {
  *   pclsPercentage?:         number,  - Fraction of pension to take as PCLS (0–0.25, default 0.25)
  *   glideStartYears?:        number,  - Years before retirement to begin de-risking (default 10)
  *   glideEndYears?:          number,  - Years after retirement to finish de-risking (default 5)
+ *   flexibleRetirement?:     boolean, - If true, keep working past retirementAge while the plan
+ *                                       is not on track, up to maxRetirementDelayYears (default
+ *                                       false). The on-track test uses central assumptions only
+ *                                       and never peeks at future realised returns, so under
+ *                                       Monte Carlo a trial delays only in response to what has
+ *                                       already happened. Meaningful mainly for stochastic runs.
+ *   maxRetirementDelayYears?: number, - Max whole years retirement can be postponed when
+ *                                       flexibleRetirement is on (default 0).
  * } | null} [retirementOptions]
  *
  * @returns {{
@@ -679,8 +687,9 @@ export function projectLifecycle(
   // ── Projection state ─────────────────────────────────────────────────────
   const { annualSubscriptionLimit: ISA_LIMIT } = ISA_CONSTANTS;
 
-  const yearsToRetirement = retirementAge - currentAge;
-  const retirementYear = currentYear + yearsToRetirement;
+  // `retirementAge` is the TARGET (nominal). With flexible retirement the actual
+  // stop-work age can be later; it is resolved by the accumulation loop below
+  // and stored in actualRetirementAge / actualRetirementYear.
 
   let pensionBal = round2(initialPension);
   let isaBal = round2(initialISA);
@@ -699,6 +708,84 @@ export function projectLifecycle(
   const glideBeforeYrs = Math.max(0, _glideStart);
   const glideAfterYrs = Math.max(0, _glideEnd);
 
+  // ── Flexible (dynamic) retirement date ────────────────────────────────────
+  // Optionally keep working past the target retirement age when the plan is not
+  // yet on track, up to `maxRetirementDelayYears`. The on-track test is a
+  // lightweight central-assumptions solvency check run from the candidate age:
+  // it never looks at future realised returns, so under Monte Carlo a trial only
+  // reacts to what has actually happened by that age (no peeking). It is purely a
+  // decision rule — the resulting plan is still simulated in full afterwards.
+  const { flexibleRetirement = false, maxRetirementDelayYears = 0 } = retirementOptions ?? {};
+  if (typeof flexibleRetirement !== 'boolean')
+    throw new TypeError('retirementOptions.flexibleRetirement must be a boolean');
+  if (!Number.isInteger(maxRetirementDelayYears) || maxRetirementDelayYears < 0)
+    throw new RangeError(
+      'retirementOptions.maxRetirementDelayYears must be a non-negative integer'
+    );
+
+  // Central real (post-inflation) return used by the on-track drawdown check.
+  const centralRealReturn = (1 + retirementRate) / (1 + inflationRate) - 1;
+  // Approximate tax drag on pension withdrawals inside the check: ~25% is
+  // tax-free (PCLS/UFPLS), the taxable remainder roughly at the basic rate, so
+  // net draws from the pension bucket are grossed up by this factor (~1.18).
+  const TEST_PENSION_GROSSUP = 1 / (1 - 0.75 * 0.2);
+
+  /**
+   * Decide, using only central assumptions and balances known at `atAge`,
+   * whether the person can fund `targetNetAnnualExpenses` (today's money) for
+   * the rest of the plan. A rough two-bucket real-terms rundown: accessible
+   * pots (ISA + GIA) then the locked pension once past its access age, with the
+   * state pension switched on at its (deferred) start age. Deliberately simple
+   * and slightly conservative — it is a stop-work decision rule, not the model.
+   */
+  function onTrackToRetire(
+    atAge,
+    pension,
+    isa,
+    gia,
+    mortgage,
+    unsecured,
+    niYearsNow,
+    cumulInflNow
+  ) {
+    if (retirementOptions == null) return true;
+    const targetReal = retirementOptions.targetNetAnnualExpenses ?? 0;
+    if (targetReal <= 0) return true;
+    const horizon = retirementOptions.maxAge ?? 90;
+    const deflate = cumulInflNow > 0 ? 1 / cumulInflNow : 1;
+
+    // Today's-money buckets: accessible (ISA + GIA) and locked pension (NMPA).
+    let accessible = Math.max(0, (isa + gia) * deflate);
+    let locked = Math.max(0, pension * deflate);
+    // Clear outstanding debt from spendable pots first (conservative).
+    let debt = Math.max(0, (mortgage + unsecured) * deflate);
+    const payFromAccessible = Math.min(accessible, debt);
+    accessible -= payFromAccessible;
+    debt -= payFromAccessible;
+    locked = Math.max(0, locked - debt);
+
+    const stateReal = computeStatePension(niYearsNow); // today's money (triple lock ≈ real-constant)
+    const spStart = statePensionAge + statePensionDeferralYears;
+
+    for (let a = atAge; a <= horizon; a++) {
+      let need = Math.max(0, targetReal - (a >= spStart ? stateReal : 0));
+      if (need > 0) {
+        const fromAccessible = Math.min(accessible, need);
+        accessible -= fromAccessible;
+        need -= fromAccessible;
+      }
+      if (need > 0 && a >= pensionAccessAge && locked > 0) {
+        const grossDrawn = Math.min(locked, need * TEST_PENSION_GROSSUP);
+        locked -= grossDrawn;
+        need -= grossDrawn / TEST_PENSION_GROSSUP;
+      }
+      if (need > 0.5) return false; // can't meet this year's spending under central assumptions
+      accessible *= 1 + centralRealReturn;
+      locked *= 1 + centralRealReturn;
+    }
+    return true;
+  }
+
   // Running cumulative factors for year-by-year rate variation.
   // When yearlyRatesOverride is null these reproduce the same values as Math.pow().
   let cumulInflation = 1; // product of (1 + inflRate) from year 1..i
@@ -706,9 +793,39 @@ export function projectLifecycle(
   let cumulTriplelock = 1; // product of (1 + max(wages,CPI,2.5%)) from year 1..i
 
   // ── Annual loop ──────────────────────────────────────────────────────────
-  for (let i = 0; i < yearsToRetirement; i++) {
+  // Open-ended: work until the target retirement age, then (if flexible) keep
+  // going while off track, up to the delay cap or the plan horizon.
+  let accumulationYears; // number of accumulation years actually run (set at loop break)
+  for (let i = 0; ; i++) {
     const year = currentYear + i;
     const age = currentAge + i;
+
+    // Stop working once at/after the target age and either not flexible, on
+    // track, at the delay cap, or at the horizon. The on-track test is only
+    // evaluated when flexible (the cap check short-circuits otherwise).
+    if (age >= retirementAge) {
+      const cap = flexibleRetirement ? maxRetirementDelayYears : 0;
+      const hitCap = age - retirementAge >= cap;
+      const atHorizon = retirementOptions != null && age >= (retirementOptions.maxAge ?? Infinity);
+      const unsecuredNow = debts.reduce((s, d) => s + d.balance, 0);
+      if (
+        hitCap ||
+        atHorizon ||
+        onTrackToRetire(
+          age,
+          pensionBal,
+          isaBal,
+          giaBal,
+          mortgageBalance,
+          unsecuredNow,
+          niYears,
+          cumulInflation
+        )
+      ) {
+        accumulationYears = i;
+        break;
+      }
+    }
 
     // Per-year rates (merge base + optional override for year i)
     const yr =
@@ -1137,6 +1254,12 @@ export function projectLifecycle(
     });
   }
 
+  // Actual (possibly delayed) retirement age/year resolved by the loop above.
+  // Without flexible retirement these equal the target retirementAge.
+  const actualRetirementAge = currentAge + accumulationYears;
+  const actualRetirementYear = currentYear + accumulationYears;
+  const retirementDelayYears = actualRetirementAge - retirementAge;
+
   // Retirement-entry snapshots — populated inside the retirement block, used in summary below.
   // Declared here so they are in scope at summary-build time regardless of whether a
   // retirement phase exists (null signals "no retirement phase").
@@ -1190,11 +1313,11 @@ export function projectLifecycle(
       return toISA;
     }
 
-    const takePclsAtEntry = takePCLS && pensionBal > 0 && retirementAge >= pensionAccessAge;
+    const takePclsAtEntry = takePCLS && pensionBal > 0 && actualRetirementAge >= pensionAccessAge;
     let pclsToISAAtEntry = 0;
     if (takePclsAtEntry) pclsToISAAtEntry = applyPCLS();
     // Still-pending PCLS for the early-retirement (deferred) case.
-    let pclsPending = takePCLS && retirementAge < pensionAccessAge;
+    let pclsPending = takePCLS && actualRetirementAge < pensionAccessAge;
 
     // Snapshot balances at the point of retirement entry (after any PCLS, before drawdown).
     // The year-by-year loop mutates the running state variables, so by maxAge they may be
@@ -1224,7 +1347,7 @@ export function projectLifecycle(
     // modelled here; represent those via the NI Qualifying Years input instead.
     const { qualifyingYearsForFull, minimumQualifyingYears, class3AnnualCost } =
       LIFECYCLE_CONSTANTS.statePension;
-    const bridgeYears = Math.max(0, statePensionAge - retirementAge);
+    const bridgeYears = Math.max(0, statePensionAge - actualRetirementAge);
     const maxBuyableYears = Math.min(Math.max(0, qualifyingYearsForFull - niYears), bridgeYears);
     let class3YearsRemaining =
       topUpStatePension && niYears + maxBuyableYears >= minimumQualifyingYears
@@ -1232,17 +1355,17 @@ export function projectLifecycle(
         : 0;
 
     // ── Year-by-year loop ───────────────────────────────────────────────────
-    for (let rAge = retirementAge; rAge <= maxAge; rAge++) {
-      const rYear = retirementYear + (rAge - retirementAge);
-      const yearsRetired = rAge - retirementAge;
+    for (let rAge = actualRetirementAge; rAge <= maxAge; rAge++) {
+      const rYear = actualRetirementYear + (rAge - actualRetirementAge);
+      const yearsRetired = rAge - actualRetirementAge;
       const isFirstYear = yearsRetired === 0;
 
       const openPension = pensionBal;
       const openISA = isaBal;
       const openGIA = giaBal;
 
-      // Per-year rates for this retirement year
-      const retYearIdx = yearsToRetirement + yearsRetired;
+      // Per-year rates for this retirement year (absolute offset from currentAge)
+      const retYearIdx = rAge - currentAge;
       const yrRet =
         yearlyRatesOverride?.[retYearIdx] != null
           ? {
@@ -1708,12 +1831,15 @@ export function projectLifecycle(
 
   return {
     startYear: currentYear,
-    retirementYear,
+    retirementYear: actualRetirementYear,
     hasRetirementPhase: retirementOptions != null,
     yearlyBreakdown,
     summary: {
-      retirementYear,
-      retirementAge,
+      retirementYear: actualRetirementYear,
+      retirementAge: actualRetirementAge,
+      nominalRetirementAge: retirementAge,
+      retirementDelayYears,
+      flexibleRetirement,
       pensionPot: sumPension,
       isaBalance: sumISA,
       giaBalance: sumGIA,
@@ -1732,7 +1858,7 @@ export function projectLifecycle(
       projectedStatePension,
       statePensionAge,
       statePensionStartAge: summaryStartAge,
-      statePensionEligibleAtRetirement: retirementAge >= statePensionAge,
+      statePensionEligibleAtRetirement: actualRetirementAge >= statePensionAge,
     },
     taxYear: TAX_YEAR,
   };
