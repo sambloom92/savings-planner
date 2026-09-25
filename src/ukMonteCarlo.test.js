@@ -379,6 +379,78 @@ describe('flexible retirement date', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Spending guardrails
+// ---------------------------------------------------------------------------
+
+describe('spending guardrails', () => {
+  const gProfile = {
+    currentAge: 55,
+    retirementAge: 62,
+    currentYear: 2025,
+    grossIncome: 65_000,
+    annualLivingExpenses: 18_000,
+    employeePensionRate: 0.12,
+    employerPensionRate: 0.06,
+    niContributionYears: 33,
+    pensionAccessAge: 57,
+  };
+  const gPots = { pensionBalance: 200_000, isaBalance: 90_000, giaBalance: 10_000 };
+  const gRet = { targetNetAnnualExpenses: 30_000, maxAge: 92, takePCLS: true };
+  const gOpts = { trials: 400, seed: 12345, preRetirementEquity: 0.8, postRetirementEquity: 0.4 };
+
+  it('reports an inactive spending summary when guardrails are off', () => {
+    const r = runMonteCarlo(gProfile, rates, gPots, { ...gRet }, gOpts);
+    assert.equal(r.spending.active, false);
+    assert.equal(r.spending.percentileData.length, 0);
+    assert.equal(r.spending.fractionEverCut, 0);
+  });
+
+  it('summarises the cut distribution and builds a spending fan when active', () => {
+    const r = runMonteCarlo(
+      gProfile,
+      rates,
+      gPots,
+      { ...gRet, spendingGuardrails: { floor: 22_000, ceilingPct: 100 } },
+      gOpts
+    );
+    assert.equal(r.spending.active, true);
+    assert.equal(r.spending.target, 30_000);
+    assert.equal(r.spending.floor, 22_000);
+    assert.ok(r.spending.fractionEverCut > 0, 'some trials trim spending');
+    assert.ok(r.spending.fractionEverCut < 1, 'not all trials trim spending');
+    // Recovery-only: no trial ever spends above target.
+    assert.equal(r.spending.fractionAboveTarget, 0);
+    assert.ok(r.spending.worstLowestPctOfTarget < 1, 'the worst trials cut below target');
+    assert.ok(
+      r.spending.medianLowestPctOfTarget >= r.spending.worstLowestPctOfTarget,
+      'median lowest is no deeper than the worst-10% lowest'
+    );
+    // Fan spans retirement ages, each band ordered p10 ≤ p50 ≤ p90 and ≤ target.
+    assert.ok(r.spending.percentileData.length > 0);
+    for (const b of r.spending.percentileData) {
+      assert.ok(b.p10 <= b.p50 && b.p50 <= b.p90, `bands ordered at age ${b.age}`);
+      assert.ok(b.p90 <= 30_000 + 0.5, `never above target at age ${b.age}`);
+      assert.ok(b.p10 >= 22_000 - 0.5, `never below floor at age ${b.age}`);
+    }
+  });
+
+  it('improves lifetime solvency versus fixed spending', () => {
+    const fixed = runMonteCarlo(gProfile, rates, gPots, { ...gRet }, gOpts);
+    const guarded = runMonteCarlo(
+      gProfile,
+      rates,
+      gPots,
+      { ...gRet, spendingGuardrails: { floor: 22_000, ceilingPct: 100 } },
+      gOpts
+    );
+    assert.ok(
+      guarded.solvency.solventForLife > fixed.solvency.solventForLife,
+      `guarded ${guarded.solvency.solventForLife} should beat fixed ${fixed.solvency.solventForLife}`
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Summary
 // ---------------------------------------------------------------------------
 

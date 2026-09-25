@@ -412,6 +412,84 @@ export function runMonteCarlo(profile, baseRates, pots, retirementOpts, opts = {
       .sort((a, b) => a.age - b.age),
   };
 
+  // ── Spending-guardrails distribution ─────────────────────────────────────────
+  // When guardrails are enabled, each retirement row carries the real (today's-
+  // money) spend the guardrails allowed that year. Summarise how often and how
+  // deeply spending was trimmed, and build a per-age spending fan (percentile
+  // bands of the allowed budget across trials retired at that age). With
+  // guardrails off, spendingBudgetReal is null on every row and this collapses
+  // to an inactive summary the UI hides.
+  const guardrailsActive = retirementOpts.spendingGuardrails != null;
+  const targetReal = retirementOpts.targetNetAnnualExpenses ?? 0;
+  const tDiv = targetReal || 1; // guard against divide-by-zero
+  const floorReal = guardrailsActive
+    ? Math.min(retirementOpts.spendingGuardrails.floor ?? 0, targetReal)
+    : 0;
+  const ceilingPct = retirementOpts.spendingGuardrails?.ceilingPct ?? 100;
+
+  const budgetByAge = new Map();
+  const trialMinPct = [];
+  let trialsEverCut = 0;
+  let trialsAboveTarget = 0;
+  let trialsHitFloor = 0;
+  let belowTargetYears = 0;
+  let totalRetYears = 0;
+  for (const r of successful) {
+    let minBudget = Infinity;
+    let everCut = false;
+    let aboveTarget = false;
+    for (const row of r.yearlyBreakdown) {
+      if (row.phase !== 'retirement' || row.spendingBudgetReal == null) continue;
+      const b = row.spendingBudgetReal;
+      totalRetYears++;
+      if (b < targetReal - 0.5) belowTargetYears++;
+      if (b > targetReal + 0.5) aboveTarget = true;
+      if (row.guardrailAction === 'cut') everCut = true;
+      if (b < minBudget) minBudget = b;
+      if (!budgetByAge.has(row.age)) budgetByAge.set(row.age, []);
+      budgetByAge.get(row.age).push(b);
+    }
+    if (minBudget !== Infinity) {
+      trialMinPct.push(minBudget / tDiv);
+      if (everCut) trialsEverCut++;
+      if (aboveTarget) trialsAboveTarget++;
+      if (minBudget <= floorReal + 0.5) trialsHitFloor++;
+    }
+  }
+  const minPctSorted = trialMinPct.sort((a, b) => a - b);
+  const spendingPercentileData = [...budgetByAge.entries()]
+    .map(([age, vals]) => {
+      const s = vals.sort((a, b) => a - b);
+      return {
+        age,
+        count: s.length,
+        p10: pctile(s, 10),
+        p25: pctile(s, 25),
+        p50: pctile(s, 50),
+        p75: pctile(s, 75),
+        p90: pctile(s, 90),
+      };
+    })
+    .sort((a, b) => a.age - b.age);
+  const spending = {
+    active: guardrailsActive,
+    target: targetReal,
+    floor: floorReal,
+    ceilingPct,
+    // Fraction of trials that ever trimmed spending / ever spent above target /
+    // ever fell all the way to the floor.
+    fractionEverCut: ranTrials > 0 ? trialsEverCut / ranTrials : 0,
+    fractionAboveTarget: ranTrials > 0 ? trialsAboveTarget / ranTrials : 0,
+    fractionHitFloor: ranTrials > 0 ? trialsHitFloor / ranTrials : 0,
+    // Fraction of all retirement trial-years spent below the target.
+    fractionYearsBelowTarget: totalRetYears > 0 ? belowTargetYears / totalRetYears : 0,
+    // Lowest budget each trial reached, as a fraction of target: the median and
+    // the worst-10% (p10) tell you how deep the cuts typically / severely go.
+    medianLowestPctOfTarget: minPctSorted.length ? pctile(minPctSorted, 50) : 1,
+    worstLowestPctOfTarget: minPctSorted.length ? pctile(minPctSorted, 10) : 1,
+    percentileData: spendingPercentileData,
+  };
+
   return {
     percentileData,
     availablePercentileData,
@@ -423,6 +501,7 @@ export function runMonteCarlo(profile, baseRates, pots, retirementOpts, opts = {
     // locked single-trial view to mark when that trial went insolvent.
     shortfallAges,
     retirement,
+    spending,
     solvency: {
       sex,
       solventToHorizon,
