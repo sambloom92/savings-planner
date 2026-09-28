@@ -4522,19 +4522,22 @@ Use Available funds to see whether an early-retirement plan can bridge the gap u
               padding: '20px 16px 12px 8px',
             }}
           >
-            {/* ── Chart card header — 3-column layout keeps tab switcher stable ── */}
+            {/* ── Chart card header — 3-column layout keeps tab switcher stable ──
+                On mobile it wraps: the title takes a full row and the switcher and
+                tab controls share the next, so nothing runs off the screen. */}
             <div
               style={{
                 paddingLeft: 16,
                 paddingRight: 8,
                 marginBottom: 14,
                 display: 'flex',
+                flexWrap: mobile ? 'wrap' : 'nowrap',
                 alignItems: 'flex-start',
                 gap: 12,
               }}
             >
               {/* Left: title + subtitle (flex:1 so it absorbs spare space) */}
-              <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ flex: mobile ? '1 1 100%' : 1, minWidth: 0 }}>
                 <h2
                   style={{
                     fontFamily: 'var(--font-display)',
