@@ -9,7 +9,8 @@
  *   • Hover detection: nearest age column + nearest percentile line
  *   • Mousedown: locks to the specific trial nearest the hovered percentile
  *     at that age, drawing only that trial's full path until release
- *   • Reference lines for retirement age and state pension age
+ *   • Reference lines for retirement, pension access, state pension and
+ *     annuity purchase ages
  */
 
 import { useRef, useEffect, useState, useCallback, useMemo } from 'react';
@@ -83,7 +84,9 @@ function drawFanChart(
   eventMarkers,
   survivalSeries,
   pensionAccessAge,
-  shortfallMarks
+  shortfallMarks,
+  annuityAge,
+  retirementIsTarget
 ) {
   const ctx = canvas.getContext('2d');
 
@@ -238,6 +241,18 @@ function drawFanChart(
     ctx.beginPath();
     ctx.moveTo(paX, PAD.top);
     ctx.lineTo(paX, PAD.top + cH);
+    ctx.stroke();
+  }
+
+  // Annuity purchase — from here part of the pot becomes guaranteed income.
+  // Fuchsia: a sibling of the state-pension violet, but distinguishable.
+  const showAnnuity = annuityAge != null && annuityAge >= minAge && annuityAge <= maxAgeVal;
+  if (showAnnuity) {
+    const anX = xOf(annuityAge);
+    ctx.strokeStyle = 'rgba(232,121,249,0.5)';
+    ctx.beginPath();
+    ctx.moveTo(anX, PAD.top);
+    ctx.lineTo(anX, PAD.top + cH);
     ctx.stroke();
   }
 
@@ -457,30 +472,65 @@ function drawFanChart(
   }
 
   // ── Reference line labels (always) ───────────────────────────────────────
+  // Row 0 sits above the plot; rows 1+ step down just inside its top edge.
+  // Retirement and state pension prefer row 0; pension access and annuity prefer
+  // row 1, which keeps them legible between the labels above. A label that would
+  // overlap one already placed on its row drops to the next free row, so labels
+  // never collide (with four at most, four rows always suffice).
   ctx.font = `bold 9px ${mono}`;
   ctx.textAlign = 'center';
-  ctx.fillStyle = 'rgba(232,184,75,0.85)';
-  ctx.fillText('Retire', xOf(retirementAge), PAD.top - 8);
-
+  const refLabels = [
+    {
+      text: retirementIsTarget ? 'Retire (target)' : 'Retire',
+      age: retirementAge,
+      color: 'rgba(232,184,75,0.85)',
+      row: 0,
+    },
+  ];
   if (
     statePensionAge !== retirementAge &&
     statePensionAge >= minAge &&
     statePensionAge <= maxAgeVal
   ) {
-    ctx.fillStyle = 'rgba(167,139,250,0.85)';
-    ctx.fillText('State Pension', xOf(statePensionAge), PAD.top - 8);
+    refLabels.push({
+      text: 'State Pension',
+      age: statePensionAge,
+      color: 'rgba(167,139,250,0.85)',
+      row: 0,
+    });
   }
-
-  // Pension-access label sits just inside the top edge so it stays legible
-  // between the retirement and state-pension labels on the row above.
   if (
     pensionAccessAge != null &&
     pensionAccessAge > retirementAge &&
     pensionAccessAge >= minAge &&
     pensionAccessAge <= maxAgeVal
   ) {
-    ctx.fillStyle = 'rgba(79,142,247,0.9)';
-    ctx.fillText('Pension Access', xOf(pensionAccessAge), PAD.top + 11);
+    refLabels.push({
+      text: 'Pension Access',
+      age: pensionAccessAge,
+      color: 'rgba(79,142,247,0.9)',
+      row: 1,
+    });
+  }
+  if (showAnnuity) {
+    refLabels.push({ text: 'Annuity', age: annuityAge, color: 'rgba(232,121,249,0.9)', row: 1 });
+  }
+  const labelRowY = (row) => (row === 0 ? PAD.top - 8 : PAD.top - 1 + 12 * row);
+  const LABEL_GAP = 6;
+  const placedLabels = []; // per row: [left, right] extents already drawn
+  for (const label of refLabels) {
+    const x = xOf(label.age);
+    const half = ctx.measureText(label.text).width / 2;
+    let row = label.row;
+    while (
+      (placedLabels[row] ?? []).some(
+        ([l, r]) => x - half < r + LABEL_GAP && x + half > l - LABEL_GAP
+      )
+    )
+      row++;
+    (placedLabels[row] ??= []).push([x - half, x + half]);
+    ctx.fillStyle = label.color;
+    ctx.fillText(label.text, x, labelRowY(row));
   }
 
   // ── Survival curve overlay (P(alive) by age) ──────────────────────────────
@@ -541,7 +591,6 @@ function drawFanChart(
       expense: { fill: 'rgba(244,63,94,0.95)', label: 'rgba(244,63,94,0.8)', name: 'Expense' },
       hours: { fill: 'rgba(45,212,191,0.95)', label: 'rgba(45,212,191,0.85)', name: 'Hours' },
       windfall: { fill: 'rgba(232,184,75,0.95)', label: 'rgba(232,184,75,0.75)', name: 'Windfall' },
-      annuity: { fill: 'rgba(167,139,250,0.95)', label: 'rgba(167,139,250,0.85)', name: 'Annuity' },
     };
     for (const m of sorted) {
       const style = MARKER_STYLE[m.kind] ?? MARKER_STYLE.windfall;
@@ -552,9 +601,6 @@ function drawFanChart(
         ctx.moveTo(mx - 4.5, baseY - 8);
         ctx.lineTo(mx + 4.5, baseY - 8);
         ctx.lineTo(mx, baseY - 1);
-      } else if (m.kind === 'annuity') {
-        // ● guaranteed income that starts here (state-pension purple)
-        ctx.arc(mx, baseY - 4.5, 4, 0, Math.PI * 2);
       } else if (m.kind === 'hours') {
         // ◆ diamond — a change in level, neither an inflow nor an outflow
         ctx.moveTo(mx, baseY - 9);
@@ -761,6 +807,8 @@ function FanLegend() {
  *   currentAge: number,
  *   retirementAge: number,
  *   statePensionAge: number,
+ *   annuityAge?: number | null,       - annuity purchase age (reference line)
+ *   retirementIsTarget?: boolean,     - label retirement as a target (flexible date)
  *   onHoverRow: function,
  *   showDetails: boolean,
  *   colorMode?: string,
@@ -790,6 +838,8 @@ export function FanChart({
   shortfallMarkers = null,
   shortfallAges = null,
   fundsView = 'all',
+  annuityAge = null,
+  retirementIsTarget = false,
   height = 390,
 }) {
   const canvasRef = useRef(null);
@@ -988,7 +1038,9 @@ export function FanChart({
       eventMarkers,
       survivalSeries,
       pensionAccessAge,
-      shortfallMarks
+      shortfallMarks,
+      annuityAge,
+      retirementIsTarget
     );
     coordRef.current = { ...coords, adjData: effectiveAdjData };
     // colorMode in deps: theme change re-reads CSS vars via cssVar() at draw time
@@ -1014,6 +1066,8 @@ export function FanChart({
     survivalSeries,
     pensionAccessAge,
     shortfallMarks,
+    annuityAge,
+    retirementIsTarget,
   ]);
 
   // Mousemove: update hover; frozen while a trial is locked
