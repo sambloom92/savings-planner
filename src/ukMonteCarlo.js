@@ -132,6 +132,10 @@ export function runMonteCarlo(profile, baseRates, pots, retirementOpts, opts = {
     // Sex for the mortality/survival weighting of the lifetime-solvency metric.
     // 'neutral' (default) blends male and female rates.
     sex = 'neutral',
+    // Optional essential (non-negotiable) net spend in today's money. When set,
+    // solvency also reports how securely THIS floor is met, alongside the usual
+    // full-target measure — the figure an annuity or guardrails aim to protect.
+    essentialFloorReal = null,
   } = opts;
 
   // Volatility reduction factor for the retirement-phase rate relative to the
@@ -369,6 +373,35 @@ export function runMonteCarlo(profile, baseRates, pots, retirementOpts, opts = {
       : 0;
   const solventForLife = 1 - lifetimeRuinProb;
 
+  // Essential-floor security: the same mortality-weighted measure, but a trial
+  // only "fails" in the first year its achieved living spend drops below the
+  // essential floor (in that year's money). The full-target measure above counts
+  // any shortfall, so it can't tell "£5k short of a comfortable target" from
+  // "down to the state pension"; this one can.
+  let essentialSecuredForLife = null;
+  let essentialSecuredToHorizon = null;
+  if (essentialFloorReal != null && essentialFloorReal > 0) {
+    const belowFloorAges = successful.map((r) => {
+      for (const row of r.yearlyBreakdown) {
+        if (row.phase !== 'retirement') continue;
+        const floorNominal = essentialFloorReal * (row.inflationIndex ?? 1);
+        if ((row.netIncomeAchieved ?? 0) < floorNominal - 1) return row.age;
+      }
+      return Infinity;
+    });
+    const n = belowFloorAges.length;
+    essentialSecuredToHorizon = n > 0 ? belowFloorAges.filter((a) => a === Infinity).length / n : 0;
+    essentialSecuredForLife =
+      n > 0
+        ? 1 -
+          belowFloorAges.reduce(
+            (sum, a) => sum + (a === Infinity ? 0 : survivalToAge(currentAge, a, sex)),
+            0
+          ) /
+            n
+        : 0;
+  }
+
   // Survival curve over the projection ages — for the optional chart overlay
   // and to show how much of the horizon is discounted by mortality.
   const survival = survivalCurve(currentAge, ages[maxAgeIdx], sex);
@@ -490,6 +523,32 @@ export function runMonteCarlo(profile, baseRates, pots, retirementOpts, opts = {
     percentileData: spendingPercentileData,
   };
 
+  // ── Annuity coverage ─────────────────────────────────────────────────────────
+  // With an annuity planned, each trial buys at its own pot size: a trial whose
+  // pension can't afford the target buys a partial annuity (or none, if the
+  // pension is already empty). Summarise how often the target was fully met.
+  const annuityRuns = successful.map((r) => r.summary.annuity).filter(Boolean);
+  let annuity = { active: false };
+  if (annuityRuns.length > 0) {
+    const coverage = annuityRuns.map((a) => a.coverage).sort((a, b) => a - b);
+    const bought = annuityRuns.filter((a) => a.purchased);
+    const incomeReal = bought.map((a) => a.incomeReal).sort((a, b) => a - b);
+    const n = annuityRuns.length;
+    annuity = {
+      active: true,
+      sizing: annuityRuns[0].sizing,
+      inflationLinked: annuityRuns[0].inflationLinked,
+      // Fraction of trials whose target income was fully bought (or not needed
+      // because the state pension already covers it).
+      fractionFullyCovered: coverage.filter((c) => c >= 0.999).length / n,
+      fractionNotNeeded: annuityRuns.filter((a) => a.notNeeded).length / n,
+      medianCoverage: pctile(coverage, 50),
+      p10Coverage: pctile(coverage, 10), // the worst-covered 10% bought no more than this
+      // Median first-year income actually bought (today's money), among purchases.
+      medianIncomeReal: incomeReal.length ? pctile(incomeReal, 50) : 0,
+    };
+  }
+
   return {
     percentileData,
     availablePercentileData,
@@ -502,6 +561,7 @@ export function runMonteCarlo(profile, baseRates, pots, retirementOpts, opts = {
     shortfallAges,
     retirement,
     spending,
+    annuity,
     solvency: {
       sex,
       solventToHorizon,
@@ -511,6 +571,9 @@ export function runMonteCarlo(profile, baseRates, pots, retirementOpts, opts = {
       ruinBeforeAccessProb,
       survival,
       shortfallMarkers,
+      essentialFloorReal,
+      essentialSecuredForLife,
+      essentialSecuredToHorizon,
     },
   };
 }

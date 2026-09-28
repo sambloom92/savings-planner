@@ -5,6 +5,7 @@ import { optimalEmployeePensionContribution, taperedAnnualAllowance } from './uk
 import { runMonteCarlo } from './ukMonteCarlo.js';
 import { FanChart } from './FanChart.jsx';
 import { fmtGBPLarge } from './formatters.js';
+import { illustrativeAnnuityRate } from './ukAnnuity.js';
 
 // ── Formatters ────────────────────────────────────────────────────────────────
 const fmtGBP = (n) => `£${Math.round(Math.abs(n)).toLocaleString('en-GB')}`;
@@ -124,7 +125,18 @@ const DEFAULTS = {
   // Retirement
   maxAge: 90,
   targetNetExpenses: 30_000,
+  // Essential (non-negotiable) net spending, today's money — shared by the
+  // guardrails floor and the annuity's "cover essential spending" sizing.
+  essentialExpenses: 20_000,
   takePCLS: true,
+  // Lifetime annuity: one purchase, sized by an income target in today's money.
+  // Applies to both the deterministic projection and Monte Carlo.
+  annuityEnabled: false,
+  annuityPurchaseAge: 75,
+  annuitySizing: 'essential', // 'essential' (cover essentials) | 'fixed' (set income)
+  annuityIncome: 10_000, // 'fixed' sizing: gross annual income, today's money
+  annuityInflationLinked: true,
+  annuityRatePct: null, // your quote (%); null → illustrative rate for the age and type
   // Monte Carlo settings
   mcTrials: 200,
   mcVolatility: 1.0,
@@ -136,10 +148,9 @@ const DEFAULTS = {
   flexibleRetirement: false,
   maxRetirementDelayYears: 3,
   // Spending guardrails (Monte Carlo only): flex retirement spending toward the
-  // sustainable level within a floor (£, essential spend) and ceiling (% of
-  // target; 100 = recovery-only). Sensitivity picks the drift band + step size.
+  // sustainable level within a floor (essential expenses, above) and ceiling (%
+  // of target; 100 = recovery-only). Sensitivity picks the drift band + step size.
   spendingGuardrails: false,
-  spendingFloor: 20_000,
   spendingCeilingPct: 100,
   guardrailSensitivity: 'standard', // 'gentle' | 'standard' | 'responsive'
 };
@@ -152,6 +163,35 @@ const GUARDRAIL_PRESETS = {
   standard: { band: 0.2, step: 0.1 },
   responsive: { band: 0.15, step: 0.1 },
 };
+
+// Bring saved or pasted inputs up to date. The guardrails floor used to be its
+// own input (spendingFloor); it is now the shared essential-expenses figure.
+function migrateInputs(saved) {
+  const next = { ...saved };
+  if (next.essentialExpenses == null && next.spendingFloor != null) {
+    next.essentialExpenses = next.spendingFloor;
+  }
+  delete next.spendingFloor;
+  return next;
+}
+
+// Engine options for the planned annuity (null when off). Essential sizing
+// covers the essential-expenses figure, capped at the target (essentials above
+// the target would be contradictory). rate null → illustrative table rate at
+// the actual purchase age, resolved by the engine.
+function buildAnnuity(p) {
+  if (!p.annuityEnabled) return null;
+  return {
+    purchaseAge: p.annuityPurchaseAge,
+    sizing: p.annuitySizing,
+    amountReal:
+      p.annuitySizing === 'essential'
+        ? Math.min(p.essentialExpenses, p.targetNetExpenses)
+        : p.annuityIncome,
+    inflationLinked: p.annuityInflationLinked,
+    rate: p.annuityRatePct == null ? null : p.annuityRatePct / 100,
+  };
+}
 
 // The manual employee contribution percentage, floored at the employer's match
 // threshold when matching is on: contributing less than the required minimum
@@ -1291,7 +1331,163 @@ function TopUpReadout({ p, topUp }) {
   return <InfoBox>{msg}</InfoBox>;
 }
 
-function TabContent({ tab, p, set, derived, topUp }) {
+// Annuity settings + the central projection's outcome. Rendered in the Retire
+// tab when the annuity is switched on.
+function AnnuityControls({ p, set, annuity }) {
+  const minAge = Math.max(p.pensionAccessAge, p.retirementAge);
+  const buyAge = Math.max(p.annuityPurchaseAge, minAge);
+  const typeName = p.annuityInflationLinked ? 'inflation-linked' : 'level';
+  const typicalPct = illustrativeAnnuityRate(buyAge, p.annuityInflationLinked) * 100;
+  const usingTypical = p.annuityRatePct == null;
+  const essentials = Math.min(p.essentialExpenses, p.targetNetExpenses);
+  const caption = {
+    color: 'var(--text-muted)',
+    fontSize: 11,
+    fontFamily: 'var(--font-body)',
+    lineHeight: 1.5,
+  };
+
+  let outcome = null;
+  if (annuity) {
+    if (annuity.notNeeded) {
+      outcome = 'Not needed: your state pension already covers your essential expenses.';
+    } else if (annuity.purchased) {
+      const pct = Math.round(annuity.coverage * 100);
+      outcome =
+        `At ${annuity.purchaseAge} it buys ${fmtGBP(annuity.incomeReal)}/yr before tax ` +
+        `(today's money) for ${fmtGBP(annuity.price)} of pension` +
+        (pct < 100 ? ` — only ${pct}% of the target income; the pension can't afford more.` : '.');
+    } else if (annuity.purchaseAge == null) {
+      outcome = 'The purchase age is beyond your planning horizon, so nothing is bought.';
+    } else {
+      outcome = `Your pension is used up by ${annuity.purchaseAge}, so nothing can be bought.`;
+    }
+  }
+
+  return (
+    <>
+      <Slider
+        label="Buy at age"
+        value={buyAge}
+        min={minAge}
+        max={Math.max(minAge + 1, p.maxAge - 1)}
+        step={1}
+        format={fmtAge}
+        annotation={
+          buyAge < 65
+            ? () => 'Early purchases lock in a low rate for decades — see the note below'
+            : undefined
+        }
+        onChange={(v) => set('annuityPurchaseAge')(Math.max(0, Math.round(v)))}
+        allowInput
+        help="When the annuity is bought. Earliest is your pension access age (or retirement, if later). Rates rise with age because the pooling bonus from buyers who die early grows — many people draw down first and consider annuitising in their 70s."
+      />
+      <Toggle
+        label="Size the income to"
+        value={p.annuitySizing}
+        optA={{ value: 'essential', label: 'Essentials' }}
+        optB={{ value: 'fixed', label: 'Fixed income' }}
+        onChange={set('annuitySizing')}
+        help="Essentials: buy just enough that your state pension plus the annuity, after tax, cover your essential expenses — a guaranteed floor for life. Fixed income: buy a set amount of income (before tax). Either way, if the pension can't afford it, it buys what it can."
+      />
+      {p.annuitySizing === 'essential' ? (
+        <div style={{ ...caption, marginTop: -12, marginBottom: 20 }}>
+          Covers your essential expenses of {fmtGBP(essentials)}/yr (today&apos;s money, set above)
+          together with your state pension, after tax.
+        </div>
+      ) : (
+        <Slider
+          label="Annuity income (before tax)"
+          value={p.annuityIncome}
+          min={1_000}
+          max={60_000}
+          step={500}
+          format={fmtGBP}
+          annotation={() => "per year, today's money"}
+          onChange={(v) => set('annuityIncome')(Math.max(0, v))}
+          allowInput
+          help="The gross annual income to buy, in today's money. It is taxed as income on top of your state pension. Income beyond what you need in a year is saved rather than lost."
+        />
+      )}
+      <Toggle
+        label="Income type"
+        value={p.annuityInflationLinked ? 'yes' : 'no'}
+        optA={{ value: 'yes', label: 'Inflation-linked' }}
+        optB={{ value: 'no', label: 'Level' }}
+        onChange={(v) => set('annuityInflationLinked')(v === 'yes')}
+        help="Inflation-linked income rises with prices each year, so it keeps its value — but starts around 2 percentage points lower. Level income stays fixed in cash, so it starts higher but roughly halves in real terms over 28 years of 2.5% inflation."
+      />
+      <Slider
+        label="Annuity rate"
+        value={usingTypical ? typicalPct : p.annuityRatePct}
+        min={2}
+        max={15}
+        step={0.1}
+        format={(v) => `${v.toFixed(1)}%`}
+        annotation={() =>
+          usingTypical
+            ? `Typical ${typeName} rate at ${buyAge} (illustrative) — enter a real quote to override`
+            : `Your quote · typical ${typeName} rate at ${buyAge}: ${typicalPct.toFixed(1)}%`
+        }
+        // Typed quotes may go beyond the slider, but stay within what the
+        // engine accepts (a rate above 0%, at most 50%).
+        onChange={(v) => set('annuityRatePct')(Math.min(50, Math.max(0.1, v)))}
+        allowInput
+        help="First-year income as a % of the price (7% → £7,000/yr per £100,000). The default comes from an illustrative table of UK single-life rates with no guarantee period; real rates move with gilt yields and are higher for some health conditions, so replace it with a quote (MoneyHelper has a comparison tool)."
+      />
+      {!usingTypical && (
+        <button
+          onClick={() => set('annuityRatePct')(null)}
+          style={{
+            marginTop: -12,
+            marginBottom: 20,
+            padding: 0,
+            background: 'none',
+            border: 'none',
+            color: 'var(--accent-gold)',
+            fontFamily: 'var(--font-body)',
+            fontSize: 11,
+            cursor: 'pointer',
+          }}
+        >
+          Use the typical rate instead
+        </button>
+      )}
+      {outcome && (
+        <div
+          style={{
+            marginBottom: 16,
+            padding: '9px 12px',
+            borderRadius: 7,
+            border: '1px solid var(--border)',
+            background: 'var(--bg-card)',
+            ...caption,
+            color: 'var(--text-secondary)',
+          }}
+        >
+          <span style={{ color: '#a78bfa', fontWeight: 600 }}>Central projection · </span>
+          {outcome}
+        </div>
+      )}
+      <InfoBox>
+        {
+          'An annuity swaps part of your pension for income guaranteed for life — insurance against living a long time.\n\n'
+        }
+        {
+          'Timing: you can buy from your pension access age, but buying early locks in a low rate for decades, and the pooling bonus from buyers who die early (the reason annuities beat drawdown later in life) is small until your 70s. A common approach is to draw down first and consider annuitising later.\n\n'
+        }
+        {
+          'Trade-off: the capital is gone — your pot drops at the purchase age and that money can’t be passed on. In Monte Carlo, compare "essentials secured for life" rather than the full-target solvency figure: the annuity protects the floor, while the rest of your target now comes from a smaller pot.\n\n'
+        }
+        {
+          'Simplified: single life, no guarantee period, rate fixed at purchase. If you are not taking the lump sum up front, 25% of the pension used is paid tax-free first (within the lump sum allowance).'
+        }
+      </InfoBox>
+    </>
+  );
+}
+
+function TabContent({ tab, p, set, derived, topUp, annuity }) {
   switch (tab) {
     case 'Personal':
       return (
@@ -2151,20 +2347,56 @@ function TabContent({ tab, p, set, derived, topUp }) {
           />
           {p.spendingGuardrails && (
             <>
-              <Slider
-                label="Essential expenses (floor)"
-                value={p.spendingFloor}
-                min={5_000}
-                max={p.targetNetExpenses}
-                step={1_000}
-                format={fmtGBP}
-                annotation={(v) =>
-                  `${Math.round((100 * v) / (p.targetNetExpenses || 1))}% of target · today's money`
-                }
-                onChange={(v) => set('spendingFloor')(Math.min(v, p.targetNetExpenses))}
-                allowInput
-                help="Your non-negotiable spending — the level guardrails will never cut below. Below this a bad trial counts as a genuine shortfall, exactly as today; above it, a squeeze is modelled as reduced spending rather than ruin. In today's money. Type a value directly to go beyond the slider range."
-              />
+              {/* Floor = the shared essential-expenses input (Retire tab) */}
+              <div style={{ marginBottom: 20 }}>
+                <div
+                  style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                    marginBottom: 4,
+                  }}
+                >
+                  <span
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      color: 'var(--text-secondary)',
+                      fontSize: 11,
+                      letterSpacing: '0.07em',
+                      textTransform: 'uppercase',
+                      fontWeight: 500,
+                    }}
+                  >
+                    Spending floor
+                    <HelpTip text="The level guardrails will never cut below: your essential expenses, set in the Retire tab (shared with the annuity's 'cover essential spending' option). Below it a bad trial counts as a genuine shortfall; above it, a squeeze is modelled as reduced spending rather than ruin." />
+                  </span>
+                  <span
+                    style={{
+                      color: 'var(--text-primary)',
+                      fontFamily: 'var(--font-mono)',
+                      fontSize: 12,
+                      fontWeight: 500,
+                    }}
+                  >
+                    {fmtGBP(Math.min(p.essentialExpenses, p.targetNetExpenses))}
+                  </span>
+                </div>
+                <div
+                  style={{
+                    color: 'var(--text-muted)',
+                    fontSize: 11,
+                    fontFamily: 'var(--font-body)',
+                  }}
+                >
+                  Your essential expenses ·{' '}
+                  {Math.round(
+                    (100 * Math.min(p.essentialExpenses, p.targetNetExpenses)) /
+                      (p.targetNetExpenses || 1)
+                  )}
+                  % of target · set in the Retire tab
+                </div>
+              </div>
               <Slider
                 label="Spending ceiling"
                 value={p.spendingCeilingPct}
@@ -2265,6 +2497,22 @@ function TabContent({ tab, p, set, derived, topUp }) {
             help="Your desired annual living costs in retirement, in today's money (food, utilities, leisure, etc.) — exclude mortgage and debt payments, which are modelled separately on top of this figure. The model inflates this each year to maintain the same purchasing power. State pension income offsets it before drawing from your pots."
           />
           <Slider
+            label="Essential Annual Expenses"
+            value={Math.min(p.essentialExpenses, p.targetNetExpenses)}
+            min={5_000}
+            max={p.targetNetExpenses}
+            step={500}
+            format={fmtGBP}
+            annotation={(v) =>
+              `${Math.round((100 * v) / (p.targetNetExpenses || 1))}% of target · today's money`
+            }
+            onChange={(v) =>
+              set('essentialExpenses')(Math.max(0, Math.min(v, p.targetNetExpenses)))
+            }
+            allowInput
+            help="The non-negotiable part of your target — housing upkeep, food, utilities, insurance. It is the floor that spending guardrails never cut below (Simulation tab), and the income an annuity secures when sized to 'Essentials'. Monte Carlo reports how securely it is met for life. In today's money; capped at your target."
+          />
+          <Slider
             label="Model to Age"
             value={p.maxAge}
             min={Math.max(p.retirementAge + 1, 70)}
@@ -2302,6 +2550,16 @@ function TabContent({ tab, p, set, derived, topUp }) {
               'Drawdown order each year: tax-free pension (within personal allowance) → CGT-exempt GIA harvest → ISA → taxable GIA → taxable pension.'
             }
           </InfoBox>
+          <SecHead>Lifetime Annuity</SecHead>
+          <Toggle
+            label="Buy a lifetime annuity"
+            value={p.annuityEnabled ? 'yes' : 'no'}
+            optA={{ value: 'yes', label: 'Yes' }}
+            optB={{ value: 'no', label: 'No' }}
+            onChange={(v) => set('annuityEnabled')(v === 'yes')}
+            help="Convert part of your pension into an income guaranteed for life, bought once at the age you choose. A plan decision, so it applies to the central projection as well as Monte Carlo."
+          />
+          {p.annuityEnabled && <AnnuityControls p={p} set={set} annuity={annuity} />}
         </>
       );
 
@@ -2687,15 +2945,25 @@ function YearDetailPanel({ row, mobile = false }) {
   const mortgagePayment = row.mortgage?.payment ?? 0;
   const unsecuredPayments = row.unsecuredDebtPayments ?? 0;
   const totalObligations = row.targetNetExpenses + mortgagePayment + unsecuredPayments;
+  // Guaranteed income (state pension + any annuity), net of its own tax, is
+  // netted against the whole year's obligations — as the engine does.
   const spNet = row.statePensionNet ?? 0;
-  const spCoversLiving = Math.min(spNet, row.targetNetExpenses);
-  const fromPotsNeeded = Math.max(0, totalObligations - spCoversLiving);
+  const annuityNet = row.annuityNet ?? 0;
+  const hasAnnuity = (row.annuityGross ?? 0) > 0;
+  const spCoversLiving = Math.min(spNet, totalObligations);
+  const annuityCovers = Math.min(annuityNet, Math.max(0, totalObligations - spCoversLiving));
+  const fromPotsNeeded = Math.max(0, totalObligations - spCoversLiving - annuityCovers);
   const grossFromPots =
     (row.taxFreePensionDrawdown ?? 0) +
     (row.taxablePensionDrawdown ?? 0) +
     (row.isaWithdrawal ?? 0) +
     (row.giaWithdrawal ?? 0);
-  const netFromPots = grossFromPots - (row.incomeTax ?? 0) - (row.giaCGT ?? 0);
+  // Tax on the pot withdrawals alone: the year's income tax less the tax already
+  // taken off the (net) guaranteed income shown in the first column.
+  const guaranteedTax =
+    (row.statePensionGross ?? 0) - spNet + ((row.annuityGross ?? 0) - annuityNet);
+  const potIncomeTax = Math.max(0, (row.incomeTax ?? 0) - guaranteedTax);
+  const netFromPots = grossFromPots - potIncomeTax - (row.giaCGT ?? 0);
   const rate = fmtPct((row.investmentRate ?? 0) * 100);
 
   return (
@@ -2715,6 +2983,13 @@ function YearDetailPanel({ row, mobile = false }) {
             label="PCLS lump sum (one-off)"
             value={fmtGBP(row.pclsLumpSum)}
             color="var(--accent-gold)"
+          />
+        )}
+        {row.annuityPurchase && (
+          <DetailLine
+            label="Annuity bought (one-off)"
+            value={fmtGBP(row.annuityPurchase.price)}
+            color="#a78bfa"
           />
         )}
         <DetailLine label="Living expenses" value={fmtGBP(row.targetNetExpenses)} />
@@ -2741,6 +3016,14 @@ function YearDetailPanel({ row, mobile = false }) {
           <DetailLine
             label="− State pension (net)"
             value={fmtGBP(spCoversLiving)}
+            color="#a78bfa"
+            indent={1}
+          />
+        )}
+        {hasAnnuity && (
+          <DetailLine
+            label="− Annuity income (net)"
+            value={fmtGBP(annuityCovers)}
             color="#a78bfa"
             indent={1}
           />
@@ -2777,10 +3060,10 @@ function YearDetailPanel({ row, mobile = false }) {
         )}
         <Divider />
         <DetailLine label="Gross drawn" value={fmtGBP(grossFromPots)} bold />
-        {(row.incomeTax ?? 0) > 0 && (
+        {potIncomeTax > 0 && (
           <DetailLine
             label="− Income tax"
-            value={fmtGBP(row.incomeTax)}
+            value={fmtGBP(potIncomeTax)}
             color="#f43f5e"
             indent={1}
           />
@@ -2800,6 +3083,20 @@ function YearDetailPanel({ row, mobile = false }) {
             label="+ State pension (net)"
             value={fmtGBP(spCoversLiving)}
             color="#a78bfa"
+          />
+        )}
+        {hasAnnuity && (
+          <DetailLine
+            label={`+ Annuity (net · ${fmtGBP(row.annuityGross)} gross)`}
+            value={fmtGBP(annuityCovers)}
+            color="#a78bfa"
+          />
+        )}
+        {(row.incomeSurplusSaved ?? 0) > 0 && (
+          <DetailLine
+            label="Surplus income saved"
+            value={fmtGBP(row.incomeSurplusSaved)}
+            color="#34d399"
           />
         )}
         {(row.windfall ?? 0) > 0 && (
@@ -2835,6 +3132,15 @@ function YearDetailPanel({ row, mobile = false }) {
             label="− drawn"
             value={fmtGBP(row.pension.drawdown)}
             color="#4f8ef7"
+            indent={1}
+            dim
+          />
+        )}
+        {(row.pension.annuityPurchase ?? 0) > 0 && (
+          <DetailLine
+            label="− annuity purchase"
+            value={fmtGBP(row.pension.annuityPurchase)}
+            color="#a78bfa"
             indent={1}
             dim
           />
@@ -3040,7 +3346,7 @@ export default function App() {
   } = useHistory(() => {
     try {
       const saved = localStorage.getItem('inputs');
-      return saved ? { ...DEFAULTS, ...JSON.parse(saved) } : DEFAULTS;
+      return saved ? { ...DEFAULTS, ...migrateInputs(JSON.parse(saved)) } : DEFAULTS;
     } catch {
       return DEFAULTS;
     }
@@ -3128,7 +3434,7 @@ export default function App() {
       const parsed = JSON.parse(text);
       if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed))
         throw new Error('not an object');
-      replaceP({ ...DEFAULTS, ...parsed });
+      replaceP({ ...DEFAULTS, ...migrateInputs(parsed) });
       setPasteMsg('Applied!');
     } catch (e) {
       setPasteMsg(e instanceof SyntaxError ? 'Invalid JSON' : 'Failed');
@@ -3223,6 +3529,9 @@ export default function App() {
         takePCLS: p.takePCLS,
         glideStartYears: p.glideStartYears,
         glideEndYears: p.glideEndYears,
+        // An annuity is a plan decision, not a reaction to markets, so it
+        // applies to the central projection as well as Monte Carlo.
+        annuity: buildAnnuity(p),
       };
 
       const result = projectLifecycle(profile, rates, pots, retirementOptions);
@@ -3336,11 +3645,12 @@ export default function App() {
           // realised path). Omitted from the deterministic projection above.
           spendingGuardrails: p.spendingGuardrails
             ? {
-                floor: p.spendingFloor,
+                floor: p.essentialExpenses,
                 ceilingPct: p.spendingCeilingPct,
                 ...(GUARDRAIL_PRESETS[p.guardrailSensitivity] ?? GUARDRAIL_PRESETS.standard),
               }
             : null,
+          annuity: buildAnnuity(p),
         };
 
         setMcResults(
@@ -3353,6 +3663,9 @@ export default function App() {
             preRetirementEquity: p.preRetirementEquityPct / 100,
             postRetirementEquity: p.postRetirementEquityPct / 100,
             sex: p.sex,
+            // Also report how securely the essential floor is met, not just the
+            // full target — what an annuity or guardrails aim to protect.
+            essentialFloorReal: Math.min(p.essentialExpenses, p.targetNetExpenses),
           })
         );
       } catch {
@@ -3439,8 +3752,21 @@ export default function App() {
       ...collect(p.oneOffExpenses, 'expense', 'Expense'),
       ...collectHours(p.employmentChanges),
     ];
+    // Annuity purchase, at the age the central projection actually buys it.
+    const annuity = summary?.annuity;
+    if (annuity?.purchased) {
+      markers.push({ age: annuity.purchaseAge, label: 'Annuity', kind: 'annuity' });
+    }
     return markers.length > 0 ? markers : null;
-  }, [p.windfalls, p.oneOffExpenses, p.employmentChanges, p.currentAge, p.retirementAge, p.maxAge]);
+  }, [
+    p.windfalls,
+    p.oneOffExpenses,
+    p.employmentChanges,
+    p.currentAge,
+    p.retirementAge,
+    p.maxAge,
+    summary?.annuity,
+  ]);
 
   // 4% rule: need 25× annual spending as a portfolio (1 / 0.04 = 25).
   // Expressed in the same terms as the chart (real or nominal).
@@ -3797,6 +4123,7 @@ Use Available funds to see whether an early-retirement plan can bridge the gap u
               set={set}
               derived={derivedSavings}
               topUp={topUpInfo}
+              annuity={summary?.annuity ?? null}
             />
           </div>
 
@@ -4504,6 +4831,64 @@ Use Available funds to see whether an early-retirement plan can bridge the gap u
                         })}
                       </div>
                     )}
+                  </div>
+                )}
+                {/* Annuity summary: essentials security + coverage across trials */}
+                {mcResults?.annuity?.active && (
+                  <div
+                    style={{
+                      margin: '12px 16px 0',
+                      padding: '10px 13px',
+                      borderRadius: 7,
+                      border: '1px solid var(--border)',
+                      background: 'var(--bg-card)',
+                      display: 'flex',
+                      alignItems: 'baseline',
+                      gap: 8,
+                      flexWrap: 'wrap',
+                    }}
+                  >
+                    <span
+                      style={{
+                        fontSize: 10,
+                        letterSpacing: '0.08em',
+                        textTransform: 'uppercase',
+                        color: 'var(--text-muted)',
+                        fontFamily: 'var(--font-mono)',
+                      }}
+                    >
+                      Annuity
+                    </span>
+                    <span
+                      style={{
+                        fontSize: 12,
+                        color: 'var(--text-secondary)',
+                        fontFamily: 'var(--font-body)',
+                        lineHeight: 1.5,
+                      }}
+                    >
+                      {mcResults.solvency.essentialSecuredForLife != null && (
+                        <>
+                          Essentials ({fmtGBP(mcResults.solvency.essentialFloorReal)}/yr) secured
+                          for life:{' '}
+                          <strong style={{ color: '#a78bfa' }}>
+                            {fmtPct(mcResults.solvency.essentialSecuredForLife * 100)}
+                          </strong>{' '}
+                          (to age {p.maxAge}:{' '}
+                          {fmtPct(mcResults.solvency.essentialSecuredToHorizon * 100)}) ·{' '}
+                        </>
+                      )}
+                      {mcResults.annuity.fractionNotNeeded >= 0.999 ? (
+                        'not needed — the state pension already covers your essentials'
+                      ) : (
+                        <>
+                          target income fully bought in{' '}
+                          {fmtPct(mcResults.annuity.fractionFullyCovered * 100)} of trials
+                          {mcResults.annuity.p10Coverage < 0.999 &&
+                            ` (worst 10%: ${fmtPct(mcResults.annuity.p10Coverage * 100)} of it)`}
+                        </>
+                      )}
+                    </span>
                   </div>
                 )}
                 {/* Spending-guardrails summary + fan */}

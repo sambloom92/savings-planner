@@ -40,6 +40,7 @@ import { calculateMonthlyMortgagePayment } from './ukDebt.js';
 import { ISA_CONSTANTS } from './ukISA.js';
 import { PENSION_CONSTANTS, calculatePCLS, taperedAnnualAllowance } from './ukPension.js';
 import { GIA_CGT_CONSTANTS } from './ukGIA.js';
+import { illustrativeAnnuityRate } from './ukAnnuity.js';
 
 const TAX_YEAR = '2025/26';
 
@@ -403,6 +404,17 @@ function applyGIAWithdrawal(bal, costBasis, gross) {
  *   } | null,                          (default 0.2); step = fractional cut/raise per year (default
  *                                      0.1). Like flexibleRetirement, only meaningful under Monte
  *                                      Carlo — it is a behavioural decision rule, simulated in full.
+ *   annuity?: {                       - Buy a single-life lifetime annuity once, at the first
+ *     purchaseAge:      number,         retirement year ≥ purchaseAge (and the pension access age).
+ *     sizing:           string,         'essential': enough gross income that state pension +
+ *     amountReal:       number,         annuity, net of tax, cover amountReal of essential net
+ *     inflationLinked?: boolean,        spending (today's £); 'fixed': amountReal of gross annuity
+ *     rate?:            number | null   income (today's £). Capped at the pension available (a
+ *   } | null,                           partial purchase). inflationLinked (default true) indexes
+ *                                       income to inflation; otherwise level. rate = first-year
+ *                                       income per £ of price; null → illustrative table
+ *                                       (ukAnnuity.js) at the actual purchase age. On the UFPLS
+ *                                       path 25% of the slice is taken tax-free (within the LSA).
  * } | null} [retirementOptions]
  *
  * @returns {{
@@ -737,6 +749,9 @@ export function projectLifecycle(
   // tax-free (PCLS/UFPLS), the taxable remainder roughly at the basic rate, so
   // net draws from the pension bucket are grossed up by this factor (~1.18).
   const TEST_PENSION_GROSSUP = 1 / (1 - 0.75 * 0.2);
+  // Annuity income sits on top of the state pension, which largely fills the
+  // personal allowance, so the check counts it net of basic-rate tax.
+  const ANNUITY_NET_FACTOR = 0.8;
 
   /**
    * Real-terms two-bucket rundown from `atAge`: can the pots fund `spendReal`
@@ -756,7 +771,9 @@ export function projectLifecycle(
     unsecured,
     niYearsNow,
     cumulInflNow,
-    spendReal
+    spendReal,
+    annuityGrossNominal = 0,
+    annuityInflationLinked = true
   ) {
     const horizon = retirementOptions.maxAge ?? 90;
     const deflate = cumulInflNow > 0 ? 1 / cumulInflNow : 1;
@@ -773,9 +790,21 @@ export function projectLifecycle(
 
     const stateReal = computeStatePension(niYearsNow); // today's money (triple lock ≈ real-constant)
     const spStart = statePensionAge + statePensionDeferralYears;
+    // An annuity already in payment is guaranteed income, like the state pension.
+    // Inflation-linked holds its real value; level erodes at the central inflation
+    // rate. Counted net of basic-rate tax (it stacks on the state pension, which
+    // largely fills the personal allowance). A planned-but-unbought annuity is
+    // ignored: converting pot to income at a fair rate is roughly neutral here.
+    const annuityReal0 = Math.max(0, annuityGrossNominal * deflate);
 
     for (let a = atAge; a <= horizon; a++) {
-      let need = Math.max(0, spendReal - (a >= spStart ? stateReal : 0));
+      const annuityReal = annuityInflationLinked
+        ? annuityReal0
+        : annuityReal0 / Math.pow(1 + inflationRate, a - atAge);
+      let need = Math.max(
+        0,
+        spendReal - (a >= spStart ? stateReal : 0) - ANNUITY_NET_FACTOR * annuityReal
+      );
       if (need > 0) {
         const fromAccessible = Math.min(accessible, need);
         accessible -= fromAccessible;
@@ -833,13 +862,16 @@ export function projectLifecycle(
     mortgage,
     unsecured,
     niYearsNow,
-    cumulInflNow
+    cumulInflNow,
+    annuityGrossNominal = 0,
+    annuityInflationLinked = true
   ) {
     const deflate = cumulInflNow > 0 ? 1 / cumulInflNow : 1;
     const totalReal = Math.max(0, (pension + isa + gia) * deflate);
-    // Upper bound: drawing the whole (real) pot plus the state pension in a single
-    // year cannot be sustained beyond it, so this always fails the rundown.
-    let hi = totalReal + computeStatePension(niYearsNow) + 1;
+    // Upper bound: drawing the whole (real) pot plus all guaranteed income in a
+    // single year cannot be sustained beyond it, so this always fails the rundown.
+    let hi =
+      totalReal + computeStatePension(niYearsNow) + Math.max(0, annuityGrossNominal * deflate) + 1;
     let lo = 0;
     for (let iter = 0; iter < 30; iter++) {
       const mid = (lo + hi) / 2;
@@ -853,7 +885,9 @@ export function projectLifecycle(
           unsecured,
           niYearsNow,
           cumulInflNow,
-          mid
+          mid,
+          annuityGrossNominal,
+          annuityInflationLinked
         )
       ) {
         lo = mid;
@@ -885,6 +919,34 @@ export function projectLifecycle(
       if (!Number.isFinite(ceilingPct) || ceilingPct < 100)
         throw new RangeError('retirementOptions.spendingGuardrails.ceilingPct must be >= 100');
       guardrails = { floor, ceilingPct, band, step };
+    }
+  }
+
+  // ── Lifetime annuity (a planned purchase) ──────────────────────────────────
+  // Converts part of the pension into guaranteed, taxable income for life, sized
+  // by an income target in today's money: either enough to cover `amountReal` of
+  // essential net spending on top of the state pension ('essential'), or a fixed
+  // gross income ('fixed'). Bought once, at the first retirement year at or after
+  // `purchaseAge` (and the pension access age). If the pension can't afford the
+  // target, it buys what it can. `rate` is the first year's income per £ of
+  // price; null means "use the illustrative table at the actual purchase age".
+  let annuityCfg = null;
+  {
+    const an = retirementOptions?.annuity ?? null;
+    if (an != null) {
+      const { purchaseAge, inflationLinked = true, rate = null, sizing, amountReal } = an;
+      if (!Number.isInteger(purchaseAge) || purchaseAge < 0)
+        throw new RangeError(
+          'retirementOptions.annuity.purchaseAge must be a non-negative integer'
+        );
+      if (typeof inflationLinked !== 'boolean')
+        throw new TypeError('retirementOptions.annuity.inflationLinked must be a boolean');
+      if (rate != null && (!Number.isFinite(rate) || rate <= 0 || rate > 0.5))
+        throw new RangeError('retirementOptions.annuity.rate must be in (0, 0.5] or null');
+      if (sizing !== 'essential' && sizing !== 'fixed')
+        throw new RangeError("retirementOptions.annuity.sizing must be 'essential' or 'fixed'");
+      assertNonNegativeFinite(amountReal, 'retirementOptions.annuity.amountReal');
+      annuityCfg = { purchaseAge, inflationLinked, rate, sizing, amountReal };
     }
   }
 
@@ -1378,6 +1440,9 @@ export function projectLifecycle(
   let class3YearsBought = 0;
   let class3TotalCost = 0;
 
+  // Annuity purchase outcome, read by the summary (null when no annuity planned).
+  let annuityResult = null;
+
   // ── Retirement phase ─────────────────────────────────────────────────────
   if (retirementOptions != null) {
     const {
@@ -1466,6 +1531,33 @@ export function projectLifecycle(
       : Infinity;
     let grSpendReal = targetNetAnnualExpenses;
 
+    // ── Annuity state ────────────────────────────────────────────────────────
+    // Bought at the first retirement year at or after the chosen age and the
+    // pension access age. `annuityIncome0` is the first-year gross income; an
+    // inflation-linked annuity then grows with each year's inflation.
+    const annuityBuyAge = annuityCfg
+      ? Math.max(annuityCfg.purchaseAge, actualRetirementAge, pensionAccessAge)
+      : Infinity;
+    let annuityIncome0 = 0;
+    let annuityCumInflAtPurchase = 1;
+    if (annuityCfg) {
+      annuityResult = {
+        purchased: false,
+        notNeeded: false,
+        purchaseAge: annuityBuyAge <= maxAge ? annuityBuyAge : null,
+        inflationLinked: annuityCfg.inflationLinked,
+        sizing: annuityCfg.sizing,
+        rate: null,
+        targetIncome: 0,
+        income: 0,
+        incomeReal: 0,
+        price: 0,
+        pensionUsed: 0,
+        taxFreeCash: 0,
+        coverage: 0,
+      };
+    }
+
     // ── Year-by-year loop ───────────────────────────────────────────────────
     for (let rAge = actualRetirementAge; rAge <= maxAge; rAge++) {
       const rYear = actualRetirementYear + (rAge - actualRetirementAge);
@@ -1496,6 +1588,18 @@ export function projectLifecycle(
       thresholdScale *= 1 + yrRet.inflationRate - fiscalDragRate;
       cumulTriplelock *= 1 + yrRetTriplelock;
 
+      // Annuity income already in payment this year (set at purchase below for
+      // the purchase year itself). Inflation-linked follows this year's
+      // (realised, under Monte Carlo) inflation; level stays fixed in cash terms.
+      let annuityGross =
+        annuityIncome0 > 0
+          ? round2(
+              annuityCfg.inflationLinked
+                ? (annuityIncome0 * cumulInflation) / annuityCumInflAtPurchase
+                : annuityIncome0
+            )
+          : 0;
+
       // ── Spending guardrails ──────────────────────────────────────────────
       // Flex the real spend toward what the opening pot can sustainably support
       // (central assumptions, no peeking). Trim if we've drifted above the
@@ -1512,7 +1616,9 @@ export function projectLifecycle(
           mortgageBalance,
           debts.reduce((s, d) => s + d.balance, 0),
           niYears,
-          cumulInflation
+          cumulInflation,
+          annuityGross,
+          annuityCfg?.inflationLinked ?? true
         );
         if (grSpendReal > sustainable * (1 + guardrails.band)) {
           grSpendReal = grSpendReal * (1 - guardrails.step);
@@ -1644,6 +1750,84 @@ export function projectLifecycle(
         pclsThisYear = true;
       }
 
+      // ── Annuity purchase (once) ───────────────────────────────────────────
+      // Placed after PCLS so the PCLS path buys from an already-crystallised pot.
+      let annuityPurchaseThisYear = null;
+      if (annuityCfg && rAge === annuityBuyAge) {
+        // First-year gross income target, in this year's money.
+        let targetIncome;
+        if (annuityCfg.sizing === 'fixed') {
+          targetIncome = round2(annuityCfg.amountReal * cumulInflation);
+        } else {
+          // Cover essential net spending on top of the state pension, sized to the
+          // permanent gap once the state pension is paid. If it hasn't started
+          // yet, use what it will pay (this year's rates, counting any Class 3
+          // years still planned); the years before it starts come from the pots.
+          const finalNiYears = niYears + class3YearsBought + class3YearsRemaining;
+          const spPlanned =
+            rAge >= spStartAge
+              ? spGross
+              : finalNiYears >= minimumQualifyingYears
+                ? round2(computeStatePension(finalNiYears) * cumulTriplelock * spDeferralUplift)
+                : 0;
+          const spPlannedNet = round2(
+            spPlanned - calculateIncomeTax(spPlanned, retThresholdScale).totalTax
+          );
+          const needNet = round2(
+            Math.max(0, annuityCfg.amountReal * cumulInflation - spPlannedNet)
+          );
+          // Gross up for income tax, stacked on top of the state pension.
+          targetIncome =
+            needNet > 0 ? pensionGrossForNet(needNet, Infinity, spPlanned, retThresholdScale) : 0;
+        }
+        const rate = annuityCfg.rate ?? illustrativeAnnuityRate(rAge, annuityCfg.inflationLinked);
+        annuityResult.rate = rate;
+        annuityResult.targetIncome = targetIncome;
+        if (targetIncome <= 0) {
+          annuityResult.notNeeded = true; // the state pension already covers it
+          annuityResult.coverage = 1;
+        } else if (pensionBal > 0) {
+          const wantedPrice = targetIncome / rate;
+          // On the UFPLS path the pot is uncrystallised: crystallising a slice pays
+          // 25% of it tax-free first (within the remaining LSA), so a bigger slice
+          // is needed to leave the wanted price. The PCLS path is already
+          // crystallised, so the slice is the price. Capped at what the pension holds.
+          let slice = wantedPrice;
+          if (!takePCLS) {
+            const grossedUp = wantedPrice / 0.75;
+            slice = 0.25 * grossedUp <= remainingLSA ? grossedUp : wantedPrice + remainingLSA;
+          }
+          slice = round2(Math.min(slice, pensionBal));
+          const taxFreeCash = takePCLS ? 0 : round2(Math.min(0.25 * slice, remainingLSA));
+          const price = round2(slice - taxFreeCash);
+          pensionBal = round2(pensionBal - slice);
+          if (taxFreeCash > 0) {
+            // Same destination as a PCLS: ISA up to this year's remaining headroom,
+            // the rest into the GIA at cost.
+            remainingLSA = round2(remainingLSA - taxFreeCash);
+            const toISA = round2(Math.min(taxFreeCash, Math.max(0, ISA_LIMIT - pclsToISAThisYear)));
+            isaBal = round2(isaBal + toISA);
+            giaBal = round2(giaBal + taxFreeCash - toISA);
+            costBasis = round2(costBasis + taxFreeCash - toISA);
+            pclsToISAThisYear = round2(pclsToISAThisYear + toISA);
+          }
+          annuityIncome0 = round2(price * rate);
+          annuityCumInflAtPurchase = cumulInflation;
+          annuityGross = annuityIncome0; // first payment this year
+          Object.assign(annuityResult, {
+            purchased: true,
+            income: annuityIncome0,
+            incomeReal: round2(annuityIncome0 / cumulInflation),
+            price,
+            pensionUsed: slice,
+            taxFreeCash,
+            coverage: Math.min(1, annuityIncome0 / targetIncome),
+          });
+          annuityPurchaseThisYear = { price, pensionUsed: slice, taxFreeCash, rate };
+        }
+        // Otherwise the pension is already empty: nothing bought, coverage stays 0.
+      }
+
       // ── Voluntary Class 3 NI purchase (this year) ─────────────────────────
       // A bridge year (before state pension age) buys one qualifying year while
       // any remain to buy. The cost joins the funding need below at LOWEST
@@ -1658,15 +1842,29 @@ export function projectLifecycle(
       // Mortgage, unsecured debt payments, and one-off expenses are added on top of
       // living expenses so the full drawdown need is accounted for. Any voluntary
       // Class 3 cost is added last (lowest priority).
-      let remaining = round2(
-        Math.max(0, targetExpenses - spNet) +
+      // Guaranteed income is the state pension plus any annuity, taxed together
+      // (both are pension income; the annuity stacks on top). It is netted
+      // against the whole year's need — living costs, mortgage, debts, one-offs
+      // and Class 3 — and anything left over is saved (below), not lost.
+      const guaranteedGross = round2(spGross + annuityGross);
+      const guaranteedNet =
+        annuityGross > 0
+          ? round2(
+              guaranteedGross - calculateIncomeTax(guaranteedGross, retThresholdScale).totalTax
+            )
+          : spNet;
+      const annuityNet = round2(guaranteedNet - spNet);
+      const totalNeed = round2(
+        targetExpenses +
           mortgagePaymentThisRetYear +
           retUnsecuredPayments +
           retExpenseAmt +
           class3CostThisYear
       );
+      let remaining = round2(Math.max(0, totalNeed - guaranteedNet));
+      const incomeSurplus = round2(Math.max(0, guaranteedNet - totalNeed));
 
-      // 1. Pension: fill remaining personal allowance after state pension (no tax)
+      // 1. Pension: fill remaining personal allowance after guaranteed income (no tax)
       // PCLS mode: the fund is fully crystallised — every £1 withdrawn is taxable income.
       // UFPLS mode: each £1 is [min(25%, LSA remaining / gross)] tax-free + rest taxable.
       // The step-1 limit is the gross needed so the taxable portion exactly fills the PA.
@@ -1680,7 +1878,7 @@ export function projectLifecycle(
       let step1TaxFree = 0;
       if (pensionAccessible && remaining > 0 && pensionBal > 0) {
         const scaledPA = round2(PERSONAL_ALLOWANCE * retThresholdScale);
-        const taxFreeRoom = round2(Math.max(0, scaledPA - spGross));
+        const taxFreeRoom = round2(Math.max(0, scaledPA - guaranteedGross));
         let step1Limit;
         if (takePCLS || taxFreeRoom <= 0) {
           step1Limit = taxFreeRoom;
@@ -1701,7 +1899,7 @@ export function projectLifecycle(
       }
       // Only the taxable portion counts as income for CGT band determination.
       const tfPensionIncome = round2(tfPension - step1TaxFree);
-      const incomeForCGT = round2(spGross + tfPensionIncome);
+      const incomeForCGT = round2(guaranteedGross + tfPensionIncome);
 
       // 2. GIA: harvest up to the annual CGT exempt amount (gains realised tax-free)
       // Track the pre-step-2 gain fraction so we can compute how much of the annual
@@ -1788,7 +1986,7 @@ export function projectLifecycle(
       // For UFPLS: may be less than 75% of draw once the LSA approaches exhaustion.
       const pensionTaxableIncome = round2(totalPensionDraw - step1TaxFree - step5TaxFree);
       const totalIncomeTax = round2(
-        calculateIncomeTax(spGross + pensionTaxableIncome, retThresholdScale).totalTax
+        calculateIncomeTax(guaranteedGross + pensionTaxableIncome, retThresholdScale).totalTax
       );
       const unmet = round2(Math.max(0, remaining));
       // The Class 3 cost sat at the bottom of the need, so any unmet amount eats
@@ -1810,6 +2008,14 @@ export function projectLifecycle(
       // expenses; net income achieved is floored at 0 rather than reported negative.
       const netAchieved = round2(Math.max(0, targetExpenses - shortfall));
 
+      // Surplus guaranteed income (beyond this year's whole need) is saved into
+      // the GIA at cost; the bed-and-ISA step then moves it into the ISA as
+      // headroom allows.
+      if (incomeSurplus > 0) {
+        giaBal = round2(giaBal + incomeSurplus);
+        costBasis = round2(costBasis + incomeSurplus);
+      }
+
       // ── Bed and ISA (retirement) ────────────────────────────────────────────
       // After funding expenses, any remaining GIA is moved into the ISA up to the
       // annual subscription limit (£20,000). Withdrawals from the ISA do not count
@@ -1826,7 +2032,7 @@ export function projectLifecycle(
         retBedIsaCGT = 0,
         retBedIsaNet = 0;
       if (retBedIsaHeadroom > 0 && giaBal > 0) {
-        const retIncomeForCGT = round2(spGross + pensionTaxableIncome);
+        const retIncomeForCGT = round2(guaranteedGross + pensionTaxableIncome);
         // Gross up so the net amount landing in the ISA equals the full headroom.
         const retGrossNeeded = giaGrossForNet(
           retBedIsaHeadroom,
@@ -1876,6 +2082,9 @@ export function projectLifecycle(
         phase: 'retirement',
 
         targetNetExpenses: targetExpenses,
+        // Cumulative price index since the start year (1 = today's money), so
+        // consumers can express this row's nominal figures in real terms.
+        inflationIndex: Math.round(cumulInflation * 1e6) / 1e6,
         // Spending-guardrails telemetry (real, today's money). Null-safe: when
         // guardrails are off, the budget just equals the target and no action fires.
         spendingBudgetReal: guardrails ? round2(grSpendReal) : null,
@@ -1884,6 +2093,10 @@ export function projectLifecycle(
         unsecuredDebtPayments: retUnsecuredPayments,
         statePensionGross: spGross,
         statePensionNet: spNet,
+        annuityGross,
+        annuityNet,
+        annuityPurchase: annuityPurchaseThisYear,
+        incomeSurplusSaved: incomeSurplus,
         taxFreePensionDrawdown: tfPension,
         taxablePensionDrawdown: taxablePension,
         pensionDrawdown: totalPensionDraw,
@@ -1907,6 +2120,7 @@ export function projectLifecycle(
         pension: {
           openingBalance: openPension,
           drawdown: totalPensionDraw,
+          annuityPurchase: annuityPurchaseThisYear?.pensionUsed ?? 0,
           growthAmount: pensionGrow,
           closingBalance: pensionBal,
         },
@@ -2004,6 +2218,7 @@ export function projectLifecycle(
       statePensionAge,
       statePensionStartAge: summaryStartAge,
       statePensionEligibleAtRetirement: actualRetirementAge >= statePensionAge,
+      annuity: annuityResult,
     },
     taxYear: TAX_YEAR,
   };

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { LIFECYCLE_CONSTANTS, projectLifecycle } from './ukLifecycle.js';
+import { illustrativeAnnuityRate } from './ukAnnuity.js';
 
 // ---------------------------------------------------------------------------
 // Minimal test runner
@@ -1853,6 +1854,168 @@ describe('spending guardrails', () => {
     bad({ floor: 20_000, step: 0 }, /step must be in \(0, 1\)/);
     bad({ floor: 20_000, step: 1 }, /step must be in \(0, 1\)/);
     bad({ floor: 20_000, ceilingPct: 99 }, /ceilingPct must be >= 100/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Lifetime annuity
+// ---------------------------------------------------------------------------
+
+describe('lifetime annuity', () => {
+  const anProfile = {
+    ...baseProfile,
+    currentAge: 64,
+    retirementAge: 65,
+    grossIncome: 40_000,
+    annualLivingExpenses: 20_000,
+    niContributionYears: 35,
+  };
+  const anRates = {
+    savingsRate: 0.062,
+    retirementRate: 0.046,
+    wageGrowthRate: 0.03,
+    inflationRate: 0.025,
+    boeRate: 0.0475,
+  };
+  const anPots = { pensionBalance: 500_000, isaBalance: 50_000 };
+  const TARGET = 30_000;
+  const project = (annuity, { takePCLS = true, pots = anPots, target = TARGET } = {}) =>
+    projectLifecycle(anProfile, anRates, pots, {
+      targetNetAnnualExpenses: target,
+      maxAge: 95,
+      takePCLS,
+      annuity,
+    });
+  const rowAt = (r, age) => r.yearlyBreakdown.find((x) => x.age === age);
+  // Cumulative inflation factor in a retirement year, recovered from the target.
+  const cumInfl = (r, age) => rowAt(r, age).targetNetExpenses / TARGET;
+  const fixed = (amountReal, extra = {}) => ({
+    purchaseAge: 75,
+    sizing: 'fixed',
+    amountReal,
+    rate: null,
+    ...extra,
+  });
+
+  it('off by default: no annuity summary or income', () => {
+    const r = project(undefined);
+    assert.equal(r.summary.annuity, null);
+    assert.ok(
+      r.yearlyBreakdown.filter((x) => x.phase === 'retirement').every((x) => x.annuityGross === 0)
+    );
+  });
+
+  it('fixed: buys the target real income at the table rate and cuts the pension by the price', () => {
+    const r = project(fixed(10_000));
+    const a = r.summary.annuity;
+    assert.equal(a.purchased, true);
+    assert.equal(a.purchaseAge, 75);
+    assert.equal(a.rate, illustrativeAnnuityRate(75, true));
+    assertApprox(a.income, round2Test(10_000 * cumInfl(r, 75)), 'income = target in 75 money');
+    assert.ok(Math.abs(a.price - a.income / a.rate) < 1, 'price = income / rate');
+    assert.equal(a.coverage, 1);
+    const r75 = rowAt(r, 75);
+    assertApprox(r75.pension.annuityPurchase, a.price, 'pension row records the purchase');
+    assert.equal(r75.annuityGross, a.income, 'first payment in the purchase year');
+    assert.equal(rowAt(r, 74).annuityGross, 0, 'nothing before the purchase');
+  });
+
+  it('inflation-linked income rises with inflation; level stays fixed in cash', () => {
+    const linked = project(fixed(10_000));
+    const ratio = rowAt(linked, 85).annuityGross / rowAt(linked, 75).annuityGross;
+    assert.ok(Math.abs(ratio - cumInfl(linked, 85) / cumInfl(linked, 75)) < 1e-3);
+    const level = project(fixed(10_000, { inflationLinked: false }));
+    assert.equal(level.summary.annuity.rate, illustrativeAnnuityRate(75, false));
+    assert.equal(rowAt(level, 95).annuityGross, rowAt(level, 75).annuityGross);
+  });
+
+  it('essential: state pension + annuity, net of tax, cover the essential spend', () => {
+    const r = project({ purchaseAge: 75, sizing: 'essential', amountReal: 22_000, rate: null });
+    const r75 = rowAt(r, 75);
+    const covered = r75.statePensionNet + r75.annuityNet;
+    assert.ok(Math.abs(covered - 22_000 * cumInfl(r, 75)) < 2, `covered ${covered}`);
+    assert.ok(r75.annuityNet < r75.annuityGross, 'annuity income is taxed');
+  });
+
+  it('essential: buys nothing when the state pension already covers it', () => {
+    const a = project({ purchaseAge: 75, sizing: 'essential', amountReal: 9_000, rate: null })
+      .summary.annuity;
+    assert.equal(a.notNeeded, true);
+    assert.equal(a.purchased, false);
+    assert.equal(a.coverage, 1);
+  });
+
+  it('UFPLS path takes 25% of the slice tax-free and still buys the same income', () => {
+    const pcls = project(fixed(10_000)).summary.annuity;
+    const ufpls = project(fixed(10_000), { takePCLS: false }).summary.annuity;
+    assertApprox(ufpls.income, pcls.income, 'same income');
+    assertApprox(ufpls.taxFreeCash, round2Test(0.25 * ufpls.pensionUsed), 'TFC = 25% of slice');
+    assertApprox(
+      ufpls.price,
+      round2Test(ufpls.pensionUsed - ufpls.taxFreeCash),
+      'price = slice − TFC'
+    );
+    assert.equal(pcls.taxFreeCash, 0, 'PCLS path is already crystallised');
+  });
+
+  it('buys what it can when the pension cannot afford the target', () => {
+    const r = project(fixed(40_000), {
+      pots: { pensionBalance: 150_000, isaBalance: 20_000 },
+      target: 14_000,
+    });
+    const a = r.summary.annuity;
+    assert.equal(a.purchased, true);
+    assert.ok(a.coverage > 0 && a.coverage < 1, `partial coverage ${a.coverage}`);
+    assert.equal(rowAt(r, 75).pension.closingBalance, 0, 'whole pension used');
+    const neg = r.yearlyBreakdown.some(
+      (x) => x.pension.closingBalance < 0 || x.isa.closingBalance < 0 || x.gia.closingBalance < 0
+    );
+    assert.equal(neg, false);
+  });
+
+  it('uses an explicit rate override', () => {
+    const a = project(fixed(10_000, { rate: 0.05 })).summary.annuity;
+    assert.equal(a.rate, 0.05);
+    assert.ok(Math.abs(a.price - a.income / 0.05) < 1);
+  });
+
+  it('buys no earlier than the first retirement year or the pension access age', () => {
+    assert.equal(project(fixed(5_000, { purchaseAge: 50 })).summary.annuity.purchaseAge, 65);
+    const early = projectLifecycle(
+      { ...anProfile, currentAge: 50, retirementAge: 52, pensionAccessAge: 57 },
+      anRates,
+      anPots,
+      { targetNetAnnualExpenses: 20_000, maxAge: 95, annuity: fixed(5_000, { purchaseAge: 53 }) }
+    );
+    assert.equal(early.summary.annuity.purchaseAge, 57);
+  });
+
+  it('saves surplus guaranteed income rather than losing it', () => {
+    const r = project(fixed(20_000), { target: 12_000 });
+    assert.ok(rowAt(r, 76).incomeSurplusSaved > 0);
+    assert.ok(rowAt(r, 95).isa.closingBalance > 0, 'surplus accumulates in the ISA');
+  });
+
+  it('keeps paying after the pots run dry, cutting late-life shortfalls', () => {
+    const pots = { pensionBalance: 300_000, isaBalance: 20_000 };
+    const lateShortfall = (r) =>
+      r.yearlyBreakdown.filter((x) => x.age >= 85).reduce((s, x) => s + (x.shortfall ?? 0), 0);
+    const without = project(undefined, { pots, target: 32_000 });
+    const withAnn = project(
+      { purchaseAge: 70, sizing: 'essential', amountReal: 24_000, rate: null },
+      { pots, target: 32_000 }
+    );
+    assert.ok(lateShortfall(withAnn) < lateShortfall(without));
+  });
+
+  it('validates the annuity options', () => {
+    const bad = (an, re) => assert.throws(() => project(an), re);
+    bad({ ...fixed(1), purchaseAge: 70.5 }, /purchaseAge/);
+    bad({ ...fixed(1), inflationLinked: 'yes' }, /inflationLinked/);
+    bad({ ...fixed(1), rate: 0 }, /rate/);
+    bad({ ...fixed(1), rate: 0.9 }, /rate/);
+    bad({ ...fixed(1), sizing: 'percent' }, /sizing/);
+    bad({ ...fixed(-5) }, /amountReal/);
   });
 });
 
