@@ -38,7 +38,7 @@ function isa(balance, projections, opts) {
 // ---------------------------------------------------------------------------
 
 describe('ISA_CONSTANTS', () => {
-  it('annual subscription limit is £20,000 for 2025/26', () => {
+  it('annual subscription limit is £20,000 for 2026/27', () => {
     assert.equal(ISA_CONSTANTS.annualSubscriptionLimit, 20_000);
   });
 });
@@ -289,7 +289,7 @@ describe('return shape', () => {
     ]) {
       assert.ok(key in r, `missing field: ${key}`);
     }
-    assert.equal(r.taxYear, '2025/26');
+    assert.equal(r.taxYear, '2026/27');
     assert.equal(r.annualLimit, 20_000);
   });
 

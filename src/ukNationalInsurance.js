@@ -1,9 +1,9 @@
 /**
- * UK National Insurance calculator — Class 1 (employment income), 2025/26
+ * UK National Insurance calculator — Class 1 (employment income), 2026/27
  *
  * Employee (Class 1 Primary):
- *   Below LEL  (£6,500)           : 0% — no NI paid, no NI credit towards State Pension
- *   LEL to PT  (£6,500–£12,570)   : 0% — no NI paid, but NI credit IS earned
+ *   Below LEL  (£6,708)           : 0% — no NI paid, no NI credit towards State Pension
+ *   LEL to PT  (£6,708–£12,570)   : 0% — no NI paid, but NI credit IS earned
  *   PT to UEL  (£12,570–£50,270)  : 8%
  *   Above UEL  (£50,270+)         : 2%
  *
@@ -15,12 +15,12 @@
  *
  * scaleFactor (optional, default 1): scales all monetary thresholds uniformly.
  * Pass (1 + inflationRate - fiscalDragRate)^i from the lifecycle module to model
- * fiscal drag. scaleFactor = 1 reproduces exact 2025/26 thresholds.
+ * fiscal drag. scaleFactor = 1 reproduces exact 2026/27 thresholds.
  *
- * Source: gov.uk/guidance/rates-and-thresholds-for-employers-2025-to-2026
+ * Source: gov.uk/guidance/rates-and-thresholds-for-employers-2026-to-2027
  */
 
-const TAX_YEAR = '2025/26';
+const TAX_YEAR = '2026/27';
 
 // ---------------------------------------------------------------------------
 // Published thresholds and rates
@@ -28,7 +28,7 @@ const TAX_YEAR = '2025/26';
 
 export const NI_THRESHOLDS = {
   employee: {
-    lowerEarningsLimit: 6_500, // LEL (2025/26: £125/week × 52): below this, no NI and no NI credit
+    lowerEarningsLimit: 6_708, // LEL (2026/27: £129/week × 52): below this, no NI and no NI credit
     primaryThreshold: 12_570, // PT:  NI contributions begin
     upperEarningsLimit: 50_270, // UEL: additional rate applies above this
     mainRate: 0.08, // 8%  on earnings between PT and UEL

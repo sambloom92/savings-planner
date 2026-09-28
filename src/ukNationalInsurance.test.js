@@ -38,16 +38,16 @@ function ni(gross) {
 // ---------------------------------------------------------------------------
 
 describe('NI_THRESHOLDS constants', () => {
-  it('employee thresholds are correct for 2025/26', () => {
+  it('employee thresholds are correct for 2026/27', () => {
     const emp = NI_THRESHOLDS.employee;
-    assert.equal(emp.lowerEarningsLimit, 6_500); // £125/week × 52
+    assert.equal(emp.lowerEarningsLimit, 6_708); // £129/week × 52
     assert.equal(emp.primaryThreshold, 12_570);
     assert.equal(emp.upperEarningsLimit, 50_270);
     assert.equal(emp.mainRate, 0.08);
     assert.equal(emp.additionalRate, 0.02);
   });
 
-  it('employer thresholds are correct for 2025/26', () => {
+  it('employer thresholds are correct for 2026/27', () => {
     const er = NI_THRESHOLDS.employer;
     assert.equal(er.secondaryThreshold, 5_000);
     assert.equal(er.rate, 0.15);
@@ -104,14 +104,14 @@ describe('below LEL (£6,500) — employee pays nothing, employer pays on income
     assertApprox(result.totalNI, 150, 'totalNI');
   });
 
-  it('grossIncome=6,500 — at LEL, employee still pays nothing', () => {
-    const result = ni(6_500);
+  it('grossIncome=6,708 — at LEL, employee still pays nothing', () => {
+    const result = ni(6_708);
     assert.equal(result.employeeNI.total, 0);
-    assertApprox(result.employerNI.contribution, 225, 'employer NI'); // 1500 * 0.15
+    assertApprox(result.employerNI.contribution, 256.2, 'employer NI'); // 1708 * 0.15
   });
 });
 
-describe('LEL to PT (£6,500–£12,570) — NI credit zone, employee pays nothing', () => {
+describe('LEL to PT (£6,708–£12,570) — NI credit zone, employee pays nothing', () => {
   it('grossIncome=10,000 — no employee NI, employer pays above ST', () => {
     const result = ni(10_000);
     assert.equal(result.employeeNI.total, 0);
@@ -239,7 +239,7 @@ describe('return shape', () => {
   it('result contains all expected fields', () => {
     const result = ni(30_000);
     assert.equal(result.grossIncome, 30_000);
-    assert.equal(result.taxYear, '2025/26');
+    assert.equal(result.taxYear, '2026/27');
 
     const emp = result.employeeNI;
     assert.ok('lowerEarningsLimit' in emp);

@@ -43,7 +43,7 @@ function assertApprox(actual, expected, label = '') {
 // ---------------------------------------------------------------------------
 
 describe('PENSION_CONSTANTS', () => {
-  it('annual allowance is £60,000 for 2025/26', () => {
+  it('annual allowance is £60,000 for 2026/27', () => {
     assert.equal(PENSION_CONSTANTS.annualAllowance, 60_000);
   });
 
@@ -275,7 +275,7 @@ describe('projectPensionAccumulation — return shape', () => {
     ]) {
       assert.ok(key in r, `missing field: ${key}`);
     }
-    assert.equal(r.taxYear, '2025/26');
+    assert.equal(r.taxYear, '2026/27');
     assert.equal(r.annualAllowance, 60_000);
   });
 
@@ -392,7 +392,7 @@ describe('calculatePCLS — lump sum calculation', () => {
   it('result includes lumpSumAllowance and taxYear', () => {
     const r = calculatePCLS(100_000);
     assert.equal(r.lumpSumAllowance, 268_275);
-    assert.equal(r.taxYear, '2025/26');
+    assert.equal(r.taxYear, '2026/27');
   });
 });
 
@@ -601,7 +601,7 @@ describe('projectPensionDrawdown — return shape', () => {
     ]) {
       assert.ok(key in r, `missing field: ${key}`);
     }
-    assert.equal(r.taxYear, '2025/26');
+    assert.equal(r.taxYear, '2026/27');
   });
 
   it('each yearlyBreakdown row contains all expected fields', () => {
@@ -712,7 +712,7 @@ describe('projectPension — return shape', () => {
     ]) {
       assert.ok(key in r, `missing field: ${key}`);
     }
-    assert.equal(r.taxYear, '2025/26');
+    assert.equal(r.taxYear, '2026/27');
   });
 });
 
@@ -1019,7 +1019,7 @@ describe('optimalEmployeePensionContribution — result shape', () => {
     ]) {
       assert.ok(key in r, `missing field: ${key}`);
     }
-    assert.equal(r.taxYear, '2025/26');
+    assert.equal(r.taxYear, '2026/27');
     assert.ok(Array.isArray(r.bandsCleared));
   });
 

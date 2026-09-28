@@ -1,5 +1,5 @@
 /**
- * General Investment Account (GIA) projection module — 2025/26
+ * General Investment Account (GIA) projection module — 2026/27
  *
  * Models an individual's GIA balance year by year, tracking:
  *   - Contributions (increase balance and cost basis equally)
@@ -7,7 +7,7 @@
  *   - Withdrawals and the Capital Gains Tax arising on the gain portion
  *   - Unrealised gain at year end (market value minus average cost basis)
  *
- * CGT calculation (2025/26):
+ * CGT calculation (2026/27; source: gov.uk/capital-gains-tax/allowances, /rates):
  *   Annual exempt amount : £3,000
  *   Basic rate           : 18%  (gains within the remaining basic rate band)
  *   Higher/addl rate     : 24%
@@ -38,7 +38,7 @@
 
 import { calculateTaxableIncome } from './ukIncomeTax.js';
 
-const TAX_YEAR = '2025/26';
+const TAX_YEAR = '2026/27';
 
 // ---------------------------------------------------------------------------
 // Published rates and thresholds

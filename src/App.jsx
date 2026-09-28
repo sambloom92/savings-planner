@@ -1,6 +1,7 @@
 import { useState, useMemo, useRef, useEffect, useCallback } from 'react';
 import { createPortal } from 'react-dom';
-import { projectLifecycle } from './ukLifecycle.js';
+import { projectLifecycle, LIFECYCLE_CONSTANTS } from './ukLifecycle.js';
+import { NI_THRESHOLDS } from './ukNationalInsurance.js';
 import { optimalEmployeePensionContribution, taperedAnnualAllowance } from './ukPension.js';
 import { runMonteCarlo } from './ukMonteCarlo.js';
 import { FanChart } from './FanChart.jsx';
@@ -70,7 +71,7 @@ const SERIES_HC = [
 
 // The calendar year the projection starts from — taken from the system clock so
 // year labels (and the student-loan start year) stay correct as time passes.
-// This is distinct from TAX_YEAR, the frozen 2025/26 tax regime the model uses.
+// This is distinct from TAX_YEAR, the frozen 2026/27 tax regime the model uses.
 const CURRENT_YEAR = new Date().getFullYear();
 
 const DEFAULTS = {
@@ -119,7 +120,7 @@ const DEFAULTS = {
   unsecuredRateType: 'fixed', // 'fixed' or 'boe'
   unsecuredRatePct: 10.0,
   unsecuredSpreadPct: 15.0,
-  boePct: 4.75,
+  boePct: 3.75, // Bank Rate, September 2026 (bankofengland.co.uk)
   inflationPct: 2.5,
   fiscalDragPct: 0,
   // Retirement
@@ -1220,7 +1221,7 @@ function AutoContributionReadout({ p }) {
       </div>
       <InfoBox>
         {explanation}
-        Based on today&apos;s salary and 2025/26 thresholds; the rate is held constant as your pay
+        Based on today&apos;s salary and 2026/27 thresholds; the rate is held constant as your pay
         grows, and affordability is not considered.
       </InfoBox>
     </>
@@ -1307,7 +1308,7 @@ function TopUpReadout({ p, topUp }) {
   if (yearsBought > 0) {
     msg =
       `Buys ${yearsBought} voluntary Class 3 year${yearsBought === 1 ? '' : 's'} between retirement ` +
-      `and state pension age, lifting you to ${niWithTopUp}/${full} qualifying years. About £923/yr ` +
+      `and state pension age, lifting you to ${niWithTopUp}/${full} qualifying years. About ${fmtGBP(LIFECYCLE_CONSTANTS.statePension.class3AnnualCost)}/yr ` +
       `(today's money); ${fmtGBP(totalCost)} in total funded from your pots over the bridge years.`;
   } else if (niAccrued >= full) {
     msg = `You already have ${niAccrued} qualifying years — the full state pension needs ${full}, so there's nothing to top up.`;
@@ -1548,7 +1549,7 @@ function TabContent({ tab, p, set, derived, topUp, annuity }) {
             step={1}
             format={fmtYrs}
             onChange={set('niContributionYears')}
-            help="National Insurance qualifying years already accrued before the projection starts. Each working year above the Lower Earnings Limit (£6,500 in 2025/26) adds one year. Full state pension requires 35 qualifying years; at least 10 are needed for any entitlement. To model buying voluntary Class 3 years for the gap between retirement and state pension age, use the State Pension Top-up toggle below (it costs and funds them automatically). For gaps from before now, add those years here — each adds 1/35th of the full pension for life."
+            help={`National Insurance qualifying years already accrued before the projection starts. Each working year above the Lower Earnings Limit (${fmtGBP(NI_THRESHOLDS.employee.lowerEarningsLimit)} in 2026/27) adds one year, up to your state pension age. Full state pension requires 35 qualifying years; at least 10 are needed for any entitlement. To model buying voluntary Class 3 years for the gap between retirement and state pension age, use the State Pension Top-up toggle below (it costs and funds them automatically). For gaps from before now, add those years here — each adds 1/35th of the full pension for life.`}
           />
           <Slider
             label="State Pension Age"
@@ -1576,7 +1577,7 @@ function TabContent({ tab, p, set, derived, topUp, annuity }) {
             optA={{ value: 'off', label: 'Off' }}
             optB={{ value: 'on', label: 'Auto top-up' }}
             onChange={(v) => set('topUpStatePension')(v === 'on')}
-            help="Off: your state pension reflects only the NI years you accrue by retirement. Auto top-up: the app buys voluntary Class 3 contributions to fill the gap toward the full 35 qualifying years — for the years between retirement and state pension age (when the gaps arise), and only if it can reach the 10-year minimum. Each year costs about £923 (2025/26), funded from your pots like any other spending, so it buys fewer years if you can't afford them, and never fabricates money. It recalculates automatically whenever you change your inputs. Gaps from before retirement aren't modelled here — add those to NI Qualifying Years above. Informational, not advice; check your own forecast at gov.uk/check-state-pension."
+            help={`Off: your state pension reflects only the NI years you accrue by retirement. Auto top-up: the app buys voluntary Class 3 contributions to fill the gap toward the full 35 qualifying years — for the years between retirement and state pension age (when the gaps arise), and only if it can reach the 10-year minimum. Each year costs about ${fmtGBP(LIFECYCLE_CONSTANTS.statePension.class3AnnualCost)} (2026/27), funded from your pots like any other spending, so it buys fewer years if you can't afford them, and never fabricates money. It recalculates automatically whenever you change your inputs. Gaps from before retirement aren't modelled here — add those to NI Qualifying Years above. Informational, not advice; check your own forecast at gov.uk/check-state-pension.`}
           />
           {p.topUpStatePension && <TopUpReadout p={p} topUp={topUp} />}
         </>
@@ -1630,7 +1631,7 @@ function TabContent({ tab, p, set, derived, topUp, annuity }) {
             optA={{ value: 'manual', label: 'Manual' }}
             optB={{ value: 'auto', label: 'Auto (tax-optimal)' }}
             onChange={(v) => set('employeePensionAuto')(v === 'auto')}
-            help="Manual: set your salary-sacrifice percentage yourself. Auto (tax-optimal): the app solves for the employee contribution that protects your tax-free personal allowance — it brings your taxable income down to £100,000, the point above which the allowance tapers away (an effective 60% marginal rate up to £125,140). It uses your salary, your employer contribution and the £60,000 annual allowance (tapered for high earners), and never sacrifices below the personal allowance. If your income is already below £100,000 there is nothing to protect, so it recommends 0%. When your employer contribution is Matched, it also contributes at least the required minimum to earn the full employer contribution. Based on today's salary and 2025/26 thresholds; affordability is not considered."
+            help="Manual: set your salary-sacrifice percentage yourself. Auto (tax-optimal): the app solves for the employee contribution that protects your tax-free personal allowance — it brings your taxable income down to £100,000, the point above which the allowance tapers away (an effective 60% marginal rate up to £125,140). It uses your salary, your employer contribution and the £60,000 annual allowance (tapered for high earners), and never sacrifices below the personal allowance. If your income is already below £100,000 there is nothing to protect, so it recommends 0%. When your employer contribution is Matched, it also contributes at least the required minimum to earn the full employer contribution. Based on today's salary and 2026/27 thresholds; affordability is not considered."
           />
           {p.employeePensionAuto ? (
             <AutoContributionReadout p={p} />

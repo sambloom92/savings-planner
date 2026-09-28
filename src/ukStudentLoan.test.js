@@ -131,18 +131,18 @@ describe('calculateStudentLoan — below threshold', () => {
 // ---------------------------------------------------------------------------
 
 describe('calculateStudentLoan — repayment amounts', () => {
-  it('plan1: 9% on income above £26,065', () => {
-    // £36,065 → £10,000 repayable → 9% = £900
-    assertApprox(calculateStudentLoan(36_065, 'plan1').repayment, 900);
-    assertApprox(calculateStudentLoan(26_065, 'plan1').repayment, 0);
+  it('plan1: 9% on income above £26,900', () => {
+    // £36,900 → £10,000 repayable → 9% = £900
+    assertApprox(calculateStudentLoan(36_900, 'plan1').repayment, 900);
+    assertApprox(calculateStudentLoan(26_900, 'plan1').repayment, 0);
   });
 
-  it('plan2: 9% on income above £28,470', () => {
-    assertApprox(calculateStudentLoan(38_470, 'plan2').repayment, 900);
+  it('plan2: 9% on income above £29,385', () => {
+    assertApprox(calculateStudentLoan(39_385, 'plan2').repayment, 900);
   });
 
-  it('plan4: 9% on income above £32,745', () => {
-    assertApprox(calculateStudentLoan(42_745, 'plan4').repayment, 900);
+  it('plan4: 9% on income above £33,795', () => {
+    assertApprox(calculateStudentLoan(43_795, 'plan4').repayment, 900);
   });
 
   it('plan5: 9% on income above £25,000', () => {
@@ -189,8 +189,8 @@ describe('calculateStudentLoan — return shape', () => {
     assert.equal(calculateStudentLoan(30_000, 'plan4').plan, 'plan4');
   });
 
-  it('taxYear is 2025/26', () => {
-    assert.equal(calculateStudentLoan(30_000, 'plan1').taxYear, '2025/26');
+  it('taxYear is 2026/27', () => {
+    assert.equal(calculateStudentLoan(30_000, 'plan1').taxYear, '2026/27');
   });
 });
 
@@ -219,20 +219,26 @@ describe('calculateAnnualInterestRate — plan 1', () => {
 // ---------------------------------------------------------------------------
 
 describe('calculateAnnualInterestRate — plan 2', () => {
-  it('returns RPI at and below the lower income threshold (£28,470)', () => {
-    assertApprox(calculateAnnualInterestRate('plan2', 28_470, 0.03), 0.03);
+  it('returns RPI at and below the lower income threshold (£29,385)', () => {
+    assertApprox(calculateAnnualInterestRate('plan2', 29_385, 0.03), 0.03);
     assertApprox(calculateAnnualInterestRate('plan2', 20_000, 0.03), 0.03);
   });
 
-  it('returns RPI+3% at and above the upper income threshold (£49,130)', () => {
-    assertApprox(calculateAnnualInterestRate('plan2', 49_130, 0.03), 0.06);
-    assertApprox(calculateAnnualInterestRate('plan2', 80_000, 0.03), 0.06);
+  it('returns RPI+3% at and above the upper income threshold (£52,885)', () => {
+    assertApprox(calculateAnnualInterestRate('plan2', 52_885, 0.02), 0.05);
+    assertApprox(calculateAnnualInterestRate('plan2', 80_000, 0.02), 0.05);
   });
 
-  it('returns RPI+1.5% exactly at the income midpoint (£38,800)', () => {
-    // fraction = (38800 - 28470) / (49130 - 28470) = 10330 / 20660 = 0.5
+  it('returns RPI+1.5% exactly at the income midpoint (£41,135)', () => {
+    // fraction = (41135 - 29385) / (52885 - 29385) = 11750 / 23500 = 0.5
     // rate = 3% + 0.5 × 3% = 4.5%
-    assertApprox(calculateAnnualInterestRate('plan2', 38_800, 0.03), 0.045);
+    assertApprox(calculateAnnualInterestRate('plan2', 41_135, 0.03), 0.045);
+  });
+
+  it('caps the rate at 6% (2026/27: RPI 4.1% → at most 6%, not 7.1%)', () => {
+    assertApprox(calculateAnnualInterestRate('plan2', 80_000, 0.041), 0.06);
+    // Midpoint: 4.1% + 1.5% = 5.6% — below the cap, so unaffected.
+    assertApprox(calculateAnnualInterestRate('plan2', 41_135, 0.041), 0.056);
   });
 });
 
@@ -255,6 +261,8 @@ describe('calculateAnnualInterestRate — plans 4, 5, postgrad', () => {
   it('postgrad: returns RPI + 3%', () => {
     assertApprox(calculateAnnualInterestRate('postgrad', 30_000, 0.03), 0.06);
     assertApprox(calculateAnnualInterestRate('postgrad', 30_000, 0.015), 0.045);
+    // Capped at 6%: RPI 4.1% + 3% = 7.1% → 6% (the 2026/27 postgraduate rate).
+    assertApprox(calculateAnnualInterestRate('postgrad', 30_000, 0.041), 0.06);
   });
 });
 
@@ -289,10 +297,12 @@ describe('projectLoanBalance — input validation', () => {
 // ---------------------------------------------------------------------------
 
 describe('projectLoanBalance — fully repaid', () => {
-  // plan4, £3,000 balance, £40,000 income, 5% RPI
-  // Repayment: (40000 - 32745) × 9% = £652.95/yr
-  // Loan paid off in year 6 (2030)
-  const proj = Array(10).fill({ grossIncome: 40_000, rpi: 0.05 });
+  // plan4, £3,000 balance, £40,000 income, 5% RPI, 5% Bank Rate (so the plan4
+  // rate is min(5%, 5% + 1%) = 5%, independent of the default Bank Rate).
+  // Repayment: (40000 - 33795) × 9% = £558.45/yr
+  // Balance: 3150.00−558.45=2591.55 → 2162.68 → 1712.36 → 1239.53 → 743.06 →
+  //          221.76 → year 7: 221.76 + 11.09 interest = 232.85 repaid in full.
+  const proj = Array(10).fill({ grossIncome: 40_000, rpi: 0.05, boeRate: 0.05 });
   let result;
   it('sets up result', () => {
     result = projectLoanBalance('plan4', 3_000, 2025, proj);
@@ -303,22 +313,24 @@ describe('projectLoanBalance — fully repaid', () => {
     assert.equal(y1.year, 2025);
     assertApprox(y1.openingBalance, 3_000);
     assertApprox(y1.interestCharged, 150); // 3000 × 5%
-    assertApprox(y1.annualRepayment, 652.95);
-    assertApprox(y1.closingBalance, 2_497.05);
+    assertApprox(y1.annualRepayment, 558.45);
+    assertApprox(y1.closingBalance, 2_591.55);
     assert.equal(y1.writtenOff, false);
   });
 
-  it('loan is fully repaid in year 6 (2030)', () => {
-    assert.equal(result.yearlyBreakdown.length, 6);
-    const last = result.yearlyBreakdown[5];
-    assert.equal(last.year, 2030);
+  it('loan is fully repaid in year 7 (2031)', () => {
+    assert.equal(result.yearlyBreakdown.length, 7);
+    const last = result.yearlyBreakdown[6];
+    assert.equal(last.year, 2031);
+    assertApprox(last.annualRepayment, 232.85);
     assert.equal(last.closingBalance, 0);
     assert.equal(last.writtenOff, false);
   });
 
   it('totalRepaid equals initialBalance plus totalInterestCharged', () => {
-    assertApprox(result.totalRepaid, 3_496.67);
-    assertApprox(result.totalInterestCharged, 496.67);
+    // Interest: 150 + 129.58 + 108.13 + 85.62 + 61.98 + 37.15 + 11.09 = 583.55
+    assertApprox(result.totalRepaid, 3_583.55);
+    assertApprox(result.totalInterestCharged, 583.55);
     assertApprox(result.totalRepaid, 3_000 + result.totalInterestCharged);
   });
 
@@ -412,17 +424,17 @@ describe('projectLoanBalance — incomplete projection', () => {
 // ---------------------------------------------------------------------------
 
 describe('projectLoanBalance — plan 2 income-based interest', () => {
-  // income = £38,800 sits exactly at the midpoint of plan2's interest band
+  // income = £41,135 sits exactly at the midpoint of plan2's interest band
   // → rate = RPI(3%) + 1.5% = 4.5%
-  const proj = [{ grossIncome: 38_800, rpi: 0.03 }];
+  const proj = [{ grossIncome: 41_135, rpi: 0.03 }];
 
   it('year 1: applies 4.5% interest and correct repayment', () => {
     const result = projectLoanBalance('plan2', 10_000, 2025, proj);
     const y1 = result.yearlyBreakdown[0];
     assertApprox(y1.annualInterestRate, 0.045);
     assertApprox(y1.interestCharged, 450); // 10000 × 4.5%
-    assertApprox(y1.annualRepayment, 929.7); // (38800 - 28470) × 9%
-    assertApprox(y1.closingBalance, 9_520.3);
+    assertApprox(y1.annualRepayment, 1_057.5); // (41135 - 29385) × 9%
+    assertApprox(y1.closingBalance, 9_392.5); // 10000 + 450 - 1057.50
   });
 });
 
@@ -548,13 +560,13 @@ describe('calculateTaxAndLoans — no student loans', () => {
 
 describe('calculateTaxAndLoans — single plan', () => {
   it('adds correct plan2 repayment to deductions for £35,000', () => {
-    // plan2: (35000 - 28470) × 9% = 6530 × 9% = £587.70
+    // plan2: (35000 - 29385) × 9% = 5615 × 9% = £505.35
     // tax:   (35000 - 12570) × 20% = 22430 × 20% = £4,486
     const result = calculateTaxAndLoans(35_000, ['plan2']);
-    assertApprox(result.studentLoans[0].repayment, 587.7);
-    assertApprox(result.totalStudentLoanRepayment, 587.7);
-    assertApprox(result.totalDeductions, 4_486 + 587.7);
-    assertApprox(result.netIncomeAfterLoans, 35_000 - 4_486 - 587.7);
+    assertApprox(result.studentLoans[0].repayment, 505.35);
+    assertApprox(result.totalStudentLoanRepayment, 505.35);
+    assertApprox(result.totalDeductions, 4_486 + 505.35);
+    assertApprox(result.netIncomeAfterLoans, 35_000 - 4_486 - 505.35);
   });
 
   it('income below loan threshold: loan repayment is zero', () => {
@@ -566,13 +578,13 @@ describe('calculateTaxAndLoans — single plan', () => {
 
 describe('calculateTaxAndLoans — multiple plans', () => {
   it('sums plan2 + postgrad repayments for £40,000', () => {
-    // plan2:   (40000 - 28470) × 9%  = 11530 × 9%  = £1,037.70
+    // plan2:   (40000 - 29385) × 9%  = 10615 × 9%  = £955.35
     // postgrad: (40000 - 21000) × 6% = 19000 × 6%  = £1,140
     const result = calculateTaxAndLoans(40_000, ['plan2', 'postgrad']);
     assert.equal(result.studentLoans.length, 2);
-    assertApprox(result.studentLoans.find((l) => l.plan === 'plan2').repayment, 1_037.7);
+    assertApprox(result.studentLoans.find((l) => l.plan === 'plan2').repayment, 955.35);
     assertApprox(result.studentLoans.find((l) => l.plan === 'postgrad').repayment, 1_140);
-    assertApprox(result.totalStudentLoanRepayment, 2_177.7);
+    assertApprox(result.totalStudentLoanRepayment, 2_095.35);
   });
 
   it('netIncomeAfterLoans equals gross minus tax minus all repayments', () => {

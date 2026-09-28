@@ -42,7 +42,7 @@ import { PENSION_CONSTANTS, calculatePCLS, taperedAnnualAllowance } from './ukPe
 import { GIA_CGT_CONSTANTS } from './ukGIA.js';
 import { illustrativeAnnuityRate } from './ukAnnuity.js';
 
-const TAX_YEAR = '2025/26';
+const TAX_YEAR = '2026/27';
 
 // ---------------------------------------------------------------------------
 // Published constants
@@ -50,7 +50,7 @@ const TAX_YEAR = '2025/26';
 
 export const LIFECYCLE_CONSTANTS = {
   statePension: {
-    fullAnnualAmount: 11_973, // 2025/26: £230.25/week × 52
+    fullAnnualAmount: 12_547.6, // 2026/27: £241.30/week × 52 (gov.uk/new-state-pension)
     qualifyingYearsForFull: 35,
     minimumQualifyingYears: 10,
     defaultStatePensionAge: 67,
@@ -60,10 +60,10 @@ export const LIFECYCLE_CONSTANTS = {
     // be taken as a one-off arrears payment with no interest — not modelled.
     // Source: gov.uk/deferring-state-pension
     deferralUpliftPerYear: 0.0578,
-    // Voluntary Class 3 NI: cost of buying one qualifying year (2025/26:
-    // £17.75/week × 52). Today's money — inflated when paid. Each year bought
+    // Voluntary Class 3 NI: cost of buying one qualifying year (2026/27:
+    // £18.40/week × 52). Today's money — inflated when paid. Each year bought
     // adds 1/35 of the full state pension. Source: gov.uk/voluntary-national-insurance-contributions
-    class3AnnualCost: 923,
+    class3AnnualCost: 956.8,
   },
   pension: {
     // Normal Minimum Pension Age (NMPA): earliest age a DC pension is accessible.
@@ -173,7 +173,7 @@ function getRateForAge(
 
 // ── Retirement-phase helpers ─────────────────────────────────────────────────
 
-// UK income tax personal allowance (2025/26)
+// UK income tax personal allowance (2026/27, frozen at £12,570)
 const PERSONAL_ALLOWANCE = 12_570;
 
 /**
@@ -463,7 +463,7 @@ export function projectLifecycle(
     // phase. Default false. Only meaningful with a retirement phase.
     topUpStatePension = false,
     // Normal Minimum Pension Age — the earliest age a DC pension can be accessed
-    // (2025/26: 55, rising to 57 in April 2028). Before it, no PCLS or drawdown.
+    // (55 today, rising to 57 in April 2028). Before it, no PCLS or drawdown.
     pensionAccessAge = LIFECYCLE_CONSTANTS.pension.defaultAccessAge,
     studentLoanPlan = null,
     windfalls = [],
@@ -1706,7 +1706,7 @@ export function projectLifecycle(
       const retThresholdScale = thresholdScale;
 
       // State pension — nominal amount at this retirement year. The base grows
-      // from the 2025/26 rate by the triple lock, max(wageGrowth, CPI, 2.5%).
+      // from the 2026/27 rate by the triple lock, max(wageGrowth, CPI, 2.5%).
       // Deferral delays the start and adds ~5.78% of the pension at claim per
       // deferred year; that extra then rises with CPI only (see spClaimAge).
       const spStartAge = statePensionAge + statePensionDeferralYears;
