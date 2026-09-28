@@ -3,6 +3,7 @@ import {
   useMemo,
   useRef,
   useEffect,
+  useLayoutEffect,
   useCallback,
   createContext,
   useContext,
@@ -542,44 +543,150 @@ const PencilIcon = () => (
   </svg>
 );
 
-function HelpTip({ text }) {
-  const [tipPos, setTipPos] = useState(null);
-  const ref = useRef(null);
+// Desktop popover placement.
+const TIP_WIDTH = 240;
+const TIP_GAP = 6; // between icon and popover
+const TIP_MARGIN = 8; // kept clear of the window edges
 
-  function show() {
-    if (!ref.current) return;
-    const r = ref.current.getBoundingClientRect();
-    setTipPos({ top: r.bottom + 6, left: Math.max(8, r.left - 220) });
-  }
+// ⓘ help. On desktop, hover previews it and a click pins it open; the popover
+// opens on whichever side of the icon has room, stays inside the window,
+// scrolls when it is still too long, and can be hovered into for scrolling or
+// selecting text. On phones a tap opens the text in a bottom sheet. `title`
+// names the sheet and the icon's accessible label.
+function HelpTip({ text, title }) {
+  const compact = useContext(CompactContext);
+  const [open, setOpen] = useState(null); // null | 'hover' | 'pinned'
+  const iconRef = useRef(null);
+  const tipRef = useRef(null);
+  const closeTimer = useRef(null);
+
+  const close = useCallback(() => {
+    clearTimeout(closeTimer.current);
+    setOpen(null);
+  }, []);
+  useEffect(() => () => clearTimeout(closeTimer.current), []);
+
+  // A hover preview closes shortly after the pointer leaves both the icon and
+  // the popover (the delay bridges the gap between them); a pinned one stays.
+  const scheduleClose = () => {
+    clearTimeout(closeTimer.current);
+    closeTimer.current = setTimeout(() => setOpen((o) => (o === 'hover' ? null : o)), 150);
+  };
+
+  // Place the popover before it paints: measure its full height, then open it
+  // below the icon if it fits, else above if that fits, else on the roomier
+  // side capped to that space (it then scrolls). Styles are written directly
+  // so measuring and placing happen in one pass.
+  useLayoutEffect(() => {
+    const icon = iconRef.current;
+    const tip = tipRef.current;
+    if (!open || compact || !icon || !tip) return;
+    const r = icon.getBoundingClientRect();
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    const width = Math.min(TIP_WIDTH, vw - 2 * TIP_MARGIN);
+    tip.style.width = `${width}px`;
+    tip.style.maxHeight = 'none';
+    const natural = tip.offsetHeight;
+    const below = vh - r.bottom - TIP_GAP - TIP_MARGIN;
+    const above = r.top - TIP_GAP - TIP_MARGIN;
+    const placeBelow = natural <= below || (natural > above && below >= above);
+    const room = Math.max(60, placeBelow ? below : above);
+    const height = Math.min(natural, room);
+    tip.style.maxHeight = `${room}px`;
+    tip.style.top = `${placeBelow ? r.bottom + TIP_GAP : r.top - TIP_GAP - height}px`;
+    tip.style.left = `${Math.min(Math.max(TIP_MARGIN, r.left - 220), vw - width - TIP_MARGIN)}px`;
+    tip.style.visibility = 'visible';
+  }, [open, compact, text]);
+
+  // While a popover is open: Escape, a click elsewhere, scrolling anything but
+  // the popover (which would leave it behind) or resizing closes it.
+  useEffect(() => {
+    if (!open || compact) return;
+    const inside = (t) => iconRef.current?.contains(t) || tipRef.current?.contains(t);
+    const onKey = (e) => {
+      if (e.key === 'Escape') close();
+    };
+    const onOutside = (e) => {
+      if (!inside(e.target)) close();
+    };
+    document.addEventListener('keydown', onKey);
+    document.addEventListener('pointerdown', onOutside);
+    window.addEventListener('scroll', onOutside, true);
+    window.addEventListener('resize', close);
+    return () => {
+      document.removeEventListener('keydown', onKey);
+      document.removeEventListener('pointerdown', onOutside);
+      window.removeEventListener('scroll', onOutside, true);
+      window.removeEventListener('resize', close);
+    };
+  }, [open, compact, close]);
 
   return (
     <>
-      <span
-        ref={ref}
-        onMouseEnter={show}
-        onMouseLeave={() => setTipPos(null)}
+      <button
+        type="button"
+        ref={iconRef}
+        aria-label={title ? `About ${title}` : 'More information'}
+        aria-expanded={open !== null}
+        onMouseEnter={() => {
+          if (compact) return; // taps also fire mouse events; phones use the click
+          clearTimeout(closeTimer.current);
+          setOpen((o) => o ?? 'hover');
+        }}
+        onMouseLeave={() => {
+          if (!compact) scheduleClose();
+        }}
+        onClick={() => {
+          clearTimeout(closeTimer.current);
+          setOpen((o) => (compact ? 'pinned' : o === 'pinned' ? null : 'pinned'));
+        }}
         style={{
+          background: 'none',
+          border: 'none',
+          margin: 0,
+          marginLeft: compact ? 1 : 5,
+          // A larger tap target on phones; the glyph itself stays small.
+          padding: compact ? '4px 6px' : 0,
           cursor: 'help',
           color: 'var(--text-muted)',
-          fontSize: 10,
-          marginLeft: 5,
-          opacity: 0.6,
+          fontFamily: 'inherit',
+          fontSize: compact ? 12 : 10,
+          opacity: open ? 1 : 0.6,
           userSelect: 'none',
           lineHeight: 1,
         }}
       >
         ⓘ
-      </span>
-      {tipPos &&
-        createPortal(
+      </button>
+      {compact && open && (
+        <Sheet title={title ?? 'About this'} onClose={close}>
           <div
             style={{
+              fontSize: 13,
+              lineHeight: 1.65,
+              color: 'var(--text-secondary)',
+              whiteSpace: 'pre-line',
+            }}
+          >
+            {text}
+          </div>
+        </Sheet>
+      )}
+      {!compact &&
+        open &&
+        createPortal(
+          <div
+            ref={tipRef}
+            role="tooltip"
+            onMouseEnter={() => clearTimeout(closeTimer.current)}
+            onMouseLeave={scheduleClose}
+            style={{
               position: 'fixed',
-              top: tipPos.top,
-              left: tipPos.left,
-              width: 240,
+              visibility: 'hidden', // shown once placed (see the layout effect)
+              overflowY: 'auto',
               background: 'var(--bg-card)',
-              border: '1px solid var(--border-bright)',
+              border: `1px solid ${open === 'pinned' ? 'var(--accent-gold)' : 'var(--border-bright)'}`,
               borderRadius: 7,
               padding: '9px 12px',
               fontSize: 11,
@@ -588,7 +695,6 @@ function HelpTip({ text }) {
               zIndex: 9999,
               whiteSpace: 'pre-line',
               boxShadow: 'var(--shadow-tooltip)',
-              pointerEvents: 'none',
             }}
           >
             {text}
@@ -703,7 +809,7 @@ function Slider({
           }}
         >
           {label}
-          {help && <HelpTip text={help} />}
+          {help && <HelpTip text={help} title={label} />}
         </span>
         <span style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
           {compact && (
@@ -849,7 +955,7 @@ function Select({ label, value, options, onChange, help }) {
         >
           {label}
         </span>
-        {help && <HelpTip text={help} />}
+        {help && <HelpTip text={help} title={label} />}
       </div>
       <select
         value={value}
@@ -897,7 +1003,7 @@ function Toggle({ label, value, optA, optB, onChange, help }) {
         >
           {label}
         </span>
-        {help && <HelpTip text={help} />}
+        {help && <HelpTip text={help} title={label} />}
       </div>
       <div
         style={{
@@ -1120,7 +1226,7 @@ function StatCard({ label, value, color, subtitle, note, help }) {
         }}
       >
         {label}
-        {help && <HelpTip text={help} />}
+        {help && <HelpTip text={help} title={label} />}
       </div>
       <div
         style={{
@@ -1341,7 +1447,7 @@ function EventSection({ p, events, onChange, title, accent, intro, help, placeho
       <div style={{ ...eventSectionTitleStyle, color: accent }}>{title}</div>
       <p style={eventIntroStyle}>
         {intro}
-        <HelpTip text={help} />
+        <HelpTip text={help} title={title} />
       </p>
       {events.map((ev, idx) => {
         const enabled = ev.enabled !== false;
@@ -1402,7 +1508,10 @@ function WorkingHoursSection({ p, events, onChange, accent }) {
         Model going part-time, a phased ramp-down to retirement, or a temporary career break. From
         the chosen age your employment income steps to the given percentage of your full-time salary
         and holds until the next change (100% before the first).
-        <HelpTip text="Employment income and both employee and employer pension contributions are scaled pro-rata; income tax, National Insurance, student-loan repayments and savings all follow automatically. The full-time salary keeps growing underneath, so returning to 100% restores full pay. Watch the state pension: a year whose reduced pay falls below the NI Lower Earnings Limit (about £6,400) no longer counts as a qualifying year. This model does not add NI credits — if you would qualify for Carer's Credit or Child Benefit credits during a break, your real state pension may hold up better than shown. Percentages are of your full-time-equivalent salary, floored at 1%; to model stopping work entirely, set your retirement age instead. Changes are marked ◆ on the chart. Use the ON/OFF toggle for before/after comparisons." />
+        <HelpTip
+          title="Working hours"
+          text="Employment income and both employee and employer pension contributions are scaled pro-rata; income tax, National Insurance, student-loan repayments and savings all follow automatically. The full-time salary keeps growing underneath, so returning to 100% restores full pay. Watch the state pension: a year whose reduced pay falls below the NI Lower Earnings Limit (about £6,400) no longer counts as a qualifying year. This model does not add NI credits — if you would qualify for Carer's Credit or Child Benefit credits during a break, your real state pension may hold up better than shown. Percentages are of your full-time-equivalent salary, floored at 1%; to model stopping work entirely, set your retirement age instead. Changes are marked ◆ on the chart. Use the ON/OFF toggle for before/after comparisons."
+        />
       </p>
       {events.map((ev, idx) => {
         const enabled = ev.enabled !== false;
@@ -1643,7 +1752,10 @@ function DerivedSavingsReadout({ derived }) {
           }}
         >
           Derived Annual Savings
-          <HelpTip text="What's left of your net take-home after debt payments and living expenses each year — the model invests it (ISA first, then GIA). This is not a separate input: change your living expenses (or debts) to change it. Shown for the first year in today's money; it varies over time as your salary, debts and expenses evolve." />
+          <HelpTip
+            title="Derived annual savings"
+            text="What's left of your net take-home after debt payments and living expenses each year — the model invests it (ISA first, then GIA). This is not a separate input: change your living expenses (or debts) to change it. Shown for the first year in today's money; it varies over time as your salary, debts and expenses evolve."
+          />
         </span>
         <span
           style={{
@@ -2504,7 +2616,10 @@ function TabContent({ tab, p, set, derived, topUp, annuity }) {
                 }}
               >
                 Sex (for survival)
-                <HelpTip text="Sets the mortality table used for the lifetime-solvency figure — the chance of never running out of money while you're alive. Female mortality is lower, so a longer expected lifespan gives more exposure to late shortfalls. 'Neutral' blends the male and female rates. This affects only the lifetime-solvency number, never the projection itself or the fan bands. It's a rough population estimate, not individual health." />
+                <HelpTip
+                  title="Sex (for survival)"
+                  text="Sets the mortality table used for the lifetime-solvency figure — the chance of never running out of money while you're alive. Female mortality is lower, so a longer expected lifespan gives more exposure to late shortfalls. 'Neutral' blends the male and female rates. This affects only the lifetime-solvency number, never the projection itself or the fan bands. It's a rough population estimate, not individual health."
+                />
               </span>
               <div
                 style={{
@@ -2740,7 +2855,10 @@ function TabContent({ tab, p, set, derived, topUp, annuity }) {
                     }}
                   >
                     Spending floor
-                    <HelpTip text="The level guardrails will never cut below: your essential expenses, set in the Retire tab (shared with the annuity's 'cover essential spending' option). Below it a bad trial counts as a genuine shortfall; above it, a squeeze is modelled as reduced spending rather than ruin." />
+                    <HelpTip
+                      title="Spending floor"
+                      text="The level guardrails will never cut below: your essential expenses, set in the Retire tab (shared with the annuity's 'cover essential spending' option). Below it a bad trial counts as a genuine shortfall; above it, a squeeze is modelled as reduced spending rather than ruin."
+                    />
                   </span>
                   <span
                     style={{
@@ -2798,7 +2916,10 @@ function TabContent({ tab, p, set, derived, topUp, annuity }) {
                   >
                     Sensitivity
                   </span>
-                  <HelpTip text="How reactive the guardrails are. Gentle: a wide tolerance band and small 5% steps — spending moves rarely and slowly. Responsive: a narrow band and larger steps — spending tracks the sustainable level more tightly. Standard sits between." />
+                  <HelpTip
+                    title="Sensitivity"
+                    text="How reactive the guardrails are. Gentle: a wide tolerance band and small 5% steps — spending moves rarely and slowly. Responsive: a narrow band and larger steps — spending tracks the sustainable level more tightly. Standard sits between."
+                  />
                 </div>
                 <div
                   style={{
@@ -4352,7 +4473,10 @@ export default function App() {
           );
         })}
       </div>
-      <HelpTip text="Nominal: all figures shown in future pounds (the actual cash amounts at each age). Real: figures are adjusted for inflation and expressed in today's purchasing power, so you can compare values across different ages on a like-for-like basis. Uses the inflation rate set in the Rates tab." />
+      <HelpTip
+        title="Nominal vs real"
+        text="Nominal: all figures shown in future pounds (the actual cash amounts at each age). Real: figures are adjusted for inflation and expressed in today's purchasing power, so you can compare values across different ages on a like-for-like basis. Uses the inflation rate set in the Rates tab."
+      />
       <div
         style={{
           display: 'flex',
@@ -4385,7 +4509,10 @@ export default function App() {
           );
         })}
       </div>
-      <HelpTip text="Linear: y-axis uses a linear scale — equal distances represent equal pound amounts. Log: y-axis uses a logarithmic scale — equal distances represent equal percentage growth, making early portfolio growth more visible." />
+      <HelpTip
+        title="Linear vs log scale"
+        text="Linear: y-axis uses a linear scale — equal distances represent equal pound amounts. Log: y-axis uses a logarithmic scale — equal distances represent equal percentage growth, making early portfolio growth more visible."
+      />
       <div
         style={{
           display: 'flex',
@@ -4419,6 +4546,7 @@ export default function App() {
         })}
       </div>
       <HelpTip
+        title="All balances vs available funds"
         text="All balances: the chart shows your whole pot — pension + ISA + GIA — at every age. Available funds: shows only money you could actually spend at that age. Your defined-contribution pension is excluded before your pension access age (set in the Pension tab), because it's locked until then; ISA and GIA count throughout.
 
 Two other age gates matter for what you can actually rely on, both marked on the chart:
@@ -4801,6 +4929,7 @@ Use Available funds to see whether an early-retirement plan can bridge the gap u
           ))}
         </div>
         <HelpTip
+          title="Deterministic vs Monte Carlo"
           text={
             'Deterministic: one fixed projection using the exact rates you set in the Rates tab. Useful for understanding how the plan works and stress-testing specific assumptions. Because it uses a single unchanging set of assumptions, it is inherently optimistic — there is no mechanism for things to go wrong beyond what you explicitly model.\n\n' +
             'Monte Carlo: runs hundreds of simulations, each with a different random sequence of market returns and economic conditions. The fan chart shows the spread of outcomes — the wide band is the 10th–90th percentile range, the narrow band is 25th–75th, and the centre line is the median. The simulation is calibrated so the median trial tracks the deterministic projection — your return rate sliders represent full-cycle expected returns, already inclusive of bear markets. The fan shows what happens when bad years cluster unluckily (p10) or conditions are unusually favourable (p90).\n\n' +
@@ -4827,6 +4956,7 @@ Use Available funds to see whether an early-retirement plan can bridge the gap u
         >
           4% rule: {fmtGBPLarge(fourPctTarget)}
           <HelpTip
+            title="4% rule"
             text={
               'The 4% rule is a retirement planning heuristic: if you withdraw 4% of your portfolio in year one and adjust for inflation each year, historical data suggests the portfolio survives a 30-year retirement. This implies you need 25× your annual spending saved (1 ÷ 0.04 = 25).\n\n' +
               'This line shows that target in ' +
@@ -4843,6 +4973,7 @@ Use Available funds to see whether an early-retirement plan can bridge the gap u
       {!mobile && solvencyReadout}
       {chartTab === 'mc' && (
         <HelpTip
+          title="Monte Carlo results"
           text={
             `${mcResults ? mcResults.trialCount : 0} trials shown. Each trial varies investment returns (market factor) and inflation / BoE / wage growth (macro factor) using correlated random shocks.\n\n` +
             'Solvent for life: the chance you never run out of money while still alive — the complement of the lifetime probability of ruin. Each trial that runs dry is weighted by the probability you live to see it (from UK population mortality for the selected sex, set in the Simulation tab), so dying with money left counts as success. Set high enough that the age horizon reaches ~100 for this to be meaningful.\n\n' +
