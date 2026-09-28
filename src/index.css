@@ -168,3 +168,15 @@ input[type='range']::-moz-range-thumb {
   background: var(--accent-gold);
   cursor: pointer;
 }
+
+/* Touch screens: bigger thumbs so sliders are easy to grab with a finger. */
+@media (pointer: coarse) {
+  input[type='range']::-webkit-slider-thumb {
+    width: 22px;
+    height: 22px;
+  }
+  input[type='range']::-moz-range-thumb {
+    width: 22px;
+    height: 22px;
+  }
+}

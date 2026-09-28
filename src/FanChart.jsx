@@ -737,14 +737,14 @@ function drawFanChart(
 }
 
 // ── Legend strip ──────────────────────────────────────────────────────────────
-function FanLegend() {
+function FanLegend({ compact = false }) {
   return (
     <div
       style={{
         display: 'flex',
         alignItems: 'center',
-        gap: 14,
-        flexWrap: 'wrap',
+        gap: compact ? 10 : 14,
+        flexWrap: compact ? 'nowrap' : 'wrap',
       }}
     >
       {/* Band swatches — three coloured regions matching the canvas bands */}
@@ -840,6 +840,8 @@ export function FanChart({
   fundsView = 'all',
   annuityAge = null,
   retirementIsTarget = false,
+  onSelectRow = null,
+  compact = false,
   height = 390,
 }) {
   const canvasRef = useRef(null);
@@ -1070,12 +1072,14 @@ export function FanChart({
     retirementIsTarget,
   ]);
 
-  // Mousemove: update hover; frozen while a trial is locked
-  const handleMouseMove = useCallback(
+  // Hit-test a pointer event: the nearest age column and, in fan mode, the
+  // nearest percentile line at that age, plus the year's detail row (the
+  // deterministic row, or the representative path for that percentile).
+  // Null outside the plot area.
+  const hitTest = useCallback(
     (e) => {
-      if (lockedTrial && !deterministicData) return; // keep MC locked view stable
       const info = coordRef.current;
-      if (!info || !info.xOf) return;
+      if (!info || !info.xOf) return null;
 
       const canvas = canvasRef.current;
       const rect = canvas.getBoundingClientRect();
@@ -1085,18 +1089,12 @@ export function FanChart({
       const { minAge, maxAgeVal, adjData: data, cW, cH, yOf } = info;
 
       const chartX = x - PAD.left;
-      if (chartX < 0 || chartX > cW || y < PAD.top || y > PAD.top + cH) {
-        if (hoverState !== null) {
-          setHoverState(null);
-          if (onHoverRow) onHoverRow(null);
-        }
-        return;
-      }
+      if (chartX < 0 || chartX > cW || y < PAD.top || y > PAD.top + cH) return null;
 
       const ageFloat = minAge + (chartX / cW) * (maxAgeVal - minAge);
       const age = Math.round(Math.max(minAge, Math.min(maxAgeVal, ageFloat)));
       const ageRow = data.find((d) => d.age === age);
-      if (!ageRow) return;
+      if (!ageRow) return undefined; // inside the plot but no data: leave hover as is
 
       let nearestKey = 'p50';
       let nearestDist = Infinity;
@@ -1111,23 +1109,50 @@ export function FanChart({
         }
       }
 
-      if (!hoverState || hoverState.age !== age || hoverState.pctKey !== nearestKey) {
-        setHoverState({ age, pctKey: nearestKey, ageRow });
-        if (onHoverRow) {
-          if (deterministicData) {
-            const detRow = adjDetData?.find((r) => r.age === age)?._detail ?? null;
-            onHoverRow(detRow);
-          } else if (repPaths) {
-            const pctNum = PCT_CFG[nearestKey].pct;
-            const pathRow = (repPaths[pctNum] ?? []).find((r) => r.age === age) ?? null;
-            onHoverRow(pathRow);
-          }
-        }
+      let row = null;
+      if (deterministicData) {
+        row = adjDetData?.find((r) => r.age === age)?._detail ?? null;
+      } else if (repPaths) {
+        const pctNum = PCT_CFG[nearestKey].pct;
+        row = (repPaths[pctNum] ?? []).find((r) => r.age === age) ?? null;
       }
+      return { age, pctKey: nearestKey, ageRow, row };
     },
-    [lockedTrial, hoverState, repPaths, onHoverRow, deterministicData, adjDetData]
+    [repPaths, deterministicData, adjDetData]
   );
 
+  // Mousemove: update hover; frozen while a trial is locked
+  const handleMouseMove = useCallback(
+    (e) => {
+      if (lockedTrial && !deterministicData) return; // keep MC locked view stable
+      const hit = hitTest(e);
+      if (hit === undefined) return;
+      if (hit === null) {
+        if (hoverState !== null) {
+          setHoverState(null);
+          if (onHoverRow) onHoverRow(null);
+        }
+        return;
+      }
+      const { age, pctKey, ageRow, row } = hit;
+      if (!hoverState || hoverState.age !== age || hoverState.pctKey !== pctKey) {
+        setHoverState({ age, pctKey, ageRow });
+        if (onHoverRow && (deterministicData || repPaths)) onHoverRow(row);
+      }
+    },
+    [lockedTrial, hoverState, onHoverRow, deterministicData, repPaths, hitTest]
+  );
+
+  // Click (or tap): report the year under the pointer, for layouts that show
+  // the year detail on demand rather than on hover.
+  const handleClick = useCallback(
+    (e) => {
+      if (!onSelectRow) return;
+      const hit = hitTest(e);
+      if (hit?.row) onSelectRow(hit.row);
+    },
+    [onSelectRow, hitTest]
+  );
   // Mousedown: find the trial closest to the hovered percentile at the hovered
   // age and lock to it.
   const handleMouseDown = useCallback(
@@ -1181,18 +1206,28 @@ export function FanChart({
       {/* Legend */}
       <div
         style={{
-          paddingLeft: PAD.left,
-          marginBottom: 10,
+          paddingLeft: compact ? 12 : PAD.left,
+          marginBottom: compact ? 4 : 10,
           display: 'flex',
           justifyContent: 'space-between',
           alignItems: 'center',
-          flexWrap: 'wrap',
+          // Compact layouts keep the legend to one line that scrolls sideways.
+          flexWrap: compact ? 'nowrap' : 'wrap',
+          overflowX: compact ? 'auto' : 'visible',
+          whiteSpace: compact ? 'nowrap' : 'normal',
           gap: 8,
         }}
       >
         {/* In locked mode or det mode show pot legend; otherwise show percentile band legend */}
         {(isLocked || deterministicData) && potSeries ? (
-          <div style={{ display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap' }}>
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: compact ? 10 : 14,
+              flexWrap: compact ? 'nowrap' : 'wrap',
+            }}
+          >
             {/* Assets: GIA → ISA → Pension (top-to-bottom stacking order) */}
             {[...potSeries]
               .filter((s) => POT_STACK_ORDER.includes(s.key))
@@ -1246,7 +1281,7 @@ export function FanChart({
               ))}
           </div>
         ) : (
-          <FanLegend />
+          <FanLegend compact={compact} />
         )}
         {isLocked ? (
           <span
@@ -1282,11 +1317,12 @@ export function FanChart({
           onMouseDown={handleMouseDown}
           onMouseUp={handleMouseUp}
           onMouseLeave={handleMouseLeave}
+          onClick={handleClick}
         />
       </div>
 
       {/* Hint */}
-      {showDetails && !isLocked && (
+      {showDetails && !isLocked && !compact && (
         <div
           style={{
             paddingLeft: PAD.left,

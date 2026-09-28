@@ -25,6 +25,7 @@ A browser-based retirement savings projection dashboard for residents of England
 - **Real / nominal toggle** — switch between future cash values and today's purchasing power at any time
 - **All balances / available funds toggle** — view the whole pot, or only money spendable at each age (the pension is excluded before its access age); a prompt flags when spendable funds run out while a locked pension keeps the total balance above zero
 - **Year detail panel** — hover the chart to see a full breakdown of every money flow for that year
+- **Phone layouts** — on a phone the chart stays on screen while you edit: beside the inputs in landscape, pinned above them in portrait, with only the inputs scrolling. Headline results sit in a one-line summary; the full result cards, Monte Carlo readouts and snapshot table, the view options, and undo/scenario actions are each one tap away, and tapping the chart shows that year's breakdown. Sliders get −/+ step buttons and long explanations fold away. Typed values apply after a short pause everywhere, without needing Enter
 - **Export / import** — copy parameters as JSON and paste them back to save or share a scenario
 - **Static site** — no server needed; deployable to GitHub Pages or any CDN
 
