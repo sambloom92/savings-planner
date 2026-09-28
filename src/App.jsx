@@ -3812,21 +3812,12 @@ export default function App() {
       ...collect(p.oneOffExpenses, 'expense', 'Expense'),
       ...collectHours(p.employmentChanges),
     ];
-    // Annuity purchase, at the age the central projection actually buys it.
-    const annuity = summary?.annuity;
-    if (annuity?.purchased) {
-      markers.push({ age: annuity.purchaseAge, label: 'Annuity', kind: 'annuity' });
-    }
     return markers.length > 0 ? markers : null;
-  }, [
-    p.windfalls,
-    p.oneOffExpenses,
-    p.employmentChanges,
-    p.currentAge,
-    p.retirementAge,
-    p.maxAge,
-    summary?.annuity,
-  ]);
+  }, [p.windfalls, p.oneOffExpenses, p.employmentChanges, p.currentAge, p.retirementAge, p.maxAge]);
+
+  // Annuity purchase age for the chart's reference line: the age the central
+  // projection actually buys it (null when no annuity is bought).
+  const annuityChartAge = summary?.annuity?.purchased ? summary.annuity.purchaseAge : null;
 
   // 4% rule: need 25× annual spending as a portfolio (1 / 0.04 = 25).
   // Expressed in the same terms as the chart (real or nominal).
@@ -4794,6 +4785,8 @@ Use Available funds to see whether an early-retirement plan can bridge the gap u
                     colorMode={colorMode}
                     logScale={logScale}
                     eventMarkers={eventMarkers}
+                    annuityAge={annuityChartAge}
+                    retirementIsTarget={p.flexibleRetirement}
                     survivalSeries={mcResults.solvency?.survival}
                     shortfallMarkers={mcResults.solvency?.shortfallMarkers}
                     shortfallAges={mcResults.shortfallAges}
@@ -5086,6 +5079,7 @@ Use Available funds to see whether an early-retirement plan can bridge the gap u
                   colorMode={colorMode}
                   logScale={logScale}
                   eventMarkers={eventMarkers}
+                  annuityAge={annuityChartAge}
                   fundsView={fundsView}
                   height={mobile ? 260 : 390}
                 />
