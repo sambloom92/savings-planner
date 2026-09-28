@@ -2019,6 +2019,259 @@ describe('lifetime annuity', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// State pension: deferral in the sustainability check, surplus handling
+// ---------------------------------------------------------------------------
+
+describe('state pension deferral and surplus', () => {
+  const spRates = {
+    savingsRate: 0.05,
+    retirementRate: 0.04,
+    wageGrowthRate: 0.03,
+    inflationRate: 0.025,
+    boeRate: 0.0475,
+    debtRate: 0.045,
+  };
+
+  it('the on-track check counts the deferral increase, not just the later start', () => {
+    // Deferring 5 years lifts the state pension ~29% from 72. Counting only the
+    // later start made this plan look unaffordable at 65 and delayed retirement.
+    const s = projectLifecycle(
+      {
+        ...baseProfile,
+        currentAge: 60,
+        retirementAge: 65,
+        grossIncome: 50_000,
+        annualLivingExpenses: 20_000,
+        employeePensionRate: 0.1,
+        employerPensionRate: 0.05,
+        niContributionYears: 35,
+        statePensionDeferralYears: 5,
+      },
+      spRates,
+      { pensionBalance: 250_000, isaBalance: 150_000 },
+      {
+        targetNetAnnualExpenses: 31_500,
+        maxAge: 95,
+        takePCLS: true,
+        flexibleRetirement: true,
+        maxRetirementDelayYears: 5,
+      }
+    ).summary;
+    assert.equal(s.retirementDelayYears, 0);
+  });
+
+  it('guardrails see the deferred (increased) state pension as sustainable income', () => {
+    // A small pot plus the state pension deferred to 71 (+~23%) sustains this
+    // target; counting only the un-increased pension, a tight guardrail cut it.
+    const r = projectLifecycle(
+      {
+        ...baseProfile,
+        currentAge: 70,
+        retirementAge: 71,
+        grossIncome: 30_000,
+        annualLivingExpenses: 20_000, // keep the pot small
+        niContributionYears: 35,
+        statePensionDeferralYears: 4,
+      },
+      spRates,
+      { isaBalance: 5_000 },
+      {
+        targetNetAnnualExpenses: 14_500,
+        maxAge: 95,
+        spendingGuardrails: { floor: 9_000, ceilingPct: 100, band: 0.05, step: 0.1 },
+      }
+    );
+    const cuts = r.yearlyBreakdown.filter((x) => x.guardrailAction === 'cut');
+    assert.equal(cuts.length, 0, `unexpected cuts at ${cuts.map((x) => x.age).join(', ')}`);
+  });
+
+  it('the deferral extra rises with CPI while the base keeps the triple lock', () => {
+    // Wages 3% > CPI 2.5%, so the triple lock is 3%. Claim at 70 after 3 years'
+    // deferral: extra = 3 × 5.78% of the pension at 70, then CPI-uprated.
+    const r = projectLifecycle(
+      {
+        ...baseProfile,
+        currentAge: 64,
+        retirementAge: 65,
+        grossIncome: 30_000,
+        niContributionYears: 35,
+        statePensionDeferralYears: 3,
+      },
+      spRates,
+      { pensionBalance: 400_000, isaBalance: 50_000 },
+      { targetNetAnnualExpenses: 25_000, maxAge: 90 }
+    );
+    const { fullAnnualAmount: full, deferralUpliftPerYear: up } = LIFECYCLE_CONSTANTS.statePension;
+    const expected = (age) =>
+      full * 1.03 ** (age - 64) + full * 1.03 ** (70 - 64) * (3 * up) * 1.025 ** (age - 70);
+    const sp = (age) => r.yearlyBreakdown.find((x) => x.age === age).statePensionGross;
+    assert.equal(sp(69), 0, 'nothing before the deferred start');
+    assert.ok(Math.abs(sp(70) - expected(70)) < 0.05, `at 70: ${sp(70)} vs ${expected(70)}`);
+    assert.ok(Math.abs(sp(85) - expected(85)) < 0.05, `at 85: ${sp(85)} vs ${expected(85)}`);
+  });
+
+  it('without deferral the whole pension keeps the triple lock', () => {
+    const r = projectLifecycle(
+      {
+        ...baseProfile,
+        currentAge: 64,
+        retirementAge: 65,
+        grossIncome: 30_000,
+        niContributionYears: 35,
+      },
+      spRates,
+      { pensionBalance: 400_000 },
+      { targetNetAnnualExpenses: 25_000, maxAge: 90 }
+    );
+    const sp85 = r.yearlyBreakdown.find((x) => x.age === 85).statePensionGross;
+    const full = LIFECYCLE_CONSTANTS.statePension.fullAnnualAmount;
+    assert.ok(Math.abs(sp85 - full * 1.03 ** (85 - 64)) < 0.05);
+  });
+
+  it('treats a claim before the projection starts as claimed at the start', () => {
+    // Claimed at 70 (67 + 3), projection starts at 72: extra CPI-uprated from 72.
+    const r = projectLifecycle(
+      {
+        ...baseProfile,
+        currentAge: 72,
+        retirementAge: 73,
+        grossIncome: 20_000,
+        niContributionYears: 35,
+        statePensionDeferralYears: 3,
+      },
+      spRates,
+      { pensionBalance: 200_000 },
+      { targetNetAnnualExpenses: 20_000, maxAge: 90 }
+    );
+    const { fullAnnualAmount: full, deferralUpliftPerYear: up } = LIFECYCLE_CONSTANTS.statePension;
+    const sp80 = r.yearlyBreakdown.find((x) => x.age === 80).statePensionGross;
+    const expected80 = full * 1.03 ** 8 + full * (3 * up) * 1.025 ** 8;
+    assert.ok(Math.abs(sp80 - expected80) < 0.05, `${sp80} vs ${expected80}`);
+  });
+
+  // Working past state pension age (67): the pension is paid from the claim age
+  // even while working, employee NI stops, and qualifying years stop accruing.
+  const worker = {
+    ...baseProfile,
+    currentAge: 64,
+    retirementAge: 70,
+    grossIncome: 40_000,
+    annualLivingExpenses: 20_000,
+    niContributionYears: 30,
+  };
+  const workerRun = (extra = {}) =>
+    projectLifecycle(
+      { ...worker, ...extra },
+      spRates,
+      { pensionBalance: 200_000 },
+      {
+        targetNetAnnualExpenses: 25_000,
+        maxAge: 90,
+      }
+    );
+  const at = (r, age) => r.yearlyBreakdown.find((x) => x.age === age);
+
+  it('pays the state pension from state pension age while still working', () => {
+    const r = workerRun();
+    const full = LIFECYCLE_CONSTANTS.statePension.fullAnnualAmount;
+    assert.equal(at(r, 66).statePensionGross, 0);
+    // 33 qualifying years (30 + three working years before 67), triple-locked.
+    const expected68 = (33 / 35) * full * 1.03 ** (68 - 64);
+    assert.ok(Math.abs(at(r, 68).statePensionGross - expected68) < 0.05);
+    const row = at(r, 68);
+    assertApprox(
+      row.netTakeHome,
+      round2Test(
+        row.grossIncome +
+          row.statePensionGross -
+          row.employeeContribution -
+          row.incomeTax -
+          row.employeeNI -
+          row.studentLoanRepayment
+      ),
+      'take-home includes the state pension'
+    );
+  });
+
+  it('taxes the state pension on top of salary while working', () => {
+    const claim = at(workerRun(), 68);
+    const defer = at(workerRun({ statePensionDeferralYears: 3 }), 68); // same salary, no pension yet
+    assert.equal(defer.statePensionGross, 0);
+    // A basic-rate taxpayer here: the pension adds 20% of itself in tax.
+    const extraTax = claim.incomeTax - defer.incomeTax;
+    assert.ok(Math.abs(extraTax - 0.2 * claim.statePensionGross) < 2, `extra tax ${extraTax}`);
+  });
+
+  it('stops employee NI and qualifying years from state pension age', () => {
+    const r = workerRun();
+    assert.ok(at(r, 66).employeeNI > 0);
+    assert.equal(at(r, 67).employeeNI, 0);
+    assert.equal(at(r, 69).employeeNI, 0);
+    assert.equal(at(r, 66).cumulativeNIYears, 33);
+    assert.equal(at(r, 69).cumulativeNIYears, 33, 'no qualifying years after 67');
+    assert.equal(r.summary.niYearsAccrued, 33);
+  });
+
+  it('deferring while working pays nothing until the claim, then the increased pension', () => {
+    const r = workerRun({ statePensionDeferralYears: 3 });
+    const { fullAnnualAmount: full, deferralUpliftPerYear: up } = LIFECYCLE_CONSTANTS.statePension;
+    assert.equal(at(r, 69).statePensionGross, 0);
+    const expected70 = (33 / 35) * full * 1.03 ** (70 - 64) * (1 + 3 * up);
+    assert.ok(Math.abs(at(r, 70).statePensionGross - expected70) < 0.05);
+  });
+
+  // Regression: a state pension above the living-cost target used to be
+  // discarded — it could not pay other bills and was not saved.
+  const surplusProfile = {
+    ...baseProfile,
+    currentAge: 64,
+    retirementAge: 65,
+    grossIncome: 30_000,
+    niContributionYears: 35,
+  };
+  const retRow = (r, age) =>
+    r.yearlyBreakdown.find((x) => x.phase === 'retirement' && x.age === age);
+
+  it('saves state pension beyond the living-cost target', () => {
+    const r = projectLifecycle(
+      surplusProfile,
+      spRates,
+      { isaBalance: 100_000 },
+      {
+        targetNetAnnualExpenses: 8_000,
+        maxAge: 90,
+      }
+    );
+    const row = retRow(r, 68);
+    assert.equal(row.isaWithdrawal, 0, 'nothing drawn from the pots');
+    assertApprox(
+      row.incomeSurplusSaved,
+      round2Test(row.statePensionNet - row.targetNetExpenses),
+      'surplus'
+    );
+  });
+
+  it('uses surplus state pension towards the mortgage before drawing on the pots', () => {
+    const r = projectLifecycle(
+      surplusProfile,
+      spRates,
+      { isaBalance: 100_000, mortgage: { balance: 60_000, termYears: 10 } },
+      { targetNetAnnualExpenses: 8_000, maxAge: 90 }
+    );
+    const row = retRow(r, 68);
+    assert.ok(row.mortgagePayment > 0);
+    assert.ok(row.statePensionNet > row.targetNetExpenses, 'state pension exceeds living costs');
+    // ISA draws are tax-free, so the draw is exactly the unmet part of the bill.
+    assertApprox(
+      row.isaWithdrawal,
+      round2Test(row.targetNetExpenses + row.mortgagePayment - row.statePensionNet),
+      'ISA covers only the rest'
+    );
+    assert.equal(row.incomeSurplusSaved, 0);
+  });
+});
+
 // Small local rounding helper mirroring the module's round2, for test sums.
 function round2Test(n) {
   return Math.round(n * 100) / 100;

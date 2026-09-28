@@ -1567,8 +1567,8 @@ function TabContent({ tab, p, set, derived, topUp, annuity }) {
             max={10}
             step={1}
             format={fmtYrs}
-            onChange={set('statePensionDeferralYears')}
-            help="Years to defer claiming your state pension past state pension age. Each deferred year permanently increases the amount by about 5.8% (1% per 9 weeks, new state pension rules). Deferring means more income later at the cost of drawing more from your pots in the gap years."
+            onChange={(v) => set('statePensionDeferralYears')(Math.max(0, Math.round(v)))}
+            help="Years to defer claiming your state pension past state pension age. Each deferred year adds about 5.8% of the pension at the time you claim (1% per 9 weeks, new state pension rules). That extra then rises with CPI each year, while the base pension keeps the triple lock. It takes roughly 17 years to earn back each year deferred, and under the new rules a partner can't inherit it — so it mainly suits people still working (especially higher-rate taxpayers) or expecting a long life. Deferring means drawing more from your pots in the gap years."
           />
           <Toggle
             label="State Pension Top-up (Class 3)"
@@ -2689,6 +2689,13 @@ function YearDetailPanel({ row, mobile = false }) {
             indent={1}
           />
           <DetailLine label="Adjusted gross" value={fmtGBP(row.adjustedGrossIncome)} dim />
+          {(row.statePensionGross ?? 0) > 0 && (
+            <DetailLine
+              label="+ State pension (while working)"
+              value={fmtGBP(row.statePensionGross)}
+              color="#a78bfa"
+            />
+          )}
           <DetailLine
             label="− Income tax"
             value={fmtGBP(row.incomeTax)}
