@@ -2272,6 +2272,118 @@ describe('state pension deferral and surplus', () => {
   });
 });
 
+describe('estimated tax on pension withdrawal', () => {
+  // Display-only estimate: basic rate (20%) on the taxable part of the closing pot.
+  const LSA = 268_275;
+  const retRows = (r) => r.yearlyBreakdown.filter((x) => x.phase === 'retirement');
+  const lateProfile = { ...baseProfile, currentAge: 58, retirementAge: 60 };
+  const pots = { pensionBalance: 400_000, isaBalance: 50_000 };
+
+  it('accumulation: 75% of the pot is taxable', () => {
+    // Baseline closing pension 3,424 → 3,424 × 75% × 20% = 513.60
+    const row = run().yearlyBreakdown[0];
+    assertApprox(row.pension.closingBalance, 3_424, 'closing');
+    assertApprox(row.pension.estimatedTaxOnWithdrawal, 513.6, 'estimated tax');
+  });
+
+  it('accumulation: a planned partial lump sum leaves more of the pot taxable', () => {
+    // 10% tax-free: 3,424 × 90% × 20% = 616.32
+    const r = projectLifecycle(
+      baseProfile,
+      baseRates,
+      {},
+      {
+        targetNetAnnualExpenses: 10_000,
+        maxAge: 40,
+        takePCLS: true,
+        pclsPercentage: 0.1,
+      }
+    );
+    assertApprox(r.yearlyBreakdown[0].pension.estimatedTaxOnWithdrawal, 616.32, 'estimated tax');
+  });
+
+  it('accumulation: the tax-free part is capped by the Lump Sum Allowance', () => {
+    const row = run(baseProfile, baseRates, { pensionBalance: 1_500_000 }).yearlyBreakdown[0];
+    assertApprox(
+      row.pension.estimatedTaxOnWithdrawal,
+      round2Test((row.pension.closingBalance - LSA) * 0.2),
+      'estimated tax'
+    );
+  });
+
+  it('after the lump sum is taken, the whole pot is taxable', () => {
+    const r = projectLifecycle(lateProfile, baseRates, pots, {
+      targetNetAnnualExpenses: 25_000,
+      maxAge: 75,
+      takePCLS: true,
+    });
+    for (const row of retRows(r)) {
+      assertApprox(
+        row.pension.estimatedTaxOnWithdrawal,
+        round2Test(row.pension.closingBalance * 0.2),
+        `age ${row.age}`
+      );
+    }
+  });
+
+  it('UFPLS: 25% stays tax-free while the allowance lasts', () => {
+    // A pot small enough that 25% of it never exceeds the allowance left.
+    const r = projectLifecycle(
+      lateProfile,
+      baseRates,
+      { ...pots, pensionBalance: 200_000 },
+      {
+        targetNetAnnualExpenses: 25_000,
+        maxAge: 75,
+      }
+    );
+    for (const row of retRows(r)) {
+      assertApprox(
+        row.pension.estimatedTaxOnWithdrawal,
+        round2Test(row.pension.closingBalance * 0.75 * 0.2),
+        `age ${row.age}`
+      );
+    }
+  });
+
+  it('UFPLS: only the Lump Sum Allowance left counts as tax-free', () => {
+    // A £2m pot: 25% exceeds the allowance, so the tax-free part is whatever is
+    // left of the £268,275 after the year's withdrawals took 25% tax-free.
+    const r = projectLifecycle(
+      lateProfile,
+      baseRates,
+      { pensionBalance: 2_000_000 },
+      { targetNetAnnualExpenses: 40_000, maxAge: 75 }
+    );
+    const row = retRows(r)[0];
+    const usedLSA =
+      round2Test(0.25 * row.taxFreePensionDrawdown) + round2Test(0.25 * row.taxablePensionDrawdown);
+    assert.ok(usedLSA > 0, 'no tax-free cash drawn');
+    assertApprox(
+      row.pension.estimatedTaxOnWithdrawal,
+      round2Test((row.pension.closingBalance - (LSA - usedLSA)) * 0.2),
+      'estimated tax'
+    );
+  });
+
+  it('early retirement: the pot stays 25% tax-free until the deferred lump sum', () => {
+    const r = projectLifecycle(
+      { ...baseProfile, currentAge: 50, retirementAge: 52 },
+      baseRates,
+      { pensionBalance: 500_000, isaBalance: 120_000 },
+      { targetNetAnnualExpenses: 25_000, maxAge: 70, takePCLS: true }
+    );
+    for (const row of retRows(r)) {
+      const taxableShare = row.age < 57 ? 0.75 : 1;
+      assertApprox(
+        row.pension.estimatedTaxOnWithdrawal,
+        round2Test(row.pension.closingBalance * taxableShare * 0.2),
+        `age ${row.age}`
+      );
+    }
+  });
+});
+
 // Small local rounding helper mirroring the module's round2, for test sums.
 function round2Test(n) {
   return Math.round(n * 100) / 100;

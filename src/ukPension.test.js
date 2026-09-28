@@ -5,6 +5,7 @@ import {
   optimalEmployeePensionContribution,
   projectPensionAccumulation,
   calculatePCLS,
+  estimatePensionWithdrawalTax,
   projectPensionDrawdown,
   projectPension,
 } from './ukPension.js';
@@ -393,6 +394,57 @@ describe('calculatePCLS — lump sum calculation', () => {
     const r = calculatePCLS(100_000);
     assert.equal(r.lumpSumAllowance, 268_275);
     assert.equal(r.taxYear, '2026/27');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// estimatePensionWithdrawalTax
+// ---------------------------------------------------------------------------
+
+describe('estimatePensionWithdrawalTax', () => {
+  it('uncrystallised pot: basic rate on the 75% that is taxable', () => {
+    // 100,000 − 25,000 tax-free = 75,000 taxable × 20% = 15,000
+    assert.equal(estimatePensionWithdrawalTax(100_000), 15_000);
+  });
+
+  it('crystallised pot (lump sum taken): basic rate on all of it', () => {
+    assert.equal(estimatePensionWithdrawalTax(100_000, { taxFreeShare: 0 }), 20_000);
+  });
+
+  it('a partial lump-sum share leaves the rest taxable', () => {
+    // 10% tax-free: 90,000 taxable × 20% = 18,000
+    assert.equal(estimatePensionWithdrawalTax(100_000, { taxFreeShare: 0.1 }), 18_000);
+  });
+
+  it('the tax-free part is capped by the full Lump Sum Allowance', () => {
+    // 25% of 2m = 500,000 > £268,275 → taxable 1,731,725 × 20% = 346,345
+    assert.equal(estimatePensionWithdrawalTax(2_000_000), 346_345);
+  });
+
+  it('the tax-free part is capped by the Lump Sum Allowance left', () => {
+    // Only 10,000 of the allowance left: 90,000 taxable × 20% = 18,000
+    assert.equal(estimatePensionWithdrawalTax(100_000, { remainingLSA: 10_000 }), 18_000);
+    // Allowance used up: all taxable
+    assert.equal(estimatePensionWithdrawalTax(100_000, { remainingLSA: 0 }), 20_000);
+  });
+
+  it('uses the published basic rate', () => {
+    assert.equal(
+      estimatePensionWithdrawalTax(1_000, { taxFreeShare: 0 }),
+      1_000 * INCOME_TAX_BANDS.basicRate
+    );
+  });
+
+  it('an empty pot owes nothing', () => {
+    assert.equal(estimatePensionWithdrawalTax(0), 0);
+  });
+
+  it('rejects invalid inputs', () => {
+    assert.throws(() => estimatePensionWithdrawalTax(-1), TypeError);
+    assert.throws(() => estimatePensionWithdrawalTax(NaN), TypeError);
+    assert.throws(() => estimatePensionWithdrawalTax(100, { taxFreeShare: 0.3 }), RangeError);
+    assert.throws(() => estimatePensionWithdrawalTax(100, { taxFreeShare: -0.1 }), RangeError);
+    assert.throws(() => estimatePensionWithdrawalTax(100, { remainingLSA: -1 }), TypeError);
   });
 });
 

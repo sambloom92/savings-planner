@@ -38,7 +38,12 @@ import {
 } from './ukStudentLoan.js';
 import { calculateMonthlyMortgagePayment } from './ukDebt.js';
 import { ISA_CONSTANTS } from './ukISA.js';
-import { PENSION_CONSTANTS, calculatePCLS, taperedAnnualAllowance } from './ukPension.js';
+import {
+  PENSION_CONSTANTS,
+  calculatePCLS,
+  estimatePensionWithdrawalTax,
+  taperedAnnualAllowance,
+} from './ukPension.js';
 import { GIA_CGT_CONSTANTS } from './ukGIA.js';
 import { illustrativeAnnuityRate } from './ukAnnuity.js';
 
@@ -730,6 +735,19 @@ export function projectLifecycle(
     retirementOptions ?? {};
   const glideBeforeYrs = Math.max(0, _glideStart);
   const glideAfterYrs = Math.max(0, _glideEnd);
+
+  // Share of the pension still payable tax-free while it is uncrystallised: the
+  // planned lump-sum percentage when a PCLS will be taken, otherwise 25% of each
+  // UFPLS withdrawal. Feeds the display-only after-tax estimate on each row.
+  const uncrystallisedTaxFreeShare = retirementOptions?.takePCLS
+    ? Math.max(
+        0,
+        Math.min(
+          PENSION_CONSTANTS.maxPCLSPercentage,
+          retirementOptions.pclsPercentage ?? PENSION_CONSTANTS.maxPCLSPercentage
+        )
+      )
+    : PENSION_CONSTANTS.maxPCLSPercentage;
 
   // ── Flexible (dynamic) retirement date ────────────────────────────────────
   // Optionally keep working past the target retirement age when the plan is not
@@ -1452,6 +1470,10 @@ export function projectLifecycle(
         employerContribution: employerContrib,
         growthAmount: pensionGrowth,
         closingBalance: pensionBal,
+        // Rough tax due when drawn (basic rate on the taxable part), display only.
+        estimatedTaxOnWithdrawal: estimatePensionWithdrawalTax(pensionBal, {
+          taxFreeShare: uncrystallisedTaxFreeShare,
+        }),
       },
       isa: {
         openingBalance: openingISA,
@@ -2188,6 +2210,16 @@ export function projectLifecycle(
           annuityPurchase: annuityPurchaseThisYear?.pensionUsed ?? 0,
           growthAmount: pensionGrow,
           closingBalance: pensionBal,
+          // Rough tax due when drawn, display only. Once the lump sum has been
+          // taken the whole pot is taxable; before that (or on the UFPLS path)
+          // its tax-free share still applies, within the allowance left.
+          estimatedTaxOnWithdrawal:
+            takePCLS && !pclsPending
+              ? estimatePensionWithdrawalTax(pensionBal, { taxFreeShare: 0 })
+              : estimatePensionWithdrawalTax(pensionBal, {
+                  taxFreeShare: uncrystallisedTaxFreeShare,
+                  remainingLSA: takePCLS ? PENSION_CONSTANTS.lumpSumAllowance : remainingLSA,
+                }),
         },
         isa: {
           openingBalance: openISA,
