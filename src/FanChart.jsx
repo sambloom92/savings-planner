@@ -541,6 +541,7 @@ function drawFanChart(
       expense: { fill: 'rgba(244,63,94,0.95)', label: 'rgba(244,63,94,0.8)', name: 'Expense' },
       hours: { fill: 'rgba(45,212,191,0.95)', label: 'rgba(45,212,191,0.85)', name: 'Hours' },
       windfall: { fill: 'rgba(232,184,75,0.95)', label: 'rgba(232,184,75,0.75)', name: 'Windfall' },
+      annuity: { fill: 'rgba(167,139,250,0.95)', label: 'rgba(167,139,250,0.85)', name: 'Annuity' },
     };
     for (const m of sorted) {
       const style = MARKER_STYLE[m.kind] ?? MARKER_STYLE.windfall;
@@ -551,6 +552,9 @@ function drawFanChart(
         ctx.moveTo(mx - 4.5, baseY - 8);
         ctx.lineTo(mx + 4.5, baseY - 8);
         ctx.lineTo(mx, baseY - 1);
+      } else if (m.kind === 'annuity') {
+        // ● guaranteed income that starts here (state-pension purple)
+        ctx.arc(mx, baseY - 4.5, 4, 0, Math.PI * 2);
       } else if (m.kind === 'hours') {
         // ◆ diamond — a change in level, neither an inflow nor an outflow
         ctx.moveTo(mx, baseY - 9);

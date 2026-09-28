@@ -451,6 +451,62 @@ describe('spending guardrails', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Lifetime annuity + essential-floor security
+// ---------------------------------------------------------------------------
+
+describe('annuity and essential-floor security', () => {
+  const aProfile = {
+    currentAge: 60,
+    retirementAge: 63,
+    currentYear: 2025,
+    grossIncome: 50_000,
+    annualLivingExpenses: 20_000,
+    employeePensionRate: 0.08,
+    employerPensionRate: 0.05,
+    niContributionYears: 35,
+  };
+  const aPots = { pensionBalance: 300_000, isaBalance: 40_000 };
+  const aRet = { targetNetAnnualExpenses: 30_000, maxAge: 100, takePCLS: true };
+  const aAnnuity = { purchaseAge: 75, sizing: 'essential', amountReal: 24_000, rate: null };
+  const aOpts = { trials: 300, seed: 99, essentialFloorReal: 24_000 };
+
+  it('reports an inactive annuity summary and no floor metric by default', () => {
+    const r = runMonteCarlo(aProfile, rates, aPots, { ...aRet }, { trials: 50, seed: 1 });
+    assert.equal(r.annuity.active, false);
+    assert.equal(r.solvency.essentialSecuredForLife, null);
+  });
+
+  it('summarises annuity coverage across trials', () => {
+    const r = runMonteCarlo(aProfile, rates, aPots, { ...aRet, annuity: aAnnuity }, aOpts);
+    const a = r.annuity;
+    assert.equal(a.active, true);
+    assert.equal(a.sizing, 'essential');
+    assert.ok(a.fractionFullyCovered > 0 && a.fractionFullyCovered <= 1);
+    assert.ok(a.p10Coverage <= a.medianCoverage);
+    assert.ok(a.medianIncomeReal > 0);
+  });
+
+  it('floor security is a probability and is never below full-target solvency', () => {
+    const r = runMonteCarlo(aProfile, rates, aPots, { ...aRet }, aOpts);
+    const s = r.solvency;
+    assert.ok(s.essentialSecuredForLife >= 0 && s.essentialSecuredForLife <= 1);
+    // Falling below the (lower) floor implies falling below the target first.
+    assert.ok(s.essentialSecuredForLife >= s.solventForLife - 1e-12);
+    assert.ok(s.essentialSecuredToHorizon >= s.solventToHorizon - 1e-12);
+  });
+
+  it('an annuity sized to essentials protects the floor in long lives', () => {
+    const none = runMonteCarlo(aProfile, rates, aPots, { ...aRet }, aOpts);
+    const ann = runMonteCarlo(aProfile, rates, aPots, { ...aRet, annuity: aAnnuity }, aOpts);
+    assert.ok(
+      ann.solvency.essentialSecuredToHorizon > none.solvency.essentialSecuredToHorizon,
+      `to-horizon ${ann.solvency.essentialSecuredToHorizon} vs ${none.solvency.essentialSecuredToHorizon}`
+    );
+    assert.ok(ann.solvency.essentialSecuredForLife > none.solvency.essentialSecuredForLife);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Summary
 // ---------------------------------------------------------------------------
 
