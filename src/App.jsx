@@ -1,4 +1,12 @@
-import { useState, useMemo, useRef, useEffect, useCallback } from 'react';
+import {
+  useState,
+  useMemo,
+  useRef,
+  useEffect,
+  useCallback,
+  createContext,
+  useContext,
+} from 'react';
 import { createPortal } from 'react-dom';
 import { projectLifecycle, LIFECYCLE_CONSTANTS } from './ukLifecycle.js';
 import { NI_THRESHOLDS } from './ukNationalInsurance.js';
@@ -261,15 +269,260 @@ function applyDataTheme(value) {
       : value;
 }
 
-function useMobile() {
-  const [mobile, setMobile] = useState(() => window.innerWidth < 768);
+// Layout by screen shape. Phones get a compact layout that keeps the chart in
+// view while editing: 'landscape' (short and wide — chart beside the inputs) or
+// 'portrait' (chart pinned above them). Everything else is 'desktop'.
+function readLayout() {
+  const w = window.innerWidth;
+  const h = window.innerHeight;
+  const layout = h <= 500 && w > h ? 'landscape' : w < 768 ? 'portrait' : 'desktop';
+  return { layout, viewportWidth: w, viewportHeight: h };
+}
+
+function useLayout() {
+  const [state, setState] = useState(readLayout);
   useEffect(() => {
-    const mq = window.matchMedia('(max-width: 767px)');
-    const h = (e) => setMobile(e.matches);
-    mq.addEventListener('change', h);
-    return () => mq.removeEventListener('change', h);
+    const onResize = () => {
+      const next = readLayout();
+      setState((prev) =>
+        prev.layout === next.layout &&
+        prev.viewportWidth === next.viewportWidth &&
+        prev.viewportHeight === next.viewportHeight
+          ? prev
+          : next
+      );
+    };
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
   }, []);
-  return mobile;
+  return state;
+}
+
+// True inside the compact (phone) layout. Lets deeply nested inputs adapt —
+// step buttons on sliders, collapsed explanations — without prop drilling.
+const CompactContext = createContext(false);
+
+// Short GBP for tight spaces: £2.36m, £603k, £39.7k, £8,250.
+function fmtGBPShort(n) {
+  const a = Math.abs(n);
+  const sign = n < 0 ? '−' : '';
+  if (a >= 1_000_000) return `${sign}£${(a / 1_000_000).toFixed(2)}m`;
+  if (a >= 100_000) return `${sign}£${Math.round(a / 1_000)}k`;
+  if (a >= 10_000) return `${sign}£${(a / 1_000).toFixed(1)}k`;
+  return `${sign}£${Math.round(a).toLocaleString('en-GB')}`;
+}
+
+// Panel over the compact layout, rising from the bottom or (side = 'right')
+// sliding in from the right. `modal` sheets dim the page and close on a tap
+// outside; non-modal ones (the year detail) leave the chart usable, so another
+// year can be tapped while one is open.
+function Sheet({ title, onClose, modal = true, side = 'bottom', maxHeight = '88%', children }) {
+  const right = side === 'right';
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
+  return createPortal(
+    <div
+      onClick={modal ? onClose : undefined}
+      style={{
+        position: 'fixed',
+        inset: 0,
+        zIndex: 1000,
+        display: 'flex',
+        flexDirection: right ? 'row' : 'column',
+        justifyContent: 'flex-end',
+        background: modal ? 'rgba(0, 0, 0, 0.45)' : 'transparent',
+        pointerEvents: modal ? 'auto' : 'none',
+      }}
+    >
+      <div
+        role="dialog"
+        aria-modal={modal}
+        aria-label={title}
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          pointerEvents: 'auto',
+          width: right ? '42%' : '100%',
+          maxWidth: right ? 420 : 760,
+          margin: right ? 0 : '0 auto',
+          maxHeight: right ? '100%' : maxHeight,
+          display: 'flex',
+          flexDirection: 'column',
+          background: 'var(--bg-panel)',
+          border: '1px solid var(--border-bright)',
+          borderBottom: right ? '1px solid var(--border-bright)' : 'none',
+          borderRight: right ? 'none' : '1px solid var(--border-bright)',
+          borderRadius: right ? '12px 0 0 12px' : '12px 12px 0 0',
+          boxShadow: 'var(--shadow-chart)',
+        }}
+      >
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            padding: '8px 8px 8px 16px',
+            borderBottom: '1px solid var(--border)',
+            flexShrink: 0,
+          }}
+        >
+          <span
+            style={{
+              fontSize: 11,
+              letterSpacing: '0.12em',
+              textTransform: 'uppercase',
+              color: 'var(--text-secondary)',
+              fontWeight: 600,
+              fontFamily: 'var(--font-body)',
+            }}
+          >
+            {title}
+          </span>
+          <button
+            onClick={onClose}
+            aria-label="Close"
+            style={{ ...compactIconButton, marginLeft: 'auto' }}
+          >
+            ✕
+          </button>
+        </div>
+        <div style={{ overflowY: 'auto', padding: 14 }}>{children}</div>
+      </div>
+    </div>,
+    document.body
+  );
+}
+
+const compactIconButton = {
+  minWidth: 34,
+  height: 30,
+  padding: '0 8px',
+  background: 'transparent',
+  border: '1px solid var(--border-bright)',
+  borderRadius: 6,
+  color: 'var(--text-secondary)',
+  fontFamily: 'var(--font-mono)',
+  fontSize: 14,
+  lineHeight: 1,
+  cursor: 'pointer',
+};
+
+// One-line headline figures under the compact header; tapping opens the full
+// results sheet.
+function CompactSummary({ items, onOpen }) {
+  return (
+    <button
+      onClick={onOpen}
+      aria-label="Show full results"
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 10,
+        width: '100%',
+        padding: '5px 12px',
+        background: 'var(--bg-card)',
+        border: 'none',
+        borderBottom: '1px solid var(--border)',
+        cursor: 'pointer',
+        flexShrink: 0,
+        textAlign: 'left',
+      }}
+    >
+      <span style={{ display: 'flex', gap: 14, flex: 1, minWidth: 0, overflow: 'hidden' }}>
+        {items.map(({ label, value, color }) => (
+          <span key={label} style={{ display: 'flex', flexDirection: 'column', minWidth: 0 }}>
+            <span
+              style={{
+                fontSize: 9,
+                letterSpacing: '0.08em',
+                textTransform: 'uppercase',
+                color: 'var(--text-muted)',
+                fontFamily: 'var(--font-body)',
+                whiteSpace: 'nowrap',
+              }}
+            >
+              {label}
+            </span>
+            <span
+              style={{
+                fontSize: 13,
+                fontFamily: 'var(--font-mono)',
+                fontWeight: 600,
+                color: color ?? 'var(--text-primary)',
+                whiteSpace: 'nowrap',
+              }}
+            >
+              {value}
+            </span>
+          </span>
+        ))}
+      </span>
+      <span
+        style={{
+          fontSize: 11,
+          color: 'var(--accent-gold)',
+          fontFamily: 'var(--font-body)',
+          whiteSpace: 'nowrap',
+          flexShrink: 0,
+        }}
+      >
+        Results ›
+      </span>
+    </button>
+  );
+}
+
+// Section picker for the compact inputs pane: previous / dropdown / next.
+function SectionPicker({ value, onChange }) {
+  const i = TABS.indexOf(value);
+  const step = (d) => onChange(TABS[(i + d + TABS.length) % TABS.length]);
+  return (
+    <div
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 6,
+        padding: '6px 10px',
+        borderBottom: '1px solid var(--border)',
+        flexShrink: 0,
+      }}
+    >
+      <button onClick={() => step(-1)} aria-label="Previous section" style={compactIconButton}>
+        ‹
+      </button>
+      <select
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        aria-label="Section"
+        style={{
+          flex: 1,
+          minWidth: 0,
+          height: 30,
+          padding: '0 8px',
+          background: 'var(--bg-input)',
+          border: '1px solid var(--border-bright)',
+          borderRadius: 6,
+          color: 'var(--accent-gold)',
+          fontFamily: 'var(--font-body)',
+          fontSize: 13,
+          fontWeight: 600,
+        }}
+      >
+        {TABS.map((tab) => (
+          <option key={tab} value={tab}>
+            {tab}
+          </option>
+        ))}
+      </select>
+      <button onClick={() => step(1)} aria-label="Next section" style={compactIconButton}>
+        ›
+      </button>
+    </div>
+  );
 }
 
 const PencilIcon = () => (
@@ -346,6 +599,24 @@ function HelpTip({ text }) {
   );
 }
 
+// Delay before a value typed into a slider's box is applied.
+const TYPING_APPLY_MS = 700;
+
+const stepButtonStyle = {
+  width: 28,
+  height: 26,
+  padding: 0,
+  background: 'var(--bg-input)',
+  border: '1px solid var(--border-bright)',
+  borderRadius: 5,
+  color: 'var(--text-secondary)',
+  fontFamily: 'var(--font-mono)',
+  fontSize: 14,
+  lineHeight: 1,
+  cursor: 'pointer',
+  flexShrink: 0,
+};
+
 function Slider({
   label,
   value,
@@ -366,19 +637,48 @@ function Slider({
   // stripping non-numeric characters and parsing.
   parse,
 }) {
+  const compact = useContext(CompactContext);
   const [inputStr, setInputStr] = useState(null);
   const inputRef = useRef(null);
+  const typingTimer = useRef(null);
+  useEffect(() => () => clearTimeout(typingTimer.current), []);
 
   const clamped = Math.max(min, Math.min(max, value));
   const pct = Math.max(0, Math.min(100, ((clamped - min) / (max - min)) * 100));
   const accent = color ?? 'var(--accent-gold)';
 
+  function parseValue(str) {
+    return parse ? parse(str) : parseFloat(str.replace(/[^0-9.-]/g, ''));
+  }
+
   function parseCommit(str) {
-    const n = parse ? parse(str) : parseFloat(str.replace(/[^0-9.-]/g, ''));
+    clearTimeout(typingTimer.current);
+    const n = parseValue(str);
     // Manual entry is intentionally not clamped to [min, max] — the box lets
     // users go beyond the slider's range; the thumb just pins at the end.
     if (Number.isFinite(n)) onChange(n);
     setInputStr(null);
+  }
+
+  // While typing, apply the value after a short pause so the chart follows
+  // without needing Enter; Enter or leaving the box still applies at once.
+  function handleTyping(str) {
+    setInputStr(str);
+    clearTimeout(typingTimer.current);
+    typingTimer.current = setTimeout(() => {
+      const n = parseValue(str);
+      if (Number.isFinite(n)) onChange(n);
+    }, TYPING_APPLY_MS);
+  }
+
+  // −/+ buttons (compact layouts): one slider step, kept within the slider's
+  // range unless a typed value is already outside it.
+  const stepSize = step ?? 1; // matches the range input's own default
+  const decimals = (String(stepSize).split('.')[1] ?? '').length;
+  function nudge(dir) {
+    let next = Number((value + dir * stepSize).toFixed(decimals));
+    if (value >= min && value <= max) next = Math.max(min, Math.min(max, next));
+    if (next !== value) onChange(next);
   }
 
   return (
@@ -406,12 +706,22 @@ function Slider({
           {help && <HelpTip text={help} />}
         </span>
         <span style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+          {compact && (
+            <button
+              onClick={() => nudge(-1)}
+              aria-label={`Decrease ${label}`}
+              style={stepButtonStyle}
+            >
+              −
+            </button>
+          )}
           {allowInput && inputStr !== null ? (
             <input
               ref={inputRef}
               type="text"
               value={inputStr}
-              onChange={(e) => setInputStr(e.target.value)}
+              inputMode={min < 0 ? 'text' : 'decimal'}
+              onChange={(e) => handleTyping(e.target.value)}
               onFocus={(e) => e.target.select()}
               onBlur={(e) => parseCommit(e.target.value)}
               onKeyDown={(e) => {
@@ -420,6 +730,7 @@ function Slider({
                   e.target.blur();
                 }
                 if (e.key === 'Escape') {
+                  clearTimeout(typingTimer.current);
                   setInputStr(null);
                   e.target.blur();
                 }
@@ -476,6 +787,15 @@ function Slider({
                 </span>
               )}
             </>
+          )}
+          {compact && (
+            <button
+              onClick={() => nudge(1)}
+              aria-label={`Increase ${label}`}
+              style={stepButtonStyle}
+            >
+              +
+            </button>
           )}
         </span>
       </div>
@@ -612,8 +932,33 @@ function Toggle({ label, value, optA, optB, onChange, help }) {
   );
 }
 
-function InfoBox({ children, tone }) {
+function InfoBox({ children, tone, collapsible = false }) {
+  const compact = useContext(CompactContext);
+  const [open, setOpen] = useState(false);
   const warn = tone === 'warn';
+  // On phones, long background explanations fold away behind a toggle so the
+  // inputs stay close together; status messages are never collapsible.
+  if (compact && collapsible && !open) {
+    return (
+      <button
+        onClick={() => setOpen(true)}
+        style={{
+          display: 'block',
+          marginBottom: 20,
+          padding: '6px 10px',
+          background: 'var(--bg-input)',
+          border: '1px solid var(--border)',
+          borderRadius: 6,
+          color: 'var(--text-secondary)',
+          fontFamily: 'var(--font-body)',
+          fontSize: 11,
+          cursor: 'pointer',
+        }}
+      >
+        ⓘ How this works ›
+      </button>
+    );
+  }
   return (
     <div
       style={{
@@ -1495,7 +1840,7 @@ function AnnuityControls({ p, set, annuity }) {
           {outcome}
         </div>
       )}
-      <InfoBox>
+      <InfoBox collapsible>
         {
           'An annuity swaps part of your pension for income guaranteed for life — insurance against living a long time.\n\n'
         }
@@ -2351,7 +2696,7 @@ function TabContent({ tab, p, set, derived, topUp, annuity }) {
               help="The most any trial will delay retirement past your target age. Each trial stops as soon as the plan looks fundable under central assumptions, so most delay less than this — the cap only bites in the worst trials."
             />
           )}
-          <InfoBox>
+          <InfoBox collapsible>
             {
               'Each Monte Carlo trial checks, at your target retirement age, whether it can fund your target spending for the rest of the plan using central (expected) return assumptions — no peeking at the trial’s own future market path.\n\n'
             }
@@ -2497,7 +2842,7 @@ function TabContent({ tab, p, set, derived, topUp, annuity }) {
               </div>
             </>
           )}
-          <InfoBox>
+          <InfoBox collapsible>
             {
               'Each year of each Monte Carlo trial, the model checks what constant spending your current pot could sustain for the rest of the plan under central assumptions — accounting for the state pension and pension-access age, and never peeking at the trial’s own future returns.\n\n'
             }
@@ -2562,7 +2907,7 @@ function TabContent({ tab, p, set, derived, topUp, annuity }) {
                 : 'Phased withdrawals (UFPLS): the pension stays uncrystallised; each withdrawal is 25% tax-free + 75% taxable income until the £268,275 lifetime allowance is exhausted.'
             }
           />
-          <InfoBox>
+          <InfoBox collapsible>
             {
               'PCLS (Pension Commencement Lump Sum) is a one-off tax-free payment taken when you crystallise your pension at retirement, capped at 25% of the pot or £268,275 lifetime — whichever is lower.\n\n'
             }
@@ -3419,8 +3764,16 @@ export default function App() {
   // 'det' = deterministic chart  |  'mc' = Monte Carlo fan chart
   const [chartTab, setChartTab] = useState('det');
   const series = colorMode === 'hc' ? SERIES_HC : SERIES_DEFAULT;
-  const mobile = useMobile();
-  const [sidebarOpen, setSidebarOpen] = useState(false);
+  // 'desktop', or a compact phone layout: 'portrait' (chart pinned above the
+  // inputs) or 'landscape' (chart beside them). `mobile` = either compact one.
+  const { layout, viewportWidth, viewportHeight } = useLayout();
+  const mobile = layout !== 'desktop';
+  // Compact layouts: the open overlay sheet, and the year picked for the
+  // year-detail sheet by tapping the chart ({ age, row, source }).
+  const [sheet, setSheet] = useState(null); // null | 'menu' | 'results'
+  const [detailPick, setDetailPick] = useState(null);
+  const closeSheet = useCallback(() => setSheet(null), []);
+  const closeDetail = useCallback(() => setDetailPick(null), []);
 
   // Persist inputs to localStorage whenever they change
   useEffect(() => {
@@ -3882,25 +4235,1402 @@ export default function App() {
       </span>
     ) : null;
 
+  // Headline figures shared by the result cards and the compact summary line.
+  const firstShortfall = displayData.find((d) => d.phase === 'retirement' && d.shortfall > 0);
+  const lastRetRow = [...displayData].reverse().find((d) => d.phase === 'retirement');
+  const retNetWorth = retYearEndRow
+    ? retYearEndRow.pension +
+      retYearEndRow.isa +
+      retYearEndRow.gia +
+      retYearEndRow.mortgage +
+      retYearEndRow.unsecuredDebt +
+      retYearEndRow.studentLoan
+    : (displaySummary?.netWorth ?? 0);
+
+  // Chart height: fixed on desktop; on phones sized to the screen so the chart
+  // stays in view beside (landscape) or above (portrait) the inputs.
+  const chartHeight =
+    layout === 'landscape'
+      ? Math.max(150, viewportHeight - 122)
+      : layout === 'portrait'
+        ? Math.round(Math.min(320, Math.max(190, viewportHeight * 0.34)))
+        : 390;
+
+  // Compact summary line: the result cards' headline figures (and, on the
+  // Monte Carlo chart, the lifetime solvency rate in place of final wealth).
+  const summaryItems = displaySummary
+    ? [
+        chartTab === 'mc' && mcResults?.solvency
+          ? {
+              label: 'Solvent for life',
+              value: fmtPct(mcResults.solvency.solventForLife * 100),
+              color:
+                mcResults.solvency.solventForLife >= 0.9
+                  ? '#34d399'
+                  : mcResults.solvency.solventForLife >= 0.75
+                    ? 'var(--accent-gold)'
+                    : '#f43f5e',
+            }
+          : null,
+        { label: 'Net worth', value: fmtGBPShort(retNetWorth), color: 'var(--accent-gold)' },
+        {
+          label: 'Pension pot',
+          value: fmtGBPShort(retYearEndRow ? retYearEndRow.pension : displaySummary.pensionPot),
+          color: '#4f8ef7',
+        },
+        chartTab === 'mc'
+          ? null
+          : firstShortfall
+            ? { label: 'Shortfall', value: `age ${firstShortfall.age}`, color: '#f43f5e' }
+            : lastRetRow
+              ? {
+                  label: `At ${p.maxAge}`,
+                  value: fmtGBPShort(lastRetRow.pension + lastRetRow.isa + lastRetRow.gia),
+                  color: '#34d399',
+                }
+              : null,
+        {
+          label: 'State pension',
+          value:
+            displaySummary.projectedStatePension > 0
+              ? `${fmtGBPShort(displaySummary.projectedStatePension)}/yr`
+              : 'None',
+          color: '#a78bfa',
+        },
+      ].filter(Boolean)
+    : [];
+
+  // Year-detail sheet (compact layouts). The deterministic row is re-read by age
+  // from the current projection, so it follows input changes while open; a
+  // Monte Carlo row belongs to one simulation run and is dropped once it re-runs.
+  const selectDetail = (row) =>
+    setDetailPick({ age: row.age, row, source: chartTab === 'mc' ? mcResults : null });
+  const detailRow = !detailPick
+    ? null
+    : chartTab === 'det'
+      ? (chartData.find((d) => d.age === detailPick.age)?._detail ?? null)
+      : detailPick.source === mcResults
+        ? detailPick.row
+        : null;
+
+  // ── Layout pieces ───────────────────────────────────────────────────────────
+  // Built once and arranged by either the desktop layout or the compact (phone)
+  // layout below, so both show exactly the same controls and results.
+  const viewToggles = (
+    <>
+      {/* Theme switcher */}
+      <div
+        style={{
+          display: 'flex',
+          borderRadius: 5,
+          overflow: 'hidden',
+          border: '1px solid var(--border-bright)',
+        }}
+      >
+        {THEMES.map(({ value, label, title }) => {
+          const active = colorMode === value;
+          return (
+            <button
+              key={value}
+              onClick={() => changeColorMode(value)}
+              title={title}
+              style={{
+                padding: '4px 10px',
+                background: active ? 'var(--accent-gold)' : 'transparent',
+                color: active ? 'var(--accent-gold-text)' : 'var(--text-muted)',
+                border: 'none',
+                cursor: 'pointer',
+                fontFamily: 'var(--font-mono)',
+                fontSize: 10,
+                fontWeight: 600,
+                letterSpacing: '0.06em',
+                transition: 'all 0.15s',
+              }}
+            >
+              {label}
+            </button>
+          );
+        })}
+      </div>
+      <HelpTip text="Nominal: all figures shown in future pounds (the actual cash amounts at each age). Real: figures are adjusted for inflation and expressed in today's purchasing power, so you can compare values across different ages on a like-for-like basis. Uses the inflation rate set in the Rates tab." />
+      <div
+        style={{
+          display: 'flex',
+          borderRadius: 5,
+          overflow: 'hidden',
+          border: '1px solid var(--border-bright)',
+        }}
+      >
+        {['Nominal', 'Real'].map((opt) => {
+          const active = realTerms ? opt === 'Real' : opt === 'Nominal';
+          return (
+            <button
+              key={opt}
+              onClick={() => setRealTerms(opt === 'Real')}
+              style={{
+                padding: '4px 12px',
+                background: active ? 'var(--accent-gold)' : 'transparent',
+                color: active ? 'var(--accent-gold-text)' : 'var(--text-muted)',
+                border: 'none',
+                cursor: 'pointer',
+                fontFamily: 'var(--font-mono)',
+                fontSize: 10,
+                fontWeight: 600,
+                letterSpacing: '0.08em',
+                transition: 'all 0.15s',
+              }}
+            >
+              {opt}
+            </button>
+          );
+        })}
+      </div>
+      <HelpTip text="Linear: y-axis uses a linear scale — equal distances represent equal pound amounts. Log: y-axis uses a logarithmic scale — equal distances represent equal percentage growth, making early portfolio growth more visible." />
+      <div
+        style={{
+          display: 'flex',
+          borderRadius: 5,
+          overflow: 'hidden',
+          border: '1px solid var(--border-bright)',
+        }}
+      >
+        {['Lin', 'Log'].map((opt) => {
+          const active = logScale ? opt === 'Log' : opt === 'Lin';
+          return (
+            <button
+              key={opt}
+              onClick={() => setLogScale(opt === 'Log')}
+              style={{
+                padding: '4px 12px',
+                background: active ? 'var(--accent-gold)' : 'transparent',
+                color: active ? 'var(--accent-gold-text)' : 'var(--text-muted)',
+                border: 'none',
+                cursor: 'pointer',
+                fontFamily: 'var(--font-mono)',
+                fontSize: 10,
+                fontWeight: 600,
+                letterSpacing: '0.08em',
+                transition: 'all 0.15s',
+              }}
+            >
+              {opt}
+            </button>
+          );
+        })}
+      </div>
+      <HelpTip
+        text="All balances: the chart shows your whole pot — pension + ISA + GIA — at every age. Available funds: shows only money you could actually spend at that age. Your defined-contribution pension is excluded before your pension access age (set in the Pension tab), because it's locked until then; ISA and GIA count throughout.
+
+Two other age gates matter for what you can actually rely on, both marked on the chart:
+• State pension — this is age-gated income, not a spendable balance, so it doesn't appear in either view. It only starts at your state pension age, and from then on it reduces how much you draw from your pots. Before that age you're on your own funds.
+• Windfalls — any you've added arrive at a set age. A future windfall isn't part of your funds until it lands (the balance simply steps up at that age), so it can't help with a shortfall before then.
+
+Use Available funds to see whether an early-retirement plan can bridge the gap until the pension unlocks and these other sources kick in — the total-balance view can look healthy while your spendable money has run out."
+      />
+      <div
+        style={{
+          display: 'flex',
+          borderRadius: 5,
+          overflow: 'hidden',
+          border: '1px solid var(--border-bright)',
+        }}
+      >
+        {[
+          { label: 'All', value: 'all' },
+          { label: 'Available', value: 'available' },
+        ].map(({ label, value }) => {
+          const active = fundsView === value;
+          return (
+            <button
+              key={value}
+              onClick={() => setFundsView(value)}
+              style={{
+                padding: '4px 12px',
+                background: active ? 'var(--accent-gold)' : 'transparent',
+                color: active ? 'var(--accent-gold-text)' : 'var(--text-muted)',
+                border: 'none',
+                cursor: 'pointer',
+                fontFamily: 'var(--font-mono)',
+                fontSize: 10,
+                fontWeight: 600,
+                letterSpacing: '0.08em',
+                transition: 'all 0.15s',
+                whiteSpace: 'nowrap',
+              }}
+            >
+              {label}
+            </button>
+          );
+        })}
+      </div>
+    </>
+  );
+  const actionButtons = (
+    <>
+      {/* Undo / Redo */}
+      <div style={{ display: 'flex', gap: 8 }}>
+        {[
+          {
+            label: '↶ Undo',
+            title: 'Undo (Ctrl/Cmd+Z)',
+            handler: undo,
+            enabled: canUndo,
+          },
+          {
+            label: 'Redo ↷',
+            title: 'Redo (Ctrl/Cmd+Shift+Z)',
+            handler: redo,
+            enabled: canRedo,
+          },
+        ].map(({ label, title, handler, enabled }) => (
+          <button
+            key={label}
+            onClick={handler}
+            disabled={!enabled}
+            title={title}
+            style={{
+              flex: 1,
+              padding: '7px 4px',
+              background: 'transparent',
+              border: '1px solid var(--border-bright)',
+              borderRadius: 6,
+              color: enabled ? 'var(--text-secondary)' : 'var(--text-muted)',
+              opacity: enabled ? 1 : 0.4,
+              fontFamily: 'var(--font-mono)',
+              fontSize: 11,
+              cursor: enabled ? 'pointer' : 'default',
+              letterSpacing: '0.04em',
+              transition: 'all 0.15s',
+            }}
+            onMouseOver={(e) => {
+              if (enabled) {
+                e.currentTarget.style.borderColor = 'var(--accent-gold)';
+                e.currentTarget.style.color = 'var(--accent-gold)';
+              }
+            }}
+            onMouseOut={(e) => {
+              e.currentTarget.style.borderColor = 'var(--border-bright)';
+              e.currentTarget.style.color = enabled ? 'var(--text-secondary)' : 'var(--text-muted)';
+            }}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+      {/* Copy / Paste JSON */}
+      <div style={{ display: 'flex', gap: 8 }}>
+        {[
+          {
+            label: 'Copy JSON',
+            title:
+              'Copy all current parameters to the clipboard as JSON, to save or share this scenario',
+            msg: copyMsg,
+            handler: handleCopy,
+          },
+          {
+            label: 'Paste JSON',
+            title: 'Replace all parameters with a scenario JSON from the clipboard',
+            msg: pasteMsg,
+            handler: handlePaste,
+          },
+        ].map(({ label, title, msg, handler }) => {
+          const isError = msg === 'Failed' || msg === 'Invalid JSON';
+          return (
+            <button
+              key={label}
+              title={title}
+              onClick={handler}
+              style={{
+                flex: 1,
+                padding: '7px 4px',
+                background: 'transparent',
+                border: `1px solid ${msg ? (isError ? 'rgba(244,63,94,0.5)' : 'rgba(52,211,153,0.5)') : 'var(--border-bright)'}`,
+                borderRadius: 6,
+                color: msg ? (isError ? '#f87171' : '#34d399') : 'var(--text-secondary)',
+                fontFamily: 'var(--font-mono)',
+                fontSize: 11,
+                cursor: 'pointer',
+                letterSpacing: '0.04em',
+                transition: 'all 0.15s',
+              }}
+              onMouseOver={(e) => {
+                if (!msg) {
+                  e.currentTarget.style.borderColor = 'var(--accent-gold)';
+                  e.currentTarget.style.color = 'var(--accent-gold)';
+                }
+              }}
+              onMouseOut={(e) => {
+                if (!msg) {
+                  e.currentTarget.style.borderColor = 'var(--border-bright)';
+                  e.currentTarget.style.color = 'var(--text-secondary)';
+                }
+              }}
+            >
+              {msg ?? label}
+            </button>
+          );
+        })}
+      </div>
+      {/* Reset */}
+      <button
+        title="Reset every parameter back to its default value"
+        onClick={() => {
+          replaceP(DEFAULTS);
+          setActiveTab('Personal');
+        }}
+        style={{
+          width: '100%',
+          padding: '7px',
+          background: 'transparent',
+          border: '1px solid var(--border-bright)',
+          borderRadius: 6,
+          color: 'var(--text-secondary)',
+          fontFamily: 'var(--font-body)',
+          fontSize: 12,
+          cursor: 'pointer',
+          letterSpacing: '0.05em',
+          transition: 'all 0.15s',
+        }}
+        onMouseOver={(e) => {
+          e.target.style.borderColor = 'var(--accent-gold)';
+          e.target.style.color = 'var(--accent-gold)';
+        }}
+        onMouseOut={(e) => {
+          e.target.style.borderColor = 'var(--border-bright)';
+          e.target.style.color = 'var(--text-secondary)';
+        }}
+      >
+        Reset to Defaults
+      </button>
+    </>
+  );
+  const tabContent = (
+    <>
+      <TabContent
+        tab={activeTab}
+        p={p}
+        set={set}
+        derived={derivedSavings}
+        topUp={topUpInfo}
+        annuity={summary?.annuity ?? null}
+      />
+    </>
+  );
+  const errorBanner = (
+    <>
+      {/* Error banner */}
+      {error && (
+        <div
+          style={{
+            background: 'rgba(244,63,94,0.08)',
+            border: '1px solid rgba(244,63,94,0.5)',
+            borderRadius: 8,
+            padding: '10px 16px',
+            marginBottom: 20,
+            color: '#f87171',
+            fontSize: 12,
+            fontFamily: 'var(--font-mono)',
+          }}
+        >
+          ⚠ {error}
+        </div>
+      )}
+    </>
+  );
+  const statCards = (
+    <>
+      {/* Stat cards */}
+      {displaySummary &&
+        (() => {
+          // "≈ after tax" line for a figure that includes the row's pension
+          // balance (see PENSION_AFTER_TAX_HELP); hidden when there's no pension.
+          const afterTaxNote = (total, row, suffix) =>
+            row && row.pension > 0 ? `≈ ${fmtGBPLarge(total - row.pensionTax)} ${suffix}` : null;
+          return (
+            <div
+              style={{
+                display: 'grid',
+                gridTemplateColumns: mobile ? 'repeat(2, 1fr)' : 'repeat(4, 1fr)',
+                gap: 12,
+                marginBottom: 22,
+              }}
+            >
+              <StatCard
+                label="Net Worth at Retirement"
+                value={fmtGBPLarge(retNetWorth)}
+                color="var(--accent-gold)"
+                subtitle={`Age ${p.retirementAge} · year-end${realTerms ? " · today's £" : ''}`}
+                note={afterTaxNote(retNetWorth, retYearEndRow, 'with pension after tax')}
+                help={
+                  "Pension + ISA + GIA balances at the end of your first retirement year, minus any outstanding debts. Matches the chart value at that age. Property equity is deliberately excluded, even though the mortgage liability is counted: the mortgage is a contractual cash-flow commitment that must be serviced regardless of house prices, whereas home equity is illiquid, costly to access, and shouldn't silently prop up a retirement plan. If a plan only works by selling or borrowing against your home, this tool is designed to show that as a shortfall rather than hide it. Defined benefit pensions and other illiquid assets are also excluded.\n\n" +
+                  PENSION_AFTER_TAX_HELP
+                }
+              />
+              <StatCard
+                label="Pension Pot"
+                value={fmtGBPLarge(
+                  retYearEndRow ? retYearEndRow.pension : displaySummary.pensionPot
+                )}
+                color="#4f8ef7"
+                subtitle={`ISA: ${fmtGBPLarge(retYearEndRow ? retYearEndRow.isa : displaySummary.isaBalance)} · GIA: ${fmtGBPLarge(retYearEndRow ? retYearEndRow.gia : displaySummary.giaBalance)}`}
+                note={
+                  retYearEndRow
+                    ? afterTaxNote(retYearEndRow.pension, retYearEndRow, 'after income tax')
+                    : null
+                }
+                help={
+                  'Your defined contribution pension pot at the end of your first retirement year, after PCLS distribution (if taken), one year of drawdown, and one year of investment growth. Matches the chart value at that age.\n\n' +
+                  PENSION_AFTER_TAX_HELP
+                }
+              />
+              <StatCard
+                label={
+                  firstShortfall
+                    ? 'Shortfall from Age'
+                    : lastRetRow
+                      ? `Wealth at Age ${p.maxAge}`
+                      : 'Total Debt'
+                }
+                value={
+                  firstShortfall
+                    ? `${firstShortfall.age}`
+                    : lastRetRow
+                      ? fmtGBPLarge(lastRetRow.pension + lastRetRow.isa + lastRetRow.gia)
+                      : displaySummary.totalDebt > 0
+                        ? `-${fmtGBPLarge(displaySummary.totalDebt)}`
+                        : 'Debt-free'
+                }
+                color={firstShortfall ? '#f43f5e' : '#34d399'}
+                subtitle={
+                  firstShortfall
+                    ? `Target: ${fmtGBP(p.targetNetExpenses)}/yr · pots exhausted`
+                    : lastRetRow
+                      ? `Pension: ${fmtGBPLarge(lastRetRow.pension)} · ISA: ${fmtGBPLarge(lastRetRow.isa)}`
+                      : displaySummary.totalDebt > 0
+                        ? 'at retirement'
+                        : 'at retirement'
+                }
+                note={
+                  !firstShortfall && lastRetRow
+                    ? afterTaxNote(
+                        lastRetRow.pension + lastRetRow.isa + lastRetRow.gia,
+                        lastRetRow,
+                        'with pension after tax'
+                      )
+                    : null
+                }
+                help={
+                  firstShortfall
+                    ? `Your pots run out at this age — combined pension, ISA, and GIA can no longer cover the inflation-adjusted target spending of ${fmtGBP(p.targetNetExpenses)}/yr. Consider increasing savings, reducing target expenses, or retiring later.`
+                    : lastRetRow
+                      ? `Combined pension + ISA + GIA balance at age ${p.maxAge}, after funding all retirement spending. Property equity and other illiquid assets are deliberately not included — the projection never draws on your home, so any shortfall is shown honestly rather than backfilled by assumed downsizing or equity release.\n\n${PENSION_AFTER_TAX_HELP} What your heirs would pay on a pension left unspent depends on their own circumstances.`
+                      : 'Total outstanding debt (mortgage + unsecured + student loan) at retirement.'
+                }
+              />
+              <StatCard
+                label="State Pension"
+                value={
+                  displaySummary.projectedStatePension > 0
+                    ? `${fmtGBPLarge(displaySummary.projectedStatePension)}/yr`
+                    : 'Not eligible'
+                }
+                color={displaySummary.projectedStatePension > 0 ? '#a78bfa' : 'var(--text-muted)'}
+                subtitle={(() => {
+                  const niShown = displaySummary.niYearsWithTopUp ?? displaySummary.niYearsAccrued;
+                  const bought = displaySummary.class3YearsBought ?? 0;
+                  const niLabel = `${niShown} NI yrs${bought > 0 ? ` (incl. ${bought} Class 3)` : ''}`;
+                  const startAge =
+                    displaySummary.statePensionStartAge ?? displaySummary.statePensionAge;
+                  if (displaySummary.projectedStatePension > 0) {
+                    return displaySummary.statePensionEligibleAtRetirement
+                      ? `From age ${startAge} · ${niLabel}`
+                      : `Starts age ${startAge} · ${niLabel}`;
+                  }
+                  return `Only ${niShown} qualifying NI yrs — need 10`;
+                })()}
+                help="Your projected state pension, based on total NI qualifying years accrued by retirement (plus any voluntary Class 3 years bought via the top-up toggle). This is a real government entitlement (inflation-linked via triple lock), not an investment return. It offsets retirement expenses before drawing from personal pots."
+              />
+            </div>
+          );
+        })()}
+    </>
+  );
+  const chartSwitcher = (
+    <>
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 6,
+          alignSelf: 'center',
+          flexShrink: 0,
+        }}
+      >
+        <div
+          style={{
+            display: 'flex',
+            background: 'var(--bg-input)',
+            border: '1px solid var(--border)',
+            borderRadius: 6,
+            overflow: 'hidden',
+          }}
+        >
+          {[
+            { key: 'det', label: 'Deterministic' },
+            { key: 'mc', label: 'Monte Carlo' },
+          ].map(({ key, label }) => (
+            <button
+              key={key}
+              onClick={() => setChartTab(key)}
+              style={{
+                padding: '4px 12px',
+                background: chartTab === key ? 'var(--accent-gold)' : 'transparent',
+                border: 'none',
+                color: chartTab === key ? 'var(--accent-gold-text)' : 'var(--text-secondary)',
+                fontFamily: 'var(--font-mono)',
+                fontSize: 10,
+                fontWeight: 600,
+                letterSpacing: '0.06em',
+                cursor: 'pointer',
+                transition: 'all 0.15s',
+                whiteSpace: 'nowrap',
+              }}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+        <HelpTip
+          text={
+            'Deterministic: one fixed projection using the exact rates you set in the Rates tab. Useful for understanding how the plan works and stress-testing specific assumptions. Because it uses a single unchanging set of assumptions, it is inherently optimistic — there is no mechanism for things to go wrong beyond what you explicitly model.\n\n' +
+            'Monte Carlo: runs hundreds of simulations, each with a different random sequence of market returns and economic conditions. The fan chart shows the spread of outcomes — the wide band is the 10th–90th percentile range, the narrow band is 25th–75th, and the centre line is the median. The simulation is calibrated so the median trial tracks the deterministic projection — your return rate sliders represent full-cycle expected returns, already inclusive of bear markets. The fan shows what happens when bad years cluster unluckily (p10) or conditions are unusually favourable (p90).\n\n' +
+            'Use Monte Carlo to understand retirement risk — specifically, whether your plan survives bad luck, not just average conditions.'
+          }
+        />
+      </div>
+    </>
+  );
+  const chartRightControls = (
+    <>
+      {chartTab === 'det' && (
+        <span
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 3,
+            fontFamily: 'var(--font-mono)',
+            fontSize: 10,
+            color: 'var(--text-muted)',
+            whiteSpace: 'nowrap',
+            letterSpacing: '0.04em',
+          }}
+        >
+          4% rule: {fmtGBPLarge(fourPctTarget)}
+          <HelpTip
+            text={
+              'The 4% rule is a retirement planning heuristic: if you withdraw 4% of your portfolio in year one and adjust for inflation each year, historical data suggests the portfolio survives a 30-year retirement. This implies you need 25× your annual spending saved (1 ÷ 0.04 = 25).\n\n' +
+              'This line shows that target in ' +
+              (realTerms ? "today's money." : 'nominal terms at your retirement date.') +
+              '\n\nWhy the model may differ:\n' +
+              '• The model uses year-by-year drawdown with actual tax calculations, so it draws less gross from the pension when income is within the personal allowance.\n' +
+              '• State pension income offsets spending needs, reducing how much the portfolio must provide — the 4% rule ignores guaranteed income sources.\n' +
+              '• The model sequences across ISA, GIA, and pension in a tax-efficient order, whereas the 4% rule assumes a single undifferentiated pot.\n' +
+              '• The 4% rule was calibrated on a 30-year horizon. Longer retirements (e.g. retiring at 55 to age 95) may require a lower safe withdrawal rate of 3–3.5%.'
+            }
+          />
+        </span>
+      )}
+      {!mobile && solvencyReadout}
+      {chartTab === 'mc' && (
+        <HelpTip
+          text={
+            `${mcResults ? mcResults.trialCount : 0} trials shown. Each trial varies investment returns (market factor) and inflation / BoE / wage growth (macro factor) using correlated random shocks.\n\n` +
+            'Solvent for life: the chance you never run out of money while still alive — the complement of the lifetime probability of ruin. Each trial that runs dry is weighted by the probability you live to see it (from UK population mortality for the selected sex, set in the Simulation tab), so dying with money left counts as success. Set high enough that the age horizon reaches ~100 for this to be meaningful.\n\n' +
+            'Running dry means being unable to meet your target spending — including the bridge years before your pension access age, when a locked pension you cannot yet touch does not count as available. Early access penalties are not modelled.\n\n' +
+            'The "to age N" figure is the simpler fixed-horizon view: the fraction of trials solvent all the way to the model horizon, ignoring survival. It is always the more pessimistic of the two.\n\n' +
+            'Bands show the 10th–90th percentile range (faint) and 25th–75th range (stronger). Lines show the 5 key percentiles. The dotted curve is the probability of still being alive at each age.\n\n' +
+            'Click and hold on a data point to isolate the single trial closest to that percentile at that age. Shortfall labels (▼ with age) show when each percentile path runs out of money.'
+          }
+        />
+      )}
+    </>
+  );
+  const hiddenShortfallPrompt = (
+    <>
+      {/* Prompt: shortfall hidden by the all-balances view (locked pension) */}
+      {fundsView === 'all' && availableHiddenShortfall && (
+        <div
+          style={{
+            margin: '0 16px 12px',
+            padding: '9px 12px',
+            borderRadius: 7,
+            border: '1px solid rgba(244,63,94,0.4)',
+            background: 'rgba(244,63,94,0.08)',
+            display: 'flex',
+            alignItems: 'center',
+            gap: 10,
+            flexWrap: 'wrap',
+          }}
+        >
+          <span
+            style={{
+              fontSize: 12,
+              color: 'var(--text-secondary)',
+              fontFamily: 'var(--font-body)',
+              lineHeight: 1.5,
+              flex: 1,
+              minWidth: 200,
+            }}
+          >
+            {chartTab === 'mc' ? (
+              <>
+                <strong style={{ color: '#f87171' }}>
+                  Spendable money runs out early in some trials.
+                </strong>{' '}
+                In about {fmtPct((mcResults?.solvency?.ruinBeforeAccessProb ?? 0) * 100)} of trials
+                a shortfall happens before your pension access age ({p.pensionAccessAge}
+                ), while the locked pension keeps the total balance above zero — so those paths can
+                look solvent here when they aren&apos;t.
+              </>
+            ) : (
+              <>
+                <strong style={{ color: '#f87171' }}>Spendable money runs out early.</strong> A
+                shortfall happens before your pension access age ({p.pensionAccessAge}), while the
+                locked pension keeps the total balance above zero — so this view looks solvent when
+                it isn&apos;t.
+              </>
+            )}
+          </span>
+          <button
+            onClick={() => setFundsView('available')}
+            style={{
+              padding: '5px 12px',
+              background: 'transparent',
+              border: '1px solid rgba(244,63,94,0.6)',
+              borderRadius: 6,
+              color: '#f87171',
+              fontFamily: 'var(--font-mono)',
+              fontSize: 11,
+              fontWeight: 600,
+              letterSpacing: '0.04em',
+              cursor: 'pointer',
+              whiteSpace: 'nowrap',
+            }}
+          >
+            Show available funds
+          </button>
+        </div>
+      )}
+    </>
+  );
+  const mcChart = (
+    <>
+      {mcResults ? (
+        <FanChart
+          percentileData={
+            fundsView === 'available' ? mcResults.availablePercentileData : mcResults.percentileData
+          }
+          portfolioMatrix={mcResults.portfolioMatrix}
+          allPotData={mcResults.allPotData}
+          potSeries={series}
+          repPaths={mcResults.repPaths}
+          realTerms={realTerms}
+          inflRate={inflRate}
+          currentAge={p.currentAge}
+          retirementAge={p.retirementAge}
+          statePensionAge={p.statePensionAge}
+          pensionAccessAge={p.pensionAccessAge}
+          onHoverRow={(row) => {
+            setHoveredRow(row ?? null);
+          }}
+          fourPctTarget={fourPctTarget}
+          showDetails={true}
+          colorMode={colorMode}
+          logScale={logScale}
+          eventMarkers={eventMarkers}
+          annuityAge={annuityChartAge}
+          retirementIsTarget={p.flexibleRetirement}
+          survivalSeries={mcResults.solvency?.survival}
+          shortfallMarkers={mcResults.solvency?.shortfallMarkers}
+          shortfallAges={mcResults.shortfallAges}
+          fundsView={fundsView}
+          compact={mobile}
+          onSelectRow={mobile ? selectDetail : null}
+          height={chartHeight}
+        />
+      ) : mcPending ? (
+        <div
+          style={{
+            height: chartHeight,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            color: 'var(--text-muted)',
+            fontSize: 13,
+            fontFamily: 'var(--font-mono)',
+          }}
+        >
+          Computing {p.mcTrials} trials…
+        </div>
+      ) : (
+        <div
+          style={{
+            height: chartHeight,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            color: 'var(--text-muted)',
+            fontSize: 13,
+          }}
+        >
+          No results — check inputs
+        </div>
+      )}
+    </>
+  );
+  const mcExtras = (
+    <>
+      {/* Flexible-retirement postponement summary */}
+      {mcResults?.retirement?.flexible && (
+        <div
+          style={{
+            margin: '12px 16px 0',
+            padding: '10px 13px',
+            borderRadius: 7,
+            border: '1px solid var(--border)',
+            background: 'var(--bg-card)',
+          }}
+        >
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'baseline',
+              gap: 8,
+              flexWrap: 'wrap',
+              marginBottom: mcResults.retirement.fractionDelayed > 0 ? 8 : 0,
+            }}
+          >
+            <span
+              style={{
+                fontSize: 10,
+                letterSpacing: '0.08em',
+                textTransform: 'uppercase',
+                color: 'var(--text-muted)',
+                fontFamily: 'var(--font-mono)',
+              }}
+            >
+              Flexible retirement
+            </span>
+            {mcResults.retirement.fractionDelayed > 0 ? (
+              <span
+                style={{
+                  fontSize: 12,
+                  color: 'var(--text-secondary)',
+                  fontFamily: 'var(--font-body)',
+                  lineHeight: 1.5,
+                }}
+              >
+                Postponed past age {mcResults.retirement.nominalAge} in{' '}
+                <strong style={{ color: 'var(--accent-gold)' }}>
+                  {fmtPct(mcResults.retirement.fractionDelayed * 100)}
+                </strong>{' '}
+                of trials · median retirement age{' '}
+                <strong style={{ color: 'var(--text-primary)' }}>
+                  {Math.round(mcResults.retirement.medianAge)}
+                </strong>{' '}
+                · latest-retiring 10% to {Math.round(mcResults.retirement.p90Age)}+ (up to{' '}
+                {mcResults.retirement.latestAge})
+              </span>
+            ) : (
+              <span
+                style={{
+                  fontSize: 12,
+                  color: 'var(--text-secondary)',
+                  fontFamily: 'var(--font-body)',
+                  lineHeight: 1.5,
+                }}
+              >
+                No trials needed to postpone — every trial could retire on time at age{' '}
+                {mcResults.retirement.nominalAge}.
+              </span>
+            )}
+          </div>
+          {mcResults.retirement.fractionDelayed > 0 && (
+            <div style={{ display: 'flex', gap: 3, flexWrap: 'wrap' }}>
+              {mcResults.retirement.distribution.map((d) => {
+                const delayed = d.age > mcResults.retirement.nominalAge;
+                return (
+                  <span
+                    key={d.age}
+                    title={`${d.count} trial${d.count === 1 ? '' : 's'}`}
+                    style={{
+                      fontSize: 10,
+                      fontFamily: 'var(--font-mono)',
+                      padding: '2px 6px',
+                      borderRadius: 4,
+                      background: delayed ? 'rgba(212,175,55,0.12)' : 'var(--bg-input)',
+                      color: delayed ? 'var(--accent-gold)' : 'var(--text-muted)',
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    {d.age}: {fmtPct(d.fraction * 100)}
+                  </span>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+      {/* Annuity summary: essentials security + coverage across trials */}
+      {mcResults?.annuity?.active && (
+        <div
+          style={{
+            margin: '12px 16px 0',
+            padding: '10px 13px',
+            borderRadius: 7,
+            border: '1px solid var(--border)',
+            background: 'var(--bg-card)',
+            display: 'flex',
+            alignItems: 'baseline',
+            gap: 8,
+            flexWrap: 'wrap',
+          }}
+        >
+          <span
+            style={{
+              fontSize: 10,
+              letterSpacing: '0.08em',
+              textTransform: 'uppercase',
+              color: 'var(--text-muted)',
+              fontFamily: 'var(--font-mono)',
+            }}
+          >
+            Annuity
+          </span>
+          <span
+            style={{
+              fontSize: 12,
+              color: 'var(--text-secondary)',
+              fontFamily: 'var(--font-body)',
+              lineHeight: 1.5,
+            }}
+          >
+            {mcResults.solvency.essentialSecuredForLife != null && (
+              <>
+                Essentials ({fmtGBP(mcResults.solvency.essentialFloorReal)}/yr) secured for life:{' '}
+                <strong style={{ color: '#a78bfa' }}>
+                  {fmtPct(mcResults.solvency.essentialSecuredForLife * 100)}
+                </strong>{' '}
+                (to age {p.maxAge}: {fmtPct(mcResults.solvency.essentialSecuredToHorizon * 100)})
+                ·{' '}
+              </>
+            )}
+            {mcResults.annuity.fractionNotNeeded >= 0.999 ? (
+              'not needed — the state pension already covers your essentials'
+            ) : (
+              <>
+                target income fully bought in {fmtPct(mcResults.annuity.fractionFullyCovered * 100)}{' '}
+                of trials
+                {mcResults.annuity.p10Coverage < 0.999 &&
+                  ` (worst 10%: ${fmtPct(mcResults.annuity.p10Coverage * 100)} of it)`}
+              </>
+            )}
+          </span>
+        </div>
+      )}
+      {/* Spending-guardrails summary + fan */}
+      {mcResults?.spending?.active && (
+        <div
+          style={{
+            margin: '12px 16px 0',
+            padding: '10px 13px',
+            borderRadius: 7,
+            border: '1px solid var(--border)',
+            background: 'var(--bg-card)',
+          }}
+        >
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'baseline',
+              gap: 8,
+              flexWrap: 'wrap',
+              marginBottom: 8,
+            }}
+          >
+            <span
+              style={{
+                fontSize: 10,
+                letterSpacing: '0.08em',
+                textTransform: 'uppercase',
+                color: 'var(--text-muted)',
+                fontFamily: 'var(--font-mono)',
+              }}
+            >
+              Spending guardrails
+            </span>
+            {mcResults.spending.fractionEverCut > 0 ? (
+              <span
+                style={{
+                  fontSize: 12,
+                  color: 'var(--text-secondary)',
+                  fontFamily: 'var(--font-body)',
+                  lineHeight: 1.5,
+                }}
+              >
+                Spending trimmed below target in{' '}
+                <strong style={{ color: 'var(--accent-gold)' }}>
+                  {fmtPct(mcResults.spending.fractionEverCut * 100)}
+                </strong>{' '}
+                of trials · worst 10% cut to{' '}
+                <strong style={{ color: 'var(--text-primary)' }}>
+                  {fmtPct(mcResults.spending.worstLowestPctOfTarget * 100)}
+                </strong>{' '}
+                of target · reached the floor in {fmtPct(mcResults.spending.fractionHitFloor * 100)}
+                {mcResults.spending.ceilingPct > 100 &&
+                  ` · raised above target in ${fmtPct(mcResults.spending.fractionAboveTarget * 100)}`}
+              </span>
+            ) : (
+              <span
+                style={{
+                  fontSize: 12,
+                  color: 'var(--text-secondary)',
+                  fontFamily: 'var(--font-body)',
+                  lineHeight: 1.5,
+                }}
+              >
+                No trial needed to trim spending — the target held in every trial.
+              </span>
+            )}
+          </div>
+          {mcResults.spending.percentileData.length > 1 && (
+            <>
+              <SpendingFan
+                data={mcResults.spending.percentileData}
+                target={mcResults.spending.target}
+                floor={mcResults.spending.floor}
+                ceilingPct={mcResults.spending.ceilingPct}
+                mobile={mobile}
+              />
+              <div
+                style={{
+                  fontSize: 10,
+                  color: 'var(--text-muted)',
+                  fontFamily: 'var(--font-mono)',
+                  marginTop: 2,
+                }}
+              >
+                Guardrail-adjusted spending, today&apos;s £ · band p10–p90, line median
+              </div>
+            </>
+          )}
+        </div>
+      )}
+    </>
+  );
+  const detChart = (
+    <>
+      {/* ── Deterministic tab ── */}
+      {chartTab === 'det' &&
+        (chartData.length > 0 ? (
+          <FanChart
+            deterministicData={chartData}
+            potSeries={series}
+            realTerms={realTerms}
+            inflRate={inflRate}
+            currentAge={p.currentAge}
+            retirementAge={p.retirementAge}
+            statePensionAge={p.statePensionAge}
+            pensionAccessAge={p.pensionAccessAge}
+            onHoverRow={(row) => setHoveredRow(row ?? null)}
+            fourPctTarget={fourPctTarget}
+            colorMode={colorMode}
+            logScale={logScale}
+            eventMarkers={eventMarkers}
+            annuityAge={annuityChartAge}
+            fundsView={fundsView}
+            compact={mobile}
+            onSelectRow={mobile ? selectDetail : null}
+            height={chartHeight}
+          />
+        ) : (
+          <div
+            style={{
+              height: chartHeight,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              color: 'var(--text-muted)',
+              fontSize: 13,
+              fontFamily: 'var(--font-body)',
+            }}
+          >
+            {error ? 'Fix the error above to see the projection.' : 'Calculating…'}
+          </div>
+        ))}
+    </>
+  );
+  const snapshotTable = (
+    <>
+      {/* Snapshot table — deterministic tab only */}
+      {chartTab === 'det' && displayData.length > 0 && (
+        <div
+          style={{
+            background: 'var(--bg-panel)',
+            border: '1px solid var(--border)',
+            borderRadius: 12,
+            marginTop: 18,
+            overflow: 'hidden',
+          }}
+        >
+          <div style={{ padding: '13px 20px', borderBottom: '1px solid var(--border)' }}>
+            <span
+              style={{
+                fontSize: 11,
+                letterSpacing: '0.12em',
+                textTransform: 'uppercase',
+                color: 'var(--text-secondary)',
+                fontWeight: 600,
+                fontFamily: 'var(--font-body)',
+              }}
+            >
+              Snapshot — every 5 years{realTerms ? ` · real terms (today's £)` : ''}
+            </span>
+          </div>
+          <div style={{ overflowX: 'auto' }}>
+            <table
+              style={{
+                width: '100%',
+                borderCollapse: 'collapse',
+                fontFamily: 'var(--font-mono)',
+                fontSize: 12,
+              }}
+            >
+              <thead>
+                <tr style={{ background: 'var(--bg-card)' }}>
+                  {[
+                    'Age',
+                    'Pension (pre-tax)',
+                    'ISA',
+                    'GIA',
+                    'Mortgage',
+                    'Unsecured',
+                    'Stud. Loan',
+                    'Net Worth',
+                    'Shortfall',
+                  ].map((h) => (
+                    <th
+                      key={h}
+                      style={{
+                        padding: '9px 14px',
+                        textAlign: h === 'Age' ? 'left' : 'right',
+                        color: 'var(--text-muted)',
+                        fontWeight: 500,
+                        fontSize: 10,
+                        letterSpacing: '0.08em',
+                        textTransform: 'uppercase',
+                        whiteSpace: 'nowrap',
+                      }}
+                    >
+                      {h}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {displayData
+                  .filter((d) => (d.age - p.currentAge) % 5 === 0 || d.age === p.retirementAge)
+                  .map((d, i) => {
+                    const isRetirement = d.age === p.retirementAge;
+                    const isRetPhase = d.phase === 'retirement';
+                    const netWorth =
+                      d.pension + d.isa + d.gia + d.mortgage + d.unsecuredDebt + d.studentLoan;
+                    return (
+                      <tr
+                        key={d.age}
+                        style={{
+                          background: isRetirement
+                            ? 'rgba(232,184,75,0.05)'
+                            : isRetPhase
+                              ? 'rgba(79,142,247,0.03)'
+                              : i % 2 === 0
+                                ? 'transparent'
+                                : 'var(--bg-card)',
+                          borderLeft: isRetirement
+                            ? '2px solid var(--accent-gold)'
+                            : '2px solid transparent',
+                        }}
+                      >
+                        <td
+                          style={{
+                            padding: '8px 14px',
+                            color: isRetirement ? 'var(--accent-gold)' : 'var(--text-secondary)',
+                          }}
+                        >
+                          {d.age}
+                          {isRetirement ? ' ★' : ''}
+                        </td>
+                        <td style={{ padding: '8px 14px', textAlign: 'right', color: '#4f8ef7' }}>
+                          {fmtGBPLarge(d.pension)}
+                        </td>
+                        <td style={{ padding: '8px 14px', textAlign: 'right', color: '#34d399' }}>
+                          {fmtGBPLarge(d.isa)}
+                        </td>
+                        <td style={{ padding: '8px 14px', textAlign: 'right', color: '#e8b84b' }}>
+                          {fmtGBPLarge(d.gia)}
+                        </td>
+                        <td
+                          style={{
+                            padding: '8px 14px',
+                            textAlign: 'right',
+                            color: d.mortgage < 0 ? '#f43f5e' : 'var(--text-muted)',
+                          }}
+                        >
+                          {d.mortgage < 0 ? fmtGBPLarge(d.mortgage) : '—'}
+                        </td>
+                        <td
+                          style={{
+                            padding: '8px 14px',
+                            textAlign: 'right',
+                            color: d.unsecuredDebt < 0 ? '#fb923c' : 'var(--text-muted)',
+                          }}
+                        >
+                          {d.unsecuredDebt < 0 ? fmtGBPLarge(d.unsecuredDebt) : '—'}
+                        </td>
+                        <td
+                          style={{
+                            padding: '8px 14px',
+                            textAlign: 'right',
+                            color: d.studentLoan < 0 ? '#a78bfa' : 'var(--text-muted)',
+                          }}
+                        >
+                          {d.studentLoan < 0 ? fmtGBPLarge(d.studentLoan) : '—'}
+                        </td>
+                        <td
+                          style={{
+                            padding: '8px 14px',
+                            textAlign: 'right',
+                            color: netWorth >= 0 ? 'var(--text-primary)' : '#f43f5e',
+                            fontWeight: 500,
+                          }}
+                        >
+                          {fmtGBPLarge(netWorth)}
+                        </td>
+                        <td
+                          style={{
+                            padding: '8px 14px',
+                            textAlign: 'right',
+                            color: d.shortfall > 0 ? '#f43f5e' : 'var(--text-muted)',
+                          }}
+                        >
+                          {d.shortfall > 0 ? fmtGBPLarge(d.shortfall) : isRetPhase ? '—' : ''}
+                        </td>
+                      </tr>
+                    );
+                  })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+    </>
+  );
+
+  // ── Compact (phone) layout ──────────────────────────────────────────────────
+  // The chart never leaves the screen: it sits beside the inputs in landscape
+  // and is pinned above them in portrait, with only the inputs scrolling.
+  // Everything else — view toggles, undo and scenario actions, the full result
+  // cards, Monte Carlo readouts, the snapshot table and each year's detail —
+  // is one tap away in a sheet.
+  if (mobile) {
+    const landscape = layout === 'landscape';
+    return (
+      <CompactContext.Provider value={true}>
+        <div
+          style={{
+            height: viewportHeight,
+            display: 'flex',
+            flexDirection: 'column',
+            overflow: 'hidden',
+          }}
+        >
+          <header
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 8,
+              padding: '6px 10px 6px 12px',
+              borderBottom: '1px solid var(--border)',
+              background: 'var(--bg-panel)',
+              flexShrink: 0,
+            }}
+          >
+            {viewportWidth >= 440 && (
+              <h1
+                style={{
+                  fontFamily: 'var(--font-display)',
+                  fontSize: 16,
+                  fontWeight: 700,
+                  color: 'var(--text-primary)',
+                  letterSpacing: '-0.02em',
+                  whiteSpace: 'nowrap',
+                }}
+              >
+                Savings Planner
+              </h1>
+            )}
+            <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 6 }}>
+              {chartSwitcher}
+              <button
+                onClick={() => setSheet('menu')}
+                aria-label="View options, undo and scenario actions"
+                style={compactIconButton}
+              >
+                ⋯
+              </button>
+            </div>
+          </header>
+
+          <CompactSummary items={summaryItems} onOpen={() => setSheet('results')} />
+
+          <div
+            style={{
+              flex: 1,
+              minHeight: 0,
+              display: 'flex',
+              flexDirection: landscape ? 'row' : 'column',
+            }}
+          >
+            {/* Chart pane — always in view */}
+            <section
+              style={{
+                flex: landscape ? '1 1 58%' : '0 0 auto',
+                minWidth: 0,
+                padding: '6px 6px 4px 0',
+                overflow: 'hidden',
+              }}
+            >
+              {chartTab === 'mc' ? mcChart : detChart}
+            </section>
+
+            {/* Inputs pane — the only part that scrolls */}
+            <section
+              style={{
+                flex: landscape ? '0 0 42%' : '1 1 auto',
+                minWidth: 0,
+                minHeight: 0,
+                display: 'flex',
+                flexDirection: 'column',
+                background: 'var(--bg-panel)',
+                borderLeft: landscape ? '1px solid var(--border)' : 'none',
+                borderTop: landscape ? 'none' : '1px solid var(--border)',
+              }}
+            >
+              <SectionPicker value={activeTab} onChange={setActiveTab} />
+              <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '14px 14px 6px' }}>
+                {errorBanner}
+                {tabContent}
+              </div>
+            </section>
+          </div>
+
+          {sheet === 'menu' && (
+            <Sheet title="View & scenario" onClose={closeSheet}>
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  flexWrap: 'wrap',
+                  gap: 10,
+                  marginBottom: 18,
+                }}
+              >
+                {viewToggles}
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 18 }}>
+                {actionButtons}
+              </div>
+              <p
+                style={{
+                  color: 'var(--text-muted)',
+                  fontSize: 11,
+                  fontFamily: 'var(--font-mono)',
+                  lineHeight: 1.6,
+                  marginBottom: 10,
+                }}
+              >
+                ⚠ Illustrative only — not financial advice. England, Wales &amp; Northern Ireland
+                residents only.
+              </p>
+              <a
+                href="https://github.com/sambloom92/savings-planner"
+                target="_blank"
+                rel="noopener noreferrer"
+                style={{
+                  color: 'var(--text-muted)',
+                  fontFamily: 'var(--font-mono)',
+                  fontSize: 11,
+                  letterSpacing: '0.06em',
+                }}
+              >
+                github.com/sambloom92/savings-planner
+              </a>
+            </Sheet>
+          )}
+
+          {sheet === 'results' && (
+            <Sheet title="Results" onClose={closeSheet}>
+              {solvencyReadout && <div style={{ marginBottom: 14 }}>{solvencyReadout}</div>}
+              {statCards}
+              {hiddenShortfallPrompt}
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  flexWrap: 'wrap',
+                  gap: 12,
+                  marginBottom: 6,
+                }}
+              >
+                {chartRightControls}
+              </div>
+              {chartTab === 'mc' && mcExtras}
+              {snapshotTable}
+            </Sheet>
+          )}
+
+          {detailRow && (
+            <Sheet
+              title={
+                detailRow.year != null
+                  ? `Age ${detailRow.age} · ${detailRow.year}`
+                  : `Age ${detailRow.age}`
+              }
+              onClose={closeDetail}
+              modal={false}
+              side={landscape ? 'right' : 'bottom'}
+              maxHeight="55%"
+            >
+              <YearDetailPanel row={detailRow} mobile />
+            </Sheet>
+          )}
+        </div>
+      </CompactContext.Provider>
+    );
+  }
+
+  // ── Desktop layout ──────────────────────────────────────────────────────────
   return (
-    <div
-      style={{
-        height: mobile ? 'auto' : '100vh',
-        minHeight: mobile ? '100svh' : undefined,
-        display: 'flex',
-        flexDirection: 'column',
-        overflow: mobile ? 'visible' : 'hidden',
-      }}
-    >
+    <div style={{ height: '100vh', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
       {/* ── Header ── */}
       <header
         style={{
-          padding: mobile ? '10px 14px' : '14px 28px',
+          padding: '14px 28px',
           borderBottom: '1px solid var(--border)',
           display: 'flex',
-          alignItems: mobile ? 'center' : 'baseline',
+          alignItems: 'baseline',
           flexWrap: 'wrap',
-          gap: mobile ? 8 : 14,
+          gap: 14,
           background: 'var(--bg-panel)',
           flexShrink: 0,
         }}
@@ -3916,199 +5646,43 @@ export default function App() {
         >
           Savings Planner
         </h1>
-        {!mobile && (
-          <span
-            style={{
-              color: 'var(--accent-gold)',
-              fontFamily: 'var(--font-mono)',
-              fontSize: 11,
-              letterSpacing: '0.1em',
-            }}
-          >
-            RETIREMENT SAVINGS PROJECTION DASHBOARD
-          </span>
-        )}
+        <span
+          style={{
+            color: 'var(--accent-gold)',
+            fontFamily: 'var(--font-mono)',
+            fontSize: 11,
+            letterSpacing: '0.1em',
+          }}
+        >
+          RETIREMENT SAVINGS PROJECTION DASHBOARD
+        </span>
         <div
           style={{
-            marginLeft: mobile ? 0 : 'auto',
+            marginLeft: 'auto',
             display: 'flex',
             alignItems: 'center',
-            gap: mobile ? 8 : 16,
+            gap: 16,
             flexWrap: 'wrap',
           }}
         >
-          {/* Theme switcher */}
-          <div
-            style={{
-              display: 'flex',
-              borderRadius: 5,
-              overflow: 'hidden',
-              border: '1px solid var(--border-bright)',
-            }}
+          {viewToggles}
+          <span
+            style={{ color: 'var(--text-muted)', fontSize: 11, fontFamily: 'var(--font-mono)' }}
           >
-            {THEMES.map(({ value, label, title }) => {
-              const active = colorMode === value;
-              return (
-                <button
-                  key={value}
-                  onClick={() => changeColorMode(value)}
-                  title={title}
-                  style={{
-                    padding: '4px 10px',
-                    background: active ? 'var(--accent-gold)' : 'transparent',
-                    color: active ? 'var(--accent-gold-text)' : 'var(--text-muted)',
-                    border: 'none',
-                    cursor: 'pointer',
-                    fontFamily: 'var(--font-mono)',
-                    fontSize: 10,
-                    fontWeight: 600,
-                    letterSpacing: '0.06em',
-                    transition: 'all 0.15s',
-                  }}
-                >
-                  {label}
-                </button>
-              );
-            })}
-          </div>
-          <HelpTip text="Nominal: all figures shown in future pounds (the actual cash amounts at each age). Real: figures are adjusted for inflation and expressed in today's purchasing power, so you can compare values across different ages on a like-for-like basis. Uses the inflation rate set in the Rates tab." />
-          <div
-            style={{
-              display: 'flex',
-              borderRadius: 5,
-              overflow: 'hidden',
-              border: '1px solid var(--border-bright)',
-            }}
-          >
-            {['Nominal', 'Real'].map((opt) => {
-              const active = realTerms ? opt === 'Real' : opt === 'Nominal';
-              return (
-                <button
-                  key={opt}
-                  onClick={() => setRealTerms(opt === 'Real')}
-                  style={{
-                    padding: '4px 12px',
-                    background: active ? 'var(--accent-gold)' : 'transparent',
-                    color: active ? 'var(--accent-gold-text)' : 'var(--text-muted)',
-                    border: 'none',
-                    cursor: 'pointer',
-                    fontFamily: 'var(--font-mono)',
-                    fontSize: 10,
-                    fontWeight: 600,
-                    letterSpacing: '0.08em',
-                    transition: 'all 0.15s',
-                  }}
-                >
-                  {opt}
-                </button>
-              );
-            })}
-          </div>
-          <HelpTip text="Linear: y-axis uses a linear scale — equal distances represent equal pound amounts. Log: y-axis uses a logarithmic scale — equal distances represent equal percentage growth, making early portfolio growth more visible." />
-          <div
-            style={{
-              display: 'flex',
-              borderRadius: 5,
-              overflow: 'hidden',
-              border: '1px solid var(--border-bright)',
-            }}
-          >
-            {['Lin', 'Log'].map((opt) => {
-              const active = logScale ? opt === 'Log' : opt === 'Lin';
-              return (
-                <button
-                  key={opt}
-                  onClick={() => setLogScale(opt === 'Log')}
-                  style={{
-                    padding: '4px 12px',
-                    background: active ? 'var(--accent-gold)' : 'transparent',
-                    color: active ? 'var(--accent-gold-text)' : 'var(--text-muted)',
-                    border: 'none',
-                    cursor: 'pointer',
-                    fontFamily: 'var(--font-mono)',
-                    fontSize: 10,
-                    fontWeight: 600,
-                    letterSpacing: '0.08em',
-                    transition: 'all 0.15s',
-                  }}
-                >
-                  {opt}
-                </button>
-              );
-            })}
-          </div>
-          <HelpTip
-            text="All balances: the chart shows your whole pot — pension + ISA + GIA — at every age. Available funds: shows only money you could actually spend at that age. Your defined-contribution pension is excluded before your pension access age (set in the Pension tab), because it's locked until then; ISA and GIA count throughout.
-
-Two other age gates matter for what you can actually rely on, both marked on the chart:
-• State pension — this is age-gated income, not a spendable balance, so it doesn't appear in either view. It only starts at your state pension age, and from then on it reduces how much you draw from your pots. Before that age you're on your own funds.
-• Windfalls — any you've added arrive at a set age. A future windfall isn't part of your funds until it lands (the balance simply steps up at that age), so it can't help with a shortfall before then.
-
-Use Available funds to see whether an early-retirement plan can bridge the gap until the pension unlocks and these other sources kick in — the total-balance view can look healthy while your spendable money has run out."
-          />
-          <div
-            style={{
-              display: 'flex',
-              borderRadius: 5,
-              overflow: 'hidden',
-              border: '1px solid var(--border-bright)',
-            }}
-          >
-            {[
-              { label: 'All', value: 'all' },
-              { label: 'Available', value: 'available' },
-            ].map(({ label, value }) => {
-              const active = fundsView === value;
-              return (
-                <button
-                  key={value}
-                  onClick={() => setFundsView(value)}
-                  style={{
-                    padding: '4px 12px',
-                    background: active ? 'var(--accent-gold)' : 'transparent',
-                    color: active ? 'var(--accent-gold-text)' : 'var(--text-muted)',
-                    border: 'none',
-                    cursor: 'pointer',
-                    fontFamily: 'var(--font-mono)',
-                    fontSize: 10,
-                    fontWeight: 600,
-                    letterSpacing: '0.08em',
-                    transition: 'all 0.15s',
-                    whiteSpace: 'nowrap',
-                  }}
-                >
-                  {label}
-                </button>
-              );
-            })}
-          </div>
-          {!mobile && (
-            <span
-              style={{ color: 'var(--text-muted)', fontSize: 11, fontFamily: 'var(--font-mono)' }}
-            >
-              ⚠ Illustrative only — not financial advice. England, Wales &amp; Northern Ireland
-              residents only.
-            </span>
-          )}
+            ⚠ Illustrative only — not financial advice. England, Wales &amp; Northern Ireland
+            residents only.
+          </span>
         </div>
       </header>
 
-      <div
-        style={{
-          display: 'flex',
-          flex: mobile ? undefined : 1,
-          flexDirection: mobile ? 'column' : 'row',
-          overflow: mobile ? 'visible' : 'hidden',
-        }}
-      >
+      <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
         {/* ── Sidebar ── */}
         <aside
           style={{
-            width: mobile ? '100%' : 310,
+            width: 310,
             flexShrink: 0,
             background: 'var(--bg-panel)',
-            borderRight: mobile ? 'none' : '1px solid var(--border)',
-            borderBottom: mobile ? '1px solid var(--border)' : 'none',
+            borderRight: '1px solid var(--border)',
             display: 'flex',
             flexDirection: 'column',
             overflow: 'hidden',
@@ -4118,8 +5692,7 @@ Use Available funds to see whether an early-retirement plan can bridge the gap u
           <div
             style={{
               display: 'grid',
-              gridTemplateColumns: mobile ? `repeat(${TABS.length}, 1fr)` : 'repeat(4, 1fr)',
-              overflowX: mobile ? 'auto' : 'visible',
+              gridTemplateColumns: 'repeat(4, 1fr)',
               borderBottom: '1px solid var(--border)',
               flexShrink: 0,
             }}
@@ -4128,17 +5701,7 @@ Use Available funds to see whether an early-retirement plan can bridge the gap u
               <button
                 key={tab}
                 title={TAB_HELP[tab]}
-                onClick={() => {
-                  if (mobile) {
-                    if (activeTab === tab && sidebarOpen) setSidebarOpen(false);
-                    else {
-                      setActiveTab(tab);
-                      setSidebarOpen(true);
-                    }
-                  } else {
-                    setActiveTab(tab);
-                  }
-                }}
+                onClick={() => setActiveTab(tab)}
                 style={{
                   padding: '9px 4px',
                   background: activeTab === tab ? 'var(--bg-card)' : 'transparent',
@@ -4160,23 +5723,7 @@ Use Available funds to see whether an early-retirement plan can bridge the gap u
           </div>
 
           {/* Scrollable tab content */}
-          <div
-            style={{
-              flex: 1,
-              overflowY: 'auto',
-              padding: '20px 20px 8px',
-              display: mobile && !sidebarOpen ? 'none' : 'block',
-            }}
-          >
-            <TabContent
-              tab={activeTab}
-              p={p}
-              set={set}
-              derived={derivedSavings}
-              topUp={topUpInfo}
-              annuity={summary?.annuity ?? null}
-            />
-          </div>
+          <div style={{ flex: 1, overflowY: 'auto', padding: '20px 20px 8px' }}>{tabContent}</div>
 
           {/* Footer actions */}
           <div
@@ -4189,329 +5736,15 @@ Use Available funds to see whether an early-retirement plan can bridge the gap u
               gap: 8,
             }}
           >
-            {(!mobile || sidebarOpen) && (
-              <>
-                {/* Undo / Redo */}
-                <div style={{ display: 'flex', gap: 8 }}>
-                  {[
-                    {
-                      label: '↶ Undo',
-                      title: 'Undo (Ctrl/Cmd+Z)',
-                      handler: undo,
-                      enabled: canUndo,
-                    },
-                    {
-                      label: 'Redo ↷',
-                      title: 'Redo (Ctrl/Cmd+Shift+Z)',
-                      handler: redo,
-                      enabled: canRedo,
-                    },
-                  ].map(({ label, title, handler, enabled }) => (
-                    <button
-                      key={label}
-                      onClick={handler}
-                      disabled={!enabled}
-                      title={title}
-                      style={{
-                        flex: 1,
-                        padding: '7px 4px',
-                        background: 'transparent',
-                        border: '1px solid var(--border-bright)',
-                        borderRadius: 6,
-                        color: enabled ? 'var(--text-secondary)' : 'var(--text-muted)',
-                        opacity: enabled ? 1 : 0.4,
-                        fontFamily: 'var(--font-mono)',
-                        fontSize: 11,
-                        cursor: enabled ? 'pointer' : 'default',
-                        letterSpacing: '0.04em',
-                        transition: 'all 0.15s',
-                      }}
-                      onMouseOver={(e) => {
-                        if (enabled) {
-                          e.currentTarget.style.borderColor = 'var(--accent-gold)';
-                          e.currentTarget.style.color = 'var(--accent-gold)';
-                        }
-                      }}
-                      onMouseOut={(e) => {
-                        e.currentTarget.style.borderColor = 'var(--border-bright)';
-                        e.currentTarget.style.color = enabled
-                          ? 'var(--text-secondary)'
-                          : 'var(--text-muted)';
-                      }}
-                    >
-                      {label}
-                    </button>
-                  ))}
-                </div>
-                {/* Copy / Paste JSON */}
-                <div style={{ display: 'flex', gap: 8 }}>
-                  {[
-                    {
-                      label: 'Copy JSON',
-                      title:
-                        'Copy all current parameters to the clipboard as JSON, to save or share this scenario',
-                      msg: copyMsg,
-                      handler: handleCopy,
-                    },
-                    {
-                      label: 'Paste JSON',
-                      title: 'Replace all parameters with a scenario JSON from the clipboard',
-                      msg: pasteMsg,
-                      handler: handlePaste,
-                    },
-                  ].map(({ label, title, msg, handler }) => {
-                    const isError = msg === 'Failed' || msg === 'Invalid JSON';
-                    return (
-                      <button
-                        key={label}
-                        title={title}
-                        onClick={handler}
-                        style={{
-                          flex: 1,
-                          padding: '7px 4px',
-                          background: 'transparent',
-                          border: `1px solid ${msg ? (isError ? 'rgba(244,63,94,0.5)' : 'rgba(52,211,153,0.5)') : 'var(--border-bright)'}`,
-                          borderRadius: 6,
-                          color: msg ? (isError ? '#f87171' : '#34d399') : 'var(--text-secondary)',
-                          fontFamily: 'var(--font-mono)',
-                          fontSize: 11,
-                          cursor: 'pointer',
-                          letterSpacing: '0.04em',
-                          transition: 'all 0.15s',
-                        }}
-                        onMouseOver={(e) => {
-                          if (!msg) {
-                            e.currentTarget.style.borderColor = 'var(--accent-gold)';
-                            e.currentTarget.style.color = 'var(--accent-gold)';
-                          }
-                        }}
-                        onMouseOut={(e) => {
-                          if (!msg) {
-                            e.currentTarget.style.borderColor = 'var(--border-bright)';
-                            e.currentTarget.style.color = 'var(--text-secondary)';
-                          }
-                        }}
-                      >
-                        {msg ?? label}
-                      </button>
-                    );
-                  })}
-                </div>
-                {/* Reset */}
-                <button
-                  title="Reset every parameter back to its default value"
-                  onClick={() => {
-                    replaceP(DEFAULTS);
-                    setActiveTab('Personal');
-                  }}
-                  style={{
-                    width: '100%',
-                    padding: '7px',
-                    background: 'transparent',
-                    border: '1px solid var(--border-bright)',
-                    borderRadius: 6,
-                    color: 'var(--text-secondary)',
-                    fontFamily: 'var(--font-body)',
-                    fontSize: 12,
-                    cursor: 'pointer',
-                    letterSpacing: '0.05em',
-                    transition: 'all 0.15s',
-                  }}
-                  onMouseOver={(e) => {
-                    e.target.style.borderColor = 'var(--accent-gold)';
-                    e.target.style.color = 'var(--accent-gold)';
-                  }}
-                  onMouseOut={(e) => {
-                    e.target.style.borderColor = 'var(--border-bright)';
-                    e.target.style.color = 'var(--text-secondary)';
-                  }}
-                >
-                  Reset to Defaults
-                </button>
-                {/* Done — mobile only */}
-                {mobile && (
-                  <button
-                    onClick={() => setSidebarOpen(false)}
-                    style={{
-                      width: '100%',
-                      padding: '9px',
-                      background: 'var(--accent-gold)',
-                      border: 'none',
-                      borderRadius: 6,
-                      color: 'var(--accent-gold-text)',
-                      fontFamily: 'var(--font-body)',
-                      fontSize: 13,
-                      fontWeight: 600,
-                      cursor: 'pointer',
-                      letterSpacing: '0.04em',
-                    }}
-                  >
-                    Done
-                  </button>
-                )}
-              </>
-            )}
+            {actionButtons}
           </div>
         </aside>
 
         {/* ── Main content ── */}
-        <main
-          style={{
-            flex: 1,
-            padding: mobile ? '14px' : '22px 28px',
-            overflowY: mobile ? 'visible' : 'auto',
-            minWidth: 0,
-          }}
-        >
-          {/* Error banner */}
-          {error && (
-            <div
-              style={{
-                background: 'rgba(244,63,94,0.08)',
-                border: '1px solid rgba(244,63,94,0.5)',
-                borderRadius: 8,
-                padding: '10px 16px',
-                marginBottom: 20,
-                color: '#f87171',
-                fontSize: 12,
-                fontFamily: 'var(--font-mono)',
-              }}
-            >
-              ⚠ {error}
-            </div>
-          )}
+        <main style={{ flex: 1, padding: '22px 28px', overflowY: 'auto', minWidth: 0 }}>
+          {errorBanner}
 
-          {/* Stat cards */}
-          {displaySummary &&
-            (() => {
-              const firstShortfall = displayData.find(
-                (d) => d.phase === 'retirement' && d.shortfall > 0
-              );
-              const lastRetRow = [...displayData].reverse().find((d) => d.phase === 'retirement');
-              const retNetWorth = retYearEndRow
-                ? retYearEndRow.pension +
-                  retYearEndRow.isa +
-                  retYearEndRow.gia +
-                  retYearEndRow.mortgage +
-                  retYearEndRow.unsecuredDebt +
-                  retYearEndRow.studentLoan
-                : displaySummary.netWorth;
-              // "≈ after tax" line for a figure that includes the row's pension
-              // balance (see PENSION_AFTER_TAX_HELP); hidden when there's no pension.
-              const afterTaxNote = (total, row, suffix) =>
-                row && row.pension > 0
-                  ? `≈ ${fmtGBPLarge(total - row.pensionTax)} ${suffix}`
-                  : null;
-              return (
-                <div
-                  style={{
-                    display: 'grid',
-                    gridTemplateColumns: mobile ? 'repeat(2, 1fr)' : 'repeat(4, 1fr)',
-                    gap: 12,
-                    marginBottom: 22,
-                  }}
-                >
-                  <StatCard
-                    label="Net Worth at Retirement"
-                    value={fmtGBPLarge(retNetWorth)}
-                    color="var(--accent-gold)"
-                    subtitle={`Age ${p.retirementAge} · year-end${realTerms ? " · today's £" : ''}`}
-                    note={afterTaxNote(retNetWorth, retYearEndRow, 'with pension after tax')}
-                    help={
-                      "Pension + ISA + GIA balances at the end of your first retirement year, minus any outstanding debts. Matches the chart value at that age. Property equity is deliberately excluded, even though the mortgage liability is counted: the mortgage is a contractual cash-flow commitment that must be serviced regardless of house prices, whereas home equity is illiquid, costly to access, and shouldn't silently prop up a retirement plan. If a plan only works by selling or borrowing against your home, this tool is designed to show that as a shortfall rather than hide it. Defined benefit pensions and other illiquid assets are also excluded.\n\n" +
-                      PENSION_AFTER_TAX_HELP
-                    }
-                  />
-                  <StatCard
-                    label="Pension Pot"
-                    value={fmtGBPLarge(
-                      retYearEndRow ? retYearEndRow.pension : displaySummary.pensionPot
-                    )}
-                    color="#4f8ef7"
-                    subtitle={`ISA: ${fmtGBPLarge(retYearEndRow ? retYearEndRow.isa : displaySummary.isaBalance)} · GIA: ${fmtGBPLarge(retYearEndRow ? retYearEndRow.gia : displaySummary.giaBalance)}`}
-                    note={
-                      retYearEndRow
-                        ? afterTaxNote(retYearEndRow.pension, retYearEndRow, 'after income tax')
-                        : null
-                    }
-                    help={
-                      'Your defined contribution pension pot at the end of your first retirement year, after PCLS distribution (if taken), one year of drawdown, and one year of investment growth. Matches the chart value at that age.\n\n' +
-                      PENSION_AFTER_TAX_HELP
-                    }
-                  />
-                  <StatCard
-                    label={
-                      firstShortfall
-                        ? 'Shortfall from Age'
-                        : lastRetRow
-                          ? `Wealth at Age ${p.maxAge}`
-                          : 'Total Debt'
-                    }
-                    value={
-                      firstShortfall
-                        ? `${firstShortfall.age}`
-                        : lastRetRow
-                          ? fmtGBPLarge(lastRetRow.pension + lastRetRow.isa + lastRetRow.gia)
-                          : displaySummary.totalDebt > 0
-                            ? `-${fmtGBPLarge(displaySummary.totalDebt)}`
-                            : 'Debt-free'
-                    }
-                    color={firstShortfall ? '#f43f5e' : '#34d399'}
-                    subtitle={
-                      firstShortfall
-                        ? `Target: ${fmtGBP(p.targetNetExpenses)}/yr · pots exhausted`
-                        : lastRetRow
-                          ? `Pension: ${fmtGBPLarge(lastRetRow.pension)} · ISA: ${fmtGBPLarge(lastRetRow.isa)}`
-                          : displaySummary.totalDebt > 0
-                            ? 'at retirement'
-                            : 'at retirement'
-                    }
-                    note={
-                      !firstShortfall && lastRetRow
-                        ? afterTaxNote(
-                            lastRetRow.pension + lastRetRow.isa + lastRetRow.gia,
-                            lastRetRow,
-                            'with pension after tax'
-                          )
-                        : null
-                    }
-                    help={
-                      firstShortfall
-                        ? `Your pots run out at this age — combined pension, ISA, and GIA can no longer cover the inflation-adjusted target spending of ${fmtGBP(p.targetNetExpenses)}/yr. Consider increasing savings, reducing target expenses, or retiring later.`
-                        : lastRetRow
-                          ? `Combined pension + ISA + GIA balance at age ${p.maxAge}, after funding all retirement spending. Property equity and other illiquid assets are deliberately not included — the projection never draws on your home, so any shortfall is shown honestly rather than backfilled by assumed downsizing or equity release.\n\n${PENSION_AFTER_TAX_HELP} What your heirs would pay on a pension left unspent depends on their own circumstances.`
-                          : 'Total outstanding debt (mortgage + unsecured + student loan) at retirement.'
-                    }
-                  />
-                  <StatCard
-                    label="State Pension"
-                    value={
-                      displaySummary.projectedStatePension > 0
-                        ? `${fmtGBPLarge(displaySummary.projectedStatePension)}/yr`
-                        : 'Not eligible'
-                    }
-                    color={
-                      displaySummary.projectedStatePension > 0 ? '#a78bfa' : 'var(--text-muted)'
-                    }
-                    subtitle={(() => {
-                      const niShown =
-                        displaySummary.niYearsWithTopUp ?? displaySummary.niYearsAccrued;
-                      const bought = displaySummary.class3YearsBought ?? 0;
-                      const niLabel = `${niShown} NI yrs${bought > 0 ? ` (incl. ${bought} Class 3)` : ''}`;
-                      const startAge =
-                        displaySummary.statePensionStartAge ?? displaySummary.statePensionAge;
-                      if (displaySummary.projectedStatePension > 0) {
-                        return displaySummary.statePensionEligibleAtRetirement
-                          ? `From age ${startAge} · ${niLabel}`
-                          : `Starts age ${startAge} · ${niLabel}`;
-                      }
-                      return `Only ${niShown} qualifying NI yrs — need 10`;
-                    })()}
-                    help="Your projected state pension, based on total NI qualifying years accrued by retirement (plus any voluntary Class 3 years bought via the top-up toggle). This is a real government entitlement (inflation-linked via triple lock), not an investment return. It offsets retirement expenses before drawing from personal pots."
-                  />
-                </div>
-              );
-            })()}
+          {statCards}
 
           {/* Chart */}
           <div
@@ -4522,22 +5755,19 @@ Use Available funds to see whether an early-retirement plan can bridge the gap u
               padding: '20px 16px 12px 8px',
             }}
           >
-            {/* ── Chart card header — 3-column layout keeps tab switcher stable ──
-                On mobile it wraps: the title takes a full row and the switcher and
-                tab controls share the next, so nothing runs off the screen. */}
+            {/* ── Chart card header — 3-column layout keeps tab switcher stable ── */}
             <div
               style={{
                 paddingLeft: 16,
                 paddingRight: 8,
                 marginBottom: 14,
                 display: 'flex',
-                flexWrap: mobile ? 'wrap' : 'nowrap',
                 alignItems: 'flex-start',
                 gap: 12,
               }}
             >
               {/* Left: title + subtitle (flex:1 so it absorbs spare space) */}
-              <div style={{ flex: mobile ? '1 1 100%' : 1, minWidth: 0 }}>
+              <div style={{ flex: 1, minWidth: 0 }}>
                 <h2
                   style={{
                     fontFamily: 'var(--font-display)',
@@ -4581,58 +5811,7 @@ Use Available funds to see whether an early-retirement plan can bridge the gap u
               </div>
 
               {/* Centre: tab switcher + tooltip — fixed, never moves */}
-              <div
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 6,
-                  alignSelf: 'center',
-                  flexShrink: 0,
-                }}
-              >
-                <div
-                  style={{
-                    display: 'flex',
-                    background: 'var(--bg-input)',
-                    border: '1px solid var(--border)',
-                    borderRadius: 6,
-                    overflow: 'hidden',
-                  }}
-                >
-                  {[
-                    { key: 'det', label: 'Deterministic' },
-                    { key: 'mc', label: 'Monte Carlo' },
-                  ].map(({ key, label }) => (
-                    <button
-                      key={key}
-                      onClick={() => setChartTab(key)}
-                      style={{
-                        padding: '4px 12px',
-                        background: chartTab === key ? 'var(--accent-gold)' : 'transparent',
-                        border: 'none',
-                        color:
-                          chartTab === key ? 'var(--accent-gold-text)' : 'var(--text-secondary)',
-                        fontFamily: 'var(--font-mono)',
-                        fontSize: 10,
-                        fontWeight: 600,
-                        letterSpacing: '0.06em',
-                        cursor: 'pointer',
-                        transition: 'all 0.15s',
-                        whiteSpace: 'nowrap',
-                      }}
-                    >
-                      {label}
-                    </button>
-                  ))}
-                </div>
-                <HelpTip
-                  text={
-                    'Deterministic: one fixed projection using the exact rates you set in the Rates tab. Useful for understanding how the plan works and stress-testing specific assumptions. Because it uses a single unchanging set of assumptions, it is inherently optimistic — there is no mechanism for things to go wrong beyond what you explicitly model.\n\n' +
-                    'Monte Carlo: runs hundreds of simulations, each with a different random sequence of market returns and economic conditions. The fan chart shows the spread of outcomes — the wide band is the 10th–90th percentile range, the narrow band is 25th–75th, and the centre line is the median. The simulation is calibrated so the median trial tracks the deterministic projection — your return rate sliders represent full-cycle expected returns, already inclusive of bear markets. The fan shows what happens when bad years cluster unluckily (p10) or conditions are unusually favourable (p90).\n\n' +
-                    'Use Monte Carlo to understand retirement risk — specifically, whether your plan survives bad luck, not just average conditions.'
-                  }
-                />
-              </div>
+              {chartSwitcher}
 
               {/* Right: tab-specific controls (flex:1, right-aligned) */}
               <div
@@ -4645,635 +5824,26 @@ Use Available funds to see whether an early-retirement plan can bridge the gap u
                   alignSelf: 'center',
                 }}
               >
-                {chartTab === 'det' && (
-                  <span
-                    style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: 3,
-                      fontFamily: 'var(--font-mono)',
-                      fontSize: 10,
-                      color: 'var(--text-muted)',
-                      whiteSpace: 'nowrap',
-                      letterSpacing: '0.04em',
-                    }}
-                  >
-                    4% rule: {fmtGBPLarge(fourPctTarget)}
-                    <HelpTip
-                      text={
-                        'The 4% rule is a retirement planning heuristic: if you withdraw 4% of your portfolio in year one and adjust for inflation each year, historical data suggests the portfolio survives a 30-year retirement. This implies you need 25× your annual spending saved (1 ÷ 0.04 = 25).\n\n' +
-                        'This line shows that target in ' +
-                        (realTerms ? "today's money." : 'nominal terms at your retirement date.') +
-                        '\n\nWhy the model may differ:\n' +
-                        '• The model uses year-by-year drawdown with actual tax calculations, so it draws less gross from the pension when income is within the personal allowance.\n' +
-                        '• State pension income offsets spending needs, reducing how much the portfolio must provide — the 4% rule ignores guaranteed income sources.\n' +
-                        '• The model sequences across ISA, GIA, and pension in a tax-efficient order, whereas the 4% rule assumes a single undifferentiated pot.\n' +
-                        '• The 4% rule was calibrated on a 30-year horizon. Longer retirements (e.g. retiring at 55 to age 95) may require a lower safe withdrawal rate of 3–3.5%.'
-                      }
-                    />
-                  </span>
-                )}
-                {!mobile && solvencyReadout}
-                {chartTab === 'mc' && (
-                  <HelpTip
-                    text={
-                      `${mcResults ? mcResults.trialCount : 0} trials shown. Each trial varies investment returns (market factor) and inflation / BoE / wage growth (macro factor) using correlated random shocks.\n\n` +
-                      'Solvent for life: the chance you never run out of money while still alive — the complement of the lifetime probability of ruin. Each trial that runs dry is weighted by the probability you live to see it (from UK population mortality for the selected sex, set in the Simulation tab), so dying with money left counts as success. Set high enough that the age horizon reaches ~100 for this to be meaningful.\n\n' +
-                      'Running dry means being unable to meet your target spending — including the bridge years before your pension access age, when a locked pension you cannot yet touch does not count as available. Early access penalties are not modelled.\n\n' +
-                      'The "to age N" figure is the simpler fixed-horizon view: the fraction of trials solvent all the way to the model horizon, ignoring survival. It is always the more pessimistic of the two.\n\n' +
-                      'Bands show the 10th–90th percentile range (faint) and 25th–75th range (stronger). Lines show the 5 key percentiles. The dotted curve is the probability of still being alive at each age.\n\n' +
-                      'Click and hold on a data point to isolate the single trial closest to that percentile at that age. Shortfall labels (▼ with age) show when each percentile path runs out of money.'
-                    }
-                  />
-                )}
+                {chartRightControls}
               </div>
             </div>
 
-            {/* Mobile: solvency readout on its own full-width line (no room in the header row) */}
-            {mobile && solvencyReadout && (
-              <div style={{ padding: '0 16px', marginBottom: 12 }}>{solvencyReadout}</div>
-            )}
-
-            {/* Prompt: shortfall hidden by the all-balances view (locked pension) */}
-            {fundsView === 'all' && availableHiddenShortfall && (
-              <div
-                style={{
-                  margin: '0 16px 12px',
-                  padding: '9px 12px',
-                  borderRadius: 7,
-                  border: '1px solid rgba(244,63,94,0.4)',
-                  background: 'rgba(244,63,94,0.08)',
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 10,
-                  flexWrap: 'wrap',
-                }}
-              >
-                <span
-                  style={{
-                    fontSize: 12,
-                    color: 'var(--text-secondary)',
-                    fontFamily: 'var(--font-body)',
-                    lineHeight: 1.5,
-                    flex: 1,
-                    minWidth: 200,
-                  }}
-                >
-                  {chartTab === 'mc' ? (
-                    <>
-                      <strong style={{ color: '#f87171' }}>
-                        Spendable money runs out early in some trials.
-                      </strong>{' '}
-                      In about {fmtPct((mcResults?.solvency?.ruinBeforeAccessProb ?? 0) * 100)} of
-                      trials a shortfall happens before your pension access age (
-                      {p.pensionAccessAge}
-                      ), while the locked pension keeps the total balance above zero — so those
-                      paths can look solvent here when they aren&apos;t.
-                    </>
-                  ) : (
-                    <>
-                      <strong style={{ color: '#f87171' }}>Spendable money runs out early.</strong>{' '}
-                      A shortfall happens before your pension access age ({p.pensionAccessAge}),
-                      while the locked pension keeps the total balance above zero — so this view
-                      looks solvent when it isn&apos;t.
-                    </>
-                  )}
-                </span>
-                <button
-                  onClick={() => setFundsView('available')}
-                  style={{
-                    padding: '5px 12px',
-                    background: 'transparent',
-                    border: '1px solid rgba(244,63,94,0.6)',
-                    borderRadius: 6,
-                    color: '#f87171',
-                    fontFamily: 'var(--font-mono)',
-                    fontSize: 11,
-                    fontWeight: 600,
-                    letterSpacing: '0.04em',
-                    cursor: 'pointer',
-                    whiteSpace: 'nowrap',
-                  }}
-                >
-                  Show available funds
-                </button>
-              </div>
-            )}
+            {hiddenShortfallPrompt}
 
             {/* ── Monte Carlo tab ── */}
             {chartTab === 'mc' && (
               <>
-                {mcResults ? (
-                  <FanChart
-                    percentileData={
-                      fundsView === 'available'
-                        ? mcResults.availablePercentileData
-                        : mcResults.percentileData
-                    }
-                    portfolioMatrix={mcResults.portfolioMatrix}
-                    allPotData={mcResults.allPotData}
-                    potSeries={series}
-                    repPaths={mcResults.repPaths}
-                    realTerms={realTerms}
-                    inflRate={inflRate}
-                    currentAge={p.currentAge}
-                    retirementAge={p.retirementAge}
-                    statePensionAge={p.statePensionAge}
-                    pensionAccessAge={p.pensionAccessAge}
-                    onHoverRow={(row) => {
-                      setHoveredRow(row ?? null);
-                    }}
-                    fourPctTarget={fourPctTarget}
-                    showDetails={true}
-                    colorMode={colorMode}
-                    logScale={logScale}
-                    eventMarkers={eventMarkers}
-                    annuityAge={annuityChartAge}
-                    retirementIsTarget={p.flexibleRetirement}
-                    survivalSeries={mcResults.solvency?.survival}
-                    shortfallMarkers={mcResults.solvency?.shortfallMarkers}
-                    shortfallAges={mcResults.shortfallAges}
-                    fundsView={fundsView}
-                    height={mobile ? 260 : 390}
-                  />
-                ) : mcPending ? (
-                  <div
-                    style={{
-                      height: mobile ? 260 : 390,
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      color: 'var(--text-muted)',
-                      fontSize: 13,
-                      fontFamily: 'var(--font-mono)',
-                    }}
-                  >
-                    Computing {p.mcTrials} trials…
-                  </div>
-                ) : (
-                  <div
-                    style={{
-                      height: mobile ? 260 : 390,
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      color: 'var(--text-muted)',
-                      fontSize: 13,
-                    }}
-                  >
-                    No results — check inputs
-                  </div>
-                )}
-                {/* Flexible-retirement postponement summary */}
-                {mcResults?.retirement?.flexible && (
-                  <div
-                    style={{
-                      margin: '12px 16px 0',
-                      padding: '10px 13px',
-                      borderRadius: 7,
-                      border: '1px solid var(--border)',
-                      background: 'var(--bg-card)',
-                    }}
-                  >
-                    <div
-                      style={{
-                        display: 'flex',
-                        alignItems: 'baseline',
-                        gap: 8,
-                        flexWrap: 'wrap',
-                        marginBottom: mcResults.retirement.fractionDelayed > 0 ? 8 : 0,
-                      }}
-                    >
-                      <span
-                        style={{
-                          fontSize: 10,
-                          letterSpacing: '0.08em',
-                          textTransform: 'uppercase',
-                          color: 'var(--text-muted)',
-                          fontFamily: 'var(--font-mono)',
-                        }}
-                      >
-                        Flexible retirement
-                      </span>
-                      {mcResults.retirement.fractionDelayed > 0 ? (
-                        <span
-                          style={{
-                            fontSize: 12,
-                            color: 'var(--text-secondary)',
-                            fontFamily: 'var(--font-body)',
-                            lineHeight: 1.5,
-                          }}
-                        >
-                          Postponed past age {mcResults.retirement.nominalAge} in{' '}
-                          <strong style={{ color: 'var(--accent-gold)' }}>
-                            {fmtPct(mcResults.retirement.fractionDelayed * 100)}
-                          </strong>{' '}
-                          of trials · median retirement age{' '}
-                          <strong style={{ color: 'var(--text-primary)' }}>
-                            {Math.round(mcResults.retirement.medianAge)}
-                          </strong>{' '}
-                          · latest-retiring 10% to {Math.round(mcResults.retirement.p90Age)}+ (up to{' '}
-                          {mcResults.retirement.latestAge})
-                        </span>
-                      ) : (
-                        <span
-                          style={{
-                            fontSize: 12,
-                            color: 'var(--text-secondary)',
-                            fontFamily: 'var(--font-body)',
-                            lineHeight: 1.5,
-                          }}
-                        >
-                          No trials needed to postpone — every trial could retire on time at age{' '}
-                          {mcResults.retirement.nominalAge}.
-                        </span>
-                      )}
-                    </div>
-                    {mcResults.retirement.fractionDelayed > 0 && (
-                      <div style={{ display: 'flex', gap: 3, flexWrap: 'wrap' }}>
-                        {mcResults.retirement.distribution.map((d) => {
-                          const delayed = d.age > mcResults.retirement.nominalAge;
-                          return (
-                            <span
-                              key={d.age}
-                              title={`${d.count} trial${d.count === 1 ? '' : 's'}`}
-                              style={{
-                                fontSize: 10,
-                                fontFamily: 'var(--font-mono)',
-                                padding: '2px 6px',
-                                borderRadius: 4,
-                                background: delayed ? 'rgba(212,175,55,0.12)' : 'var(--bg-input)',
-                                color: delayed ? 'var(--accent-gold)' : 'var(--text-muted)',
-                                whiteSpace: 'nowrap',
-                              }}
-                            >
-                              {d.age}: {fmtPct(d.fraction * 100)}
-                            </span>
-                          );
-                        })}
-                      </div>
-                    )}
-                  </div>
-                )}
-                {/* Annuity summary: essentials security + coverage across trials */}
-                {mcResults?.annuity?.active && (
-                  <div
-                    style={{
-                      margin: '12px 16px 0',
-                      padding: '10px 13px',
-                      borderRadius: 7,
-                      border: '1px solid var(--border)',
-                      background: 'var(--bg-card)',
-                      display: 'flex',
-                      alignItems: 'baseline',
-                      gap: 8,
-                      flexWrap: 'wrap',
-                    }}
-                  >
-                    <span
-                      style={{
-                        fontSize: 10,
-                        letterSpacing: '0.08em',
-                        textTransform: 'uppercase',
-                        color: 'var(--text-muted)',
-                        fontFamily: 'var(--font-mono)',
-                      }}
-                    >
-                      Annuity
-                    </span>
-                    <span
-                      style={{
-                        fontSize: 12,
-                        color: 'var(--text-secondary)',
-                        fontFamily: 'var(--font-body)',
-                        lineHeight: 1.5,
-                      }}
-                    >
-                      {mcResults.solvency.essentialSecuredForLife != null && (
-                        <>
-                          Essentials ({fmtGBP(mcResults.solvency.essentialFloorReal)}/yr) secured
-                          for life:{' '}
-                          <strong style={{ color: '#a78bfa' }}>
-                            {fmtPct(mcResults.solvency.essentialSecuredForLife * 100)}
-                          </strong>{' '}
-                          (to age {p.maxAge}:{' '}
-                          {fmtPct(mcResults.solvency.essentialSecuredToHorizon * 100)}) ·{' '}
-                        </>
-                      )}
-                      {mcResults.annuity.fractionNotNeeded >= 0.999 ? (
-                        'not needed — the state pension already covers your essentials'
-                      ) : (
-                        <>
-                          target income fully bought in{' '}
-                          {fmtPct(mcResults.annuity.fractionFullyCovered * 100)} of trials
-                          {mcResults.annuity.p10Coverage < 0.999 &&
-                            ` (worst 10%: ${fmtPct(mcResults.annuity.p10Coverage * 100)} of it)`}
-                        </>
-                      )}
-                    </span>
-                  </div>
-                )}
-                {/* Spending-guardrails summary + fan */}
-                {mcResults?.spending?.active && (
-                  <div
-                    style={{
-                      margin: '12px 16px 0',
-                      padding: '10px 13px',
-                      borderRadius: 7,
-                      border: '1px solid var(--border)',
-                      background: 'var(--bg-card)',
-                    }}
-                  >
-                    <div
-                      style={{
-                        display: 'flex',
-                        alignItems: 'baseline',
-                        gap: 8,
-                        flexWrap: 'wrap',
-                        marginBottom: 8,
-                      }}
-                    >
-                      <span
-                        style={{
-                          fontSize: 10,
-                          letterSpacing: '0.08em',
-                          textTransform: 'uppercase',
-                          color: 'var(--text-muted)',
-                          fontFamily: 'var(--font-mono)',
-                        }}
-                      >
-                        Spending guardrails
-                      </span>
-                      {mcResults.spending.fractionEverCut > 0 ? (
-                        <span
-                          style={{
-                            fontSize: 12,
-                            color: 'var(--text-secondary)',
-                            fontFamily: 'var(--font-body)',
-                            lineHeight: 1.5,
-                          }}
-                        >
-                          Spending trimmed below target in{' '}
-                          <strong style={{ color: 'var(--accent-gold)' }}>
-                            {fmtPct(mcResults.spending.fractionEverCut * 100)}
-                          </strong>{' '}
-                          of trials · worst 10% cut to{' '}
-                          <strong style={{ color: 'var(--text-primary)' }}>
-                            {fmtPct(mcResults.spending.worstLowestPctOfTarget * 100)}
-                          </strong>{' '}
-                          of target · reached the floor in{' '}
-                          {fmtPct(mcResults.spending.fractionHitFloor * 100)}
-                          {mcResults.spending.ceilingPct > 100 &&
-                            ` · raised above target in ${fmtPct(mcResults.spending.fractionAboveTarget * 100)}`}
-                        </span>
-                      ) : (
-                        <span
-                          style={{
-                            fontSize: 12,
-                            color: 'var(--text-secondary)',
-                            fontFamily: 'var(--font-body)',
-                            lineHeight: 1.5,
-                          }}
-                        >
-                          No trial needed to trim spending — the target held in every trial.
-                        </span>
-                      )}
-                    </div>
-                    {mcResults.spending.percentileData.length > 1 && (
-                      <>
-                        <SpendingFan
-                          data={mcResults.spending.percentileData}
-                          target={mcResults.spending.target}
-                          floor={mcResults.spending.floor}
-                          ceilingPct={mcResults.spending.ceilingPct}
-                          mobile={mobile}
-                        />
-                        <div
-                          style={{
-                            fontSize: 10,
-                            color: 'var(--text-muted)',
-                            fontFamily: 'var(--font-mono)',
-                            marginTop: 2,
-                          }}
-                        >
-                          Guardrail-adjusted spending, today&apos;s £ · band p10–p90, line median
-                        </div>
-                      </>
-                    )}
-                  </div>
-                )}
+                {mcChart}
+                {mcExtras}
               </>
             )}
 
-            {/* ── Deterministic tab ── */}
-            {chartTab === 'det' &&
-              (chartData.length > 0 ? (
-                <FanChart
-                  deterministicData={chartData}
-                  potSeries={series}
-                  realTerms={realTerms}
-                  inflRate={inflRate}
-                  currentAge={p.currentAge}
-                  retirementAge={p.retirementAge}
-                  statePensionAge={p.statePensionAge}
-                  pensionAccessAge={p.pensionAccessAge}
-                  onHoverRow={(row) => setHoveredRow(row ?? null)}
-                  fourPctTarget={fourPctTarget}
-                  colorMode={colorMode}
-                  logScale={logScale}
-                  eventMarkers={eventMarkers}
-                  annuityAge={annuityChartAge}
-                  fundsView={fundsView}
-                  height={mobile ? 260 : 390}
-                />
-              ) : (
-                <div
-                  style={{
-                    height: mobile ? 260 : 390,
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    color: 'var(--text-muted)',
-                    fontSize: 13,
-                    fontFamily: 'var(--font-body)',
-                  }}
-                >
-                  {error ? 'Fix the error above to see the projection.' : 'Calculating…'}
-                </div>
-              ))}
+            {detChart}
 
-            <YearDetailPanel row={hoveredRow} mobile={mobile} />
+            <YearDetailPanel row={hoveredRow} />
           </div>
 
-          {/* Snapshot table — deterministic tab only */}
-          {chartTab === 'det' && displayData.length > 0 && (
-            <div
-              style={{
-                background: 'var(--bg-panel)',
-                border: '1px solid var(--border)',
-                borderRadius: 12,
-                marginTop: 18,
-                overflow: 'hidden',
-              }}
-            >
-              <div style={{ padding: '13px 20px', borderBottom: '1px solid var(--border)' }}>
-                <span
-                  style={{
-                    fontSize: 11,
-                    letterSpacing: '0.12em',
-                    textTransform: 'uppercase',
-                    color: 'var(--text-secondary)',
-                    fontWeight: 600,
-                    fontFamily: 'var(--font-body)',
-                  }}
-                >
-                  Snapshot — every 5 years{realTerms ? ` · real terms (today's £)` : ''}
-                </span>
-              </div>
-              <div style={{ overflowX: 'auto' }}>
-                <table
-                  style={{
-                    width: '100%',
-                    borderCollapse: 'collapse',
-                    fontFamily: 'var(--font-mono)',
-                    fontSize: 12,
-                  }}
-                >
-                  <thead>
-                    <tr style={{ background: 'var(--bg-card)' }}>
-                      {[
-                        'Age',
-                        'Pension (pre-tax)',
-                        'ISA',
-                        'GIA',
-                        'Mortgage',
-                        'Unsecured',
-                        'Stud. Loan',
-                        'Net Worth',
-                        'Shortfall',
-                      ].map((h) => (
-                        <th
-                          key={h}
-                          style={{
-                            padding: '9px 14px',
-                            textAlign: h === 'Age' ? 'left' : 'right',
-                            color: 'var(--text-muted)',
-                            fontWeight: 500,
-                            fontSize: 10,
-                            letterSpacing: '0.08em',
-                            textTransform: 'uppercase',
-                            whiteSpace: 'nowrap',
-                          }}
-                        >
-                          {h}
-                        </th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {displayData
-                      .filter((d) => (d.age - p.currentAge) % 5 === 0 || d.age === p.retirementAge)
-                      .map((d, i) => {
-                        const isRetirement = d.age === p.retirementAge;
-                        const isRetPhase = d.phase === 'retirement';
-                        const netWorth =
-                          d.pension + d.isa + d.gia + d.mortgage + d.unsecuredDebt + d.studentLoan;
-                        return (
-                          <tr
-                            key={d.age}
-                            style={{
-                              background: isRetirement
-                                ? 'rgba(232,184,75,0.05)'
-                                : isRetPhase
-                                  ? 'rgba(79,142,247,0.03)'
-                                  : i % 2 === 0
-                                    ? 'transparent'
-                                    : 'var(--bg-card)',
-                              borderLeft: isRetirement
-                                ? '2px solid var(--accent-gold)'
-                                : '2px solid transparent',
-                            }}
-                          >
-                            <td
-                              style={{
-                                padding: '8px 14px',
-                                color: isRetirement
-                                  ? 'var(--accent-gold)'
-                                  : 'var(--text-secondary)',
-                              }}
-                            >
-                              {d.age}
-                              {isRetirement ? ' ★' : ''}
-                            </td>
-                            <td
-                              style={{ padding: '8px 14px', textAlign: 'right', color: '#4f8ef7' }}
-                            >
-                              {fmtGBPLarge(d.pension)}
-                            </td>
-                            <td
-                              style={{ padding: '8px 14px', textAlign: 'right', color: '#34d399' }}
-                            >
-                              {fmtGBPLarge(d.isa)}
-                            </td>
-                            <td
-                              style={{ padding: '8px 14px', textAlign: 'right', color: '#e8b84b' }}
-                            >
-                              {fmtGBPLarge(d.gia)}
-                            </td>
-                            <td
-                              style={{
-                                padding: '8px 14px',
-                                textAlign: 'right',
-                                color: d.mortgage < 0 ? '#f43f5e' : 'var(--text-muted)',
-                              }}
-                            >
-                              {d.mortgage < 0 ? fmtGBPLarge(d.mortgage) : '—'}
-                            </td>
-                            <td
-                              style={{
-                                padding: '8px 14px',
-                                textAlign: 'right',
-                                color: d.unsecuredDebt < 0 ? '#fb923c' : 'var(--text-muted)',
-                              }}
-                            >
-                              {d.unsecuredDebt < 0 ? fmtGBPLarge(d.unsecuredDebt) : '—'}
-                            </td>
-                            <td
-                              style={{
-                                padding: '8px 14px',
-                                textAlign: 'right',
-                                color: d.studentLoan < 0 ? '#a78bfa' : 'var(--text-muted)',
-                              }}
-                            >
-                              {d.studentLoan < 0 ? fmtGBPLarge(d.studentLoan) : '—'}
-                            </td>
-                            <td
-                              style={{
-                                padding: '8px 14px',
-                                textAlign: 'right',
-                                color: netWorth >= 0 ? 'var(--text-primary)' : '#f43f5e',
-                                fontWeight: 500,
-                              }}
-                            >
-                              {fmtGBPLarge(netWorth)}
-                            </td>
-                            <td
-                              style={{
-                                padding: '8px 14px',
-                                textAlign: 'right',
-                                color: d.shortfall > 0 ? '#f43f5e' : 'var(--text-muted)',
-                              }}
-                            >
-                              {d.shortfall > 0 ? fmtGBPLarge(d.shortfall) : isRetPhase ? '—' : ''}
-                            </td>
-                          </tr>
-                        );
-                      })}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          )}
+          {snapshotTable}
         </main>
       </div>
       <footer
