@@ -2150,6 +2150,77 @@ describe('state pension deferral and surplus', () => {
     assert.ok(Math.abs(sp80 - expected80) < 0.05, `${sp80} vs ${expected80}`);
   });
 
+  // Working past state pension age (67): the pension is paid from the claim age
+  // even while working, employee NI stops, and qualifying years stop accruing.
+  const worker = {
+    ...baseProfile,
+    currentAge: 64,
+    retirementAge: 70,
+    grossIncome: 40_000,
+    annualLivingExpenses: 20_000,
+    niContributionYears: 30,
+  };
+  const workerRun = (extra = {}) =>
+    projectLifecycle(
+      { ...worker, ...extra },
+      spRates,
+      { pensionBalance: 200_000 },
+      {
+        targetNetAnnualExpenses: 25_000,
+        maxAge: 90,
+      }
+    );
+  const at = (r, age) => r.yearlyBreakdown.find((x) => x.age === age);
+
+  it('pays the state pension from state pension age while still working', () => {
+    const r = workerRun();
+    const full = LIFECYCLE_CONSTANTS.statePension.fullAnnualAmount;
+    assert.equal(at(r, 66).statePensionGross, 0);
+    // 33 qualifying years (30 + three working years before 67), triple-locked.
+    const expected68 = (33 / 35) * full * 1.03 ** (68 - 64);
+    assert.ok(Math.abs(at(r, 68).statePensionGross - expected68) < 0.05);
+    const row = at(r, 68);
+    assertApprox(
+      row.netTakeHome,
+      round2Test(
+        row.grossIncome +
+          row.statePensionGross -
+          row.employeeContribution -
+          row.incomeTax -
+          row.employeeNI -
+          row.studentLoanRepayment
+      ),
+      'take-home includes the state pension'
+    );
+  });
+
+  it('taxes the state pension on top of salary while working', () => {
+    const claim = at(workerRun(), 68);
+    const defer = at(workerRun({ statePensionDeferralYears: 3 }), 68); // same salary, no pension yet
+    assert.equal(defer.statePensionGross, 0);
+    // A basic-rate taxpayer here: the pension adds 20% of itself in tax.
+    const extraTax = claim.incomeTax - defer.incomeTax;
+    assert.ok(Math.abs(extraTax - 0.2 * claim.statePensionGross) < 2, `extra tax ${extraTax}`);
+  });
+
+  it('stops employee NI and qualifying years from state pension age', () => {
+    const r = workerRun();
+    assert.ok(at(r, 66).employeeNI > 0);
+    assert.equal(at(r, 67).employeeNI, 0);
+    assert.equal(at(r, 69).employeeNI, 0);
+    assert.equal(at(r, 66).cumulativeNIYears, 33);
+    assert.equal(at(r, 69).cumulativeNIYears, 33, 'no qualifying years after 67');
+    assert.equal(r.summary.niYearsAccrued, 33);
+  });
+
+  it('deferring while working pays nothing until the claim, then the increased pension', () => {
+    const r = workerRun({ statePensionDeferralYears: 3 });
+    const { fullAnnualAmount: full, deferralUpliftPerYear: up } = LIFECYCLE_CONSTANTS.statePension;
+    assert.equal(at(r, 69).statePensionGross, 0);
+    const expected70 = (33 / 35) * full * 1.03 ** (70 - 64) * (1 + 3 * up);
+    assert.ok(Math.abs(at(r, 70).statePensionGross - expected70) < 0.05);
+  });
+
   // Regression: a state pension above the living-cost target used to be
   // discarded — it could not pay other bills and was not saved.
   const surplusProfile = {

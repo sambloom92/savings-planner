@@ -976,6 +976,27 @@ export function projectLifecycle(
   const spClaimAge = statePensionAge + statePensionDeferralYears;
   let spClaimCumInfl = spClaimAge <= currentAge ? 1 : null;
   let spClaimCumTriplelock = spClaimAge <= currentAge ? 1 : null;
+  const spDeferralExtraShare =
+    LIFECYCLE_CONSTANTS.statePension.deferralUpliftPerYear * statePensionDeferralYears;
+
+  /**
+   * Nominal state pension payable in the year the projection is at `age`, from
+   * the running inflation / triple-lock factors: nothing before the claim age
+   * or below the minimum qualifying years; otherwise the triple-locked base plus
+   * any deferral extra (CPI-uprated since the claim). Used by both the working
+   * and retirement phases — the pension is paid from the claim age whether or
+   * not the person is still working.
+   */
+  function statePensionGrossAt(age, qualifyingYears) {
+    if (age < spClaimAge) return 0;
+    const fullRate = computeStatePension(qualifyingYears); // 0 below the minimum
+    if (fullRate <= 0) return 0;
+    const claimInfl = spClaimCumInfl ?? cumulInflation; // always recorded; defensive
+    const claimTriplelock = spClaimCumTriplelock ?? cumulTriplelock;
+    const deferralExtra =
+      fullRate * claimTriplelock * spDeferralExtraShare * (cumulInflation / claimInfl);
+    return round2(fullRate * cumulTriplelock + deferralExtra);
+  }
 
   // ── Annual loop ──────────────────────────────────────────────────────────
   // Open-ended: work until the target retirement age, then (if flexible) keep
@@ -1057,20 +1078,35 @@ export function projectLifecycle(
     // Adjusted gross income after salary sacrifice
     const adjustedGross = round2(effectiveIncome - employeeContrib);
 
+    // ── Working past state pension age ───────────────────────────────────
+    // The state pension is paid from the claim age (state pension age + any
+    // deferral) even while still working, and is taxed on top of salary. From
+    // state pension age itself, employees stop paying Class 1 NI and further
+    // years no longer add qualifying years (the pension rests on the record up
+    // to state pension age).
+    const pastStatePensionAge = age >= statePensionAge;
+    const workingStatePension = statePensionGrossAt(age, niYears);
+
     // High earners: annual allowance tapers when threshold income > £200k and
     // adjusted income (threshold income + all pension contributions) > £260k.
+    // Threshold income counts all taxable income, including any state pension.
     const annualAllowance = taperedAnnualAllowance(
-      adjustedGross,
-      round2(adjustedGross + totalPensionContrib)
+      round2(adjustedGross + workingStatePension),
+      round2(adjustedGross + workingStatePension + totalPensionContrib)
     );
     const annualAllowanceBreached = totalPensionContrib > annualAllowance;
 
-    // ── Tax and NI (on adjustedGross, with fiscal-drag-adjusted thresholds) ──
+    // ── Tax and NI (with fiscal-drag-adjusted thresholds) ─────────────────
     // thresholdScale > 1 means bands have grown (less drag); < 1 means compressed (more drag).
-    const taxResult = calculateIncomeTax(adjustedGross, thresholdScale);
+    // Income tax covers salary (after sacrifice) plus any state pension; NI is
+    // on earnings only, and the employee pays none from state pension age.
+    const taxResult = calculateIncomeTax(
+      round2(adjustedGross + workingStatePension),
+      thresholdScale
+    );
     const niResult = calculateNationalInsurance(adjustedGross, thresholdScale);
     const incomeTax = taxResult.totalTax;
-    const employeeNI = niResult.employeeNI.total;
+    const employeeNI = pastStatePensionAge ? 0 : niResult.employeeNI.total;
     const employerNI = niResult.employerNI.contribution; // informational
 
     // ── Student loan ────────────────────────────────────────────────────
@@ -1123,7 +1159,7 @@ export function projectLifecycle(
 
     // ── Net take-home ───────────────────────────────────────────────────
     const netTakeHome = round2(
-      effectiveIncome - employeeContrib - incomeTax - employeeNI - slRepayment
+      effectiveIncome + workingStatePension - employeeContrib - incomeTax - employeeNI - slRepayment
     );
 
     // ── Debt payments ───────────────────────────────────────────────────
@@ -1359,7 +1395,8 @@ export function projectLifecycle(
 
     // ── NI qualifying year ──────────────────────────────────────────────
     // Use the scaled LEL from the NI result so fiscal drag affects the qualifying threshold too.
-    const niQualifyingYear = adjustedGross >= niResult.employeeNI.lowerEarningsLimit;
+    const niQualifyingYear =
+      !pastStatePensionAge && adjustedGross >= niResult.employeeNI.lowerEarningsLimit;
     if (niQualifyingYear) niYears++;
 
     // ── Build row ───────────────────────────────────────────────────────
@@ -1379,6 +1416,7 @@ export function projectLifecycle(
       employeeNI,
       employerNI,
       studentLoanRepayment: slRepayment,
+      statePensionGross: workingStatePension,
       netTakeHome,
 
       mortgagePayment: mortgagePaymentThisYear,
@@ -1678,15 +1716,7 @@ export function projectLifecycle(
       // finishes before statePensionAge (≤ spStartAge), so by the time the
       // pension turns on this count is final.
       const effectiveNiYears = niYears + class3YearsBought;
-      let spGross = 0;
-      if (rAge >= spStartAge && effectiveNiYears >= minimumQualifyingYears) {
-        const spFullRate = computeStatePension(effectiveNiYears);
-        const claimInfl = spClaimCumInfl ?? cumulInflation; // always recorded; defensive
-        const claimTriplelock = spClaimCumTriplelock ?? cumulTriplelock;
-        const deferralExtra =
-          spFullRate * claimTriplelock * (spDeferralUplift - 1) * (cumulInflation / claimInfl);
-        spGross = round2(spFullRate * cumulTriplelock + deferralExtra);
-      }
+      const spGross = statePensionGrossAt(rAge, effectiveNiYears);
       const spTax = round2(calculateIncomeTax(spGross, retThresholdScale).totalTax);
       const spNet = round2(spGross - spTax);
 

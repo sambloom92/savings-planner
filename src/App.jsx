@@ -2689,6 +2689,13 @@ function YearDetailPanel({ row, mobile = false }) {
             indent={1}
           />
           <DetailLine label="Adjusted gross" value={fmtGBP(row.adjustedGrossIncome)} dim />
+          {(row.statePensionGross ?? 0) > 0 && (
+            <DetailLine
+              label="+ State pension (while working)"
+              value={fmtGBP(row.statePensionGross)}
+              color="#a78bfa"
+            />
+          )}
           <DetailLine
             label="− Income tax"
             value={fmtGBP(row.incomeTax)}
