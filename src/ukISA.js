@@ -1,5 +1,5 @@
 /**
- * Stocks & Shares ISA projection module — 2025/26
+ * Stocks & Shares ISA projection module — 2026/27 (£20,000 allowance; source: gov.uk/individual-savings-accounts)
  *
  * All growth and withdrawals within a Stocks & Shares ISA are completely
  * free of UK Income Tax and Capital Gains Tax. There is no cost-basis
@@ -20,7 +20,7 @@
  * Source: gov.uk/individual-savings-accounts
  */
 
-const TAX_YEAR = '2025/26';
+const TAX_YEAR = '2026/27';
 
 // ---------------------------------------------------------------------------
 // Published limits

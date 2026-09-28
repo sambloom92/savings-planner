@@ -76,8 +76,8 @@ function run(profile = baseProfile, rates = baseRates, pots = {}) {
 // ---------------------------------------------------------------------------
 
 describe('LIFECYCLE_CONSTANTS', () => {
-  it('state pension full annual amount is £11,973 (2025/26: £230.25/week)', () => {
-    assert.equal(LIFECYCLE_CONSTANTS.statePension.fullAnnualAmount, 11_973);
+  it('state pension full annual amount is £12,547.60 (2026/27: £241.30/week)', () => {
+    assert.equal(LIFECYCLE_CONSTANTS.statePension.fullAnnualAmount, 12_547.6);
   });
 
   it('requires 35 qualifying years for full state pension, minimum 10', () => {
@@ -475,13 +475,13 @@ describe('unsecured debt amortisation', () => {
 
 describe('student loan', () => {
   it('repayment deducted from netTakeHome each year when income above threshold', () => {
-    // Plan 1 threshold £26,065; gross 40,000 → adjustedGross 38,000 → repayment = (38,000−26,065)×0.09
+    // Plan 1 threshold £26,900; gross 40,000 → adjustedGross 38,000 → repayment = (38,000−26,900)×0.09
     const r = run({ ...baseProfile, studentLoanPlan: 'plan1' }, baseRates, {
       studentLoan: { balance: 20_000 },
     });
     const y = r.yearlyBreakdown[0];
-    // repayment = round2((38,000 − 26,065) × 0.09) = round2(11,935 × 0.09) = round2(1,074.15) = 1,074.15
-    assertApprox(y.studentLoanRepayment, 1_074.15, 'SL repayment');
+    // repayment = round2((38,000 − 26,900) × 0.09) = round2(11,100 × 0.09) = 999.00
+    assertApprox(y.studentLoanRepayment, 999, 'SL repayment');
     assert.ok(y.studentLoan.closingBalance < 20_000, 'balance reduces');
   });
 
@@ -523,18 +523,18 @@ describe('NI qualifying years and state pension', () => {
   it('state pension pro-rated: 11 qualifying years, triple-lock grown to statePensionAge', () => {
     // baseProfile: niContributionYears=10, 1 year → 11 NI years
     // triplelock = max(wageGrowth=0.03, inflation=0.03, 0.025) = 0.03
-    // base = (11/35)*11973 = 3762.94; grown by 1.03^(67-30) = 2.9852 → 11233.23
+    // base = (11/35)*12547.6 = 3943.53; grown by 1.03^(67-30) = 2.985227 → 11772.33
     assertApprox(
       run().summary.projectedStatePension,
-      11_233.23,
+      11_772.33,
       'state pension 11 years triple-locked'
     );
   });
 
   it('state pension capped at full amount when ≥35 qualifying years, triple-lock grown', () => {
     const r = run({ ...baseProfile, niContributionYears: 34, retirementAge: 32 });
-    // 34 + 2 years = 36 qualifying, capped at 35; 11973 * 1.03^37 → 35742.12
-    assertApprox(r.summary.projectedStatePension, 35_742.12, 'full state pension triple-locked');
+    // 34 + 2 years = 36 qualifying, capped at 35; 12547.6 * 1.03^37 → 37457.43
+    assertApprox(r.summary.projectedStatePension, 37_457.43, 'full state pension triple-locked');
   });
 
   it('no state pension entitlement when fewer than 10 qualifying years', () => {
@@ -1182,7 +1182,7 @@ describe('return shape', () => {
     for (const key of ['startYear', 'retirementYear', 'yearlyBreakdown', 'summary', 'taxYear']) {
       assert.ok(key in r, `missing: ${key}`);
     }
-    assert.equal(r.taxYear, '2025/26');
+    assert.equal(r.taxYear, '2026/27');
   });
 
   it('each yearlyBreakdown row has all expected fields', () => {
@@ -2156,7 +2156,7 @@ describe('state pension deferral and surplus', () => {
     ...baseProfile,
     currentAge: 64,
     retirementAge: 70,
-    grossIncome: 40_000,
+    grossIncome: 35_000, // salary + state pension stays within the basic-rate band
     annualLivingExpenses: 20_000,
     niContributionYears: 30,
   };

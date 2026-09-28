@@ -1,5 +1,5 @@
 /**
- * UK Defined Contribution Pension projection module — 2025/26
+ * UK Defined Contribution Pension projection module — 2026/27
  *
  * Models three distinct phases of a DC pension:
  *
@@ -43,7 +43,7 @@
 
 import { calculateIncomeTax, INCOME_TAX_BANDS } from './ukIncomeTax.js';
 
-const TAX_YEAR = '2025/26';
+const TAX_YEAR = '2026/27';
 
 // ---------------------------------------------------------------------------
 // Published limits and rates
@@ -53,7 +53,7 @@ export const PENSION_CONSTANTS = {
   annualAllowance: 60_000, // max total (employee + employer) per tax year
   lumpSumAllowance: 268_275, // max tax-free PCLS (pension commencement lump sum)
   maxPCLSPercentage: 0.25, // maximum percentage of pot taken as PCLS
-  // Tapered annual allowance (2025/26): for adjusted income above £260,000
+  // Tapered annual allowance (2026/27): for adjusted income above £260,000
   // (and threshold income above £200,000) the allowance reduces by £1 for
   // every £2 of excess, down to a floor of £10,000 at £360,000+.
   taperAdjustedIncomeLimit: 260_000,
@@ -119,7 +119,7 @@ function assertNonNegativeFinite(value, name) {
  * The goal is to protect the tax-free personal allowance: it tapers away by £1
  * for every £2 of income above £100,000, fully gone by £125,140, which makes
  * that band an effective 60% marginal rate. The solver sacrifices just enough
- * salary to bring taxable pay down to £100,000 (2025/26), reclaiming the whole
+ * salary to bring taxable pay down to £100,000 (2026/27), reclaiming the whole
  * allowance. Income below £100,000 keeps the full allowance already, so no
  * sacrifice is needed for this purpose. The target is the taper threshold, not
  * the higher-rate threshold: the aim is the personal allowance, not stripping

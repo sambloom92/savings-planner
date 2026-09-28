@@ -1,28 +1,33 @@
 /**
- * UK Student Loan calculator and balance projector (2025/26 tax year)
+ * UK Student Loan calculator and balance projector (2026/27 tax year)
  *
- * Repayment thresholds and rates — source: gov.uk
- *   Plan 1 (pre-Sep 2012, England/Wales/NI)  : £26,065 @ 9%  — write-off: 25 years
- *   Plan 2 (Sep 2012–Jul 2023, Eng/Wales)    : £28,470 @ 9%  — write-off: 30 years
- *   Plan 4 (Scotland)                         : £32,745 @ 9%  — write-off: 30 years
+ * Repayment thresholds and rates — source: gov.uk/guidance/rates-and-thresholds-for-employers-2026-to-2027
+ *   Plan 1 (pre-Sep 2012, England/Wales/NI)  : £26,900 @ 9%  — write-off: 25 years
+ *   Plan 2 (Sep 2012–Jul 2023, Eng/Wales)    : £29,385 @ 9%  — write-off: 30 years
+ *   Plan 4 (Scotland)                         : £33,795 @ 9%  — write-off: 30 years
  *   Plan 5 (Aug 2023+, England/Wales)         : £25,000 @ 9%  — write-off: 40 years
  *   Postgraduate Loan                         : £21,000 @ 6%  — write-off: 30 years
  *
- * Interest rates (2025/26):
+ * Interest rates (2026/27) — source: gov.uk/repaying-your-student-loan (interest):
  *   Plan 1    : min(RPI, Bank of England base rate + 1%)
- *   Plan 2    : RPI + sliding 0–3% on income between £28,470 and £49,130
+ *   Plan 2    : RPI + sliding 0–3% on income between £29,385 and £52,885, capped at 6%
  *   Plan 4    : min(RPI, Bank of England base rate + 1%) — same rule as Plan 1
  *   Plan 5    : RPI
- *   Postgrad  : RPI + 3%
+ *   Postgrad  : RPI + 3%, capped at 6%
  */
 
 import { calculateIncomeTax } from './ukIncomeTax.js';
 
-const TAX_YEAR = '2025/26';
+const TAX_YEAR = '2026/27';
 
 // Default Bank of England base rate used for Plan 1 interest cap.
-// Update this each tax year alongside the RPI figure.
-const DEFAULT_BOE_RATE = 0.0475;
+// Update this each tax year alongside the RPI figure. 3.75% as of September
+// 2026 (bankofengland.co.uk, Bank Rate).
+const DEFAULT_BOE_RATE = 0.0375;
+
+// Plan 2 and Postgraduate interest (RPI + up to 3%) is currently capped at 6%
+// (gov.uk/repaying-your-student-loan, 2026/27).
+const INTEREST_CAP = 0.06;
 
 // ---------------------------------------------------------------------------
 // Plan definitions
@@ -32,24 +37,24 @@ export const STUDENT_LOAN_PLANS = {
   plan1: {
     label: 'Plan 1',
     description: 'Pre-September 2012 starters (England, Wales, Northern Ireland)',
-    threshold: 26_065,
+    threshold: 26_900,
     rate: 0.09,
     writeOffYears: 25,
   },
   plan2: {
     label: 'Plan 2',
     description: 'September 2012 – July 2023 starters (England and Wales)',
-    threshold: 28_470,
+    threshold: 29_385,
     rate: 0.09,
     writeOffYears: 30,
     // Income band within which interest scales from RPI to RPI+3%
-    interestLowerThreshold: 28_470,
-    interestUpperThreshold: 49_130,
+    interestLowerThreshold: 29_385,
+    interestUpperThreshold: 52_885,
   },
   plan4: {
     label: 'Plan 4',
     description: 'Scottish student loans (all years)',
-    threshold: 32_745,
+    threshold: 33_795,
     rate: 0.09,
     writeOffYears: 30,
   },
@@ -107,10 +112,10 @@ function round4(n) {
  * gross income, and economic conditions.
  *
  *   Plan 1   : min(RPI, BoE base rate + 1%)
- *   Plan 2   : RPI + 0–3% sliding with income between £28,470 and £49,130
+ *   Plan 2   : RPI + 0–3% sliding with income between £29,385 and £52,885, capped at 6%
  *   Plan 4   : min(RPI, BoE base rate + 1%) — same rule as Plan 1
  *   Plan 5   : RPI
- *   Postgrad : RPI + 3%
+ *   Postgrad : RPI + 3%, capped at 6%
  *
  * @param {string} planKey
  * @param {number} grossIncome - Annual gross income in GBP
@@ -129,18 +134,23 @@ export function calculateAnnualInterestRate(planKey, grossIncome, rpi, boeRate =
 
     case 'plan2': {
       const { interestLowerThreshold, interestUpperThreshold } = STUDENT_LOAN_PLANS.plan2;
-      if (grossIncome <= interestLowerThreshold) return round4(Math.max(0, rpi));
-      if (grossIncome >= interestUpperThreshold) return round4(Math.max(0, rpi + 0.03));
-      const fraction =
-        (grossIncome - interestLowerThreshold) / (interestUpperThreshold - interestLowerThreshold);
-      return round4(Math.max(0, rpi + fraction * 0.03));
+      let rate;
+      if (grossIncome <= interestLowerThreshold) rate = rpi;
+      else if (grossIncome >= interestUpperThreshold) rate = rpi + 0.03;
+      else {
+        const fraction =
+          (grossIncome - interestLowerThreshold) /
+          (interestUpperThreshold - interestLowerThreshold);
+        rate = rpi + fraction * 0.03;
+      }
+      return round4(Math.max(0, Math.min(INTEREST_CAP, rate)));
     }
 
     case 'plan5':
       return round4(Math.max(0, rpi));
 
     case 'postgrad':
-      return round4(Math.max(0, rpi + 0.03));
+      return round4(Math.max(0, Math.min(INTEREST_CAP, rpi + 0.03)));
   }
 }
 

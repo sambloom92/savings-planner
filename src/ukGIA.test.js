@@ -38,7 +38,7 @@ function gia(balance, costBasis, projections, opts) {
 // ---------------------------------------------------------------------------
 
 describe('GIA_CGT_CONSTANTS', () => {
-  it('annual exempt amount is £3,000 for 2025/26', () => {
+  it('annual exempt amount is £3,000 for 2026/27', () => {
     assert.equal(GIA_CGT_CONSTANTS.annualExemptAmount, 3_000);
   });
 
@@ -424,7 +424,7 @@ describe('return shape', () => {
     ]) {
       assert.ok(key in r, `missing field: ${key}`);
     }
-    assert.equal(r.taxYear, '2025/26');
+    assert.equal(r.taxYear, '2026/27');
   });
 
   it('each yearlyBreakdown row contains all expected fields', () => {

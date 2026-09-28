@@ -1,5 +1,5 @@
 /**
- * UK Income Tax calculator (2025/26 tax year)
+ * UK Income Tax calculator (2026/27 tax year — thresholds frozen at their 2025/26 levels)
  *
  * Bands:
  *   Personal Allowance : £0       – £12,570   @ 0%
@@ -13,10 +13,12 @@
  * scaleFactor (optional, default 1): scales all monetary thresholds uniformly.
  * Pass (1 + inflationRate - fiscalDragRate)^i from the lifecycle module to model
  * fiscal drag — the degree to which bands fail to keep pace with inflation.
- * scaleFactor = 1 reproduces exact 2025/26 thresholds.
+ * scaleFactor = 1 reproduces exact 2026/27 thresholds.
+ *
+ * Source: gov.uk/guidance/rates-and-thresholds-for-employers-2026-to-2027, gov.uk/income-tax-rates
  */
 
-const TAX_YEAR = '2025/26';
+const TAX_YEAR = '2026/27';
 
 const PERSONAL_ALLOWANCE = 12_570;
 const BASIC_RATE_LIMIT = 50_270;
@@ -28,10 +30,10 @@ const HIGHER_RATE = 0.4;
 const ADDITIONAL_RATE = 0.45;
 
 /**
- * Published 2025/26 income-tax thresholds and rates, exposed so other modules
+ * Published 2026/27 income-tax thresholds and rates, exposed so other modules
  * (e.g. the tax-optimal pension contribution solver) can reason about the band
  * boundaries without duplicating the numbers. All thresholds are the unscaled
- * 2025/26 figures; multiply by a scaleFactor to model fiscal drag, exactly as
+ * 2026/27 figures; multiply by a scaleFactor to model fiscal drag, exactly as
  * calculateIncomeTax does internally.
  */
 export const INCOME_TAX_BANDS = Object.freeze({

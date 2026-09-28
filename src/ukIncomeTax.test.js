@@ -253,8 +253,8 @@ describe('return shape', () => {
     }
   });
 
-  it('taxYear is set to 2025/26', () => {
-    assert.equal(tax(50_000).taxYear, '2025/26');
+  it('taxYear is set to 2026/27', () => {
+    assert.equal(tax(50_000).taxYear, '2026/27');
   });
 });
 
