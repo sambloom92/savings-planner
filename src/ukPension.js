@@ -498,6 +498,44 @@ export function calculatePCLS(pensionPot, options = {}) {
 }
 
 /**
+ * Rough estimate of the income tax still due on a pension balance when it is
+ * eventually withdrawn, so a pre-tax balance can be shown beside an
+ * approximate after-tax value. The true figure depends on future income and
+ * how fast the pot is drawn, so this applies a stated rule rather than a
+ * forecast: basic-rate tax on the taxable part of the pot. The taxable part
+ * itself is exact — everything except the share that can still come out
+ * tax-free: none once the lump sum has been taken (the pot is crystallised),
+ * otherwise up to 25% of the pot, capped by the Lump Sum Allowance left.
+ *
+ * @param {number} balance - Pension balance in GBP (>= 0)
+ * @param {{
+ *   taxFreeShare?: number,  - Share of the pot still payable tax-free (0–0.25,
+ *                             default 0.25; pass 0 for a crystallised pot)
+ *   remainingLSA?: number   - Lump Sum Allowance left in GBP (default £268,275)
+ * }} [options]
+ * @returns {number} Estimated income tax in GBP
+ */
+export function estimatePensionWithdrawalTax(balance, options = {}) {
+  assertNonNegativeFinite(balance, 'balance');
+
+  const { lumpSumAllowance, maxPCLSPercentage } = PENSION_CONSTANTS;
+  const { taxFreeShare = maxPCLSPercentage, remainingLSA = lumpSumAllowance } = options;
+
+  if (
+    typeof taxFreeShare !== 'number' ||
+    !isFinite(taxFreeShare) ||
+    taxFreeShare < 0 ||
+    taxFreeShare > maxPCLSPercentage
+  ) {
+    throw new RangeError(`taxFreeShare must be a number between 0 and ${maxPCLSPercentage}`);
+  }
+  assertNonNegativeFinite(remainingLSA, 'remainingLSA');
+
+  const taxFree = Math.min(balance * taxFreeShare, remainingLSA);
+  return round2((balance - taxFree) * INCOME_TAX_BANDS.basicRate);
+}
+
+/**
  * Projects a crystallised pension fund in flexible drawdown.
  *
  * Each year's gross drawdown is taxed as income. The pot reduces by the

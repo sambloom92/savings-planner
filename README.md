@@ -32,6 +32,8 @@ A browser-based retirement savings projection dashboard for residents of England
 
 Income tax bands, NI thresholds, student loan thresholds, the state pension and other allowances are based on **2026/27 rates** for **England, Wales & Northern Ireland** (income tax thresholds remain frozen at their 2025/26 levels). Scottish income tax rates are not modelled.
 
+Pension balances (chart, table, result cards) are shown **before** the income tax due when the money is withdrawn — objective, and what a pension statement shows. Next to them, the result cards and year detail panel give a rough **≈ after-tax** figure: basic-rate (20%) tax on the taxable part of the pot. The taxable part itself is exact: all of it once the tax-free lump sum has been taken, otherwise everything except the 25% that can still come out tax-free (within the Lump Sum Allowance left). The 20% is a stated simplification, not a forecast — your real rate depends on your other income and how fast you draw. Spending, shortfalls and success rates don't use this estimate: every modelled withdrawal is taxed exactly.
+
 Note for Plan 4 student loan users: Plan 4 loans are held by Scottish students, who typically pay **Scottish income tax** — which this model does not implement. Plan 4 repayments themselves (9% above the threshold) and interest are modelled correctly since they do not depend on income tax bands, but the income tax figures will follow rUK bands rather than Scottish ones.
 
 ## Why property equity is not modelled
@@ -79,7 +81,7 @@ src/
   ukDebt.js               Mortgage and unsecured debt amortisation
   ukISA.js                ISA contribution limits and constants
   ukGIA.js                GIA CGT model (annual exempt amount, basic/higher rates)
-  ukPension.js            Pension: PCLS, annual-allowance taper, tax-optimal contribution solver
+  ukPension.js            Pension: PCLS, annual-allowance taper, tax-optimal contribution solver, after-tax estimate
   ukLifecycle.js          Full lifecycle projection engine (accumulation + retirement)
   ukMonteCarlo.js         Monte Carlo simulation — two-regime Markov model
   ukMortality.js          UK survival model (Gompertz–Makeham) for lifetime solvency

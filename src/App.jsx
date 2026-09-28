@@ -2,7 +2,11 @@ import { useState, useMemo, useRef, useEffect, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import { projectLifecycle, LIFECYCLE_CONSTANTS } from './ukLifecycle.js';
 import { NI_THRESHOLDS } from './ukNationalInsurance.js';
-import { optimalEmployeePensionContribution, taperedAnnualAllowance } from './ukPension.js';
+import {
+  optimalEmployeePensionContribution,
+  taperedAnnualAllowance,
+  estimatePensionWithdrawalTax,
+} from './ukPension.js';
 import { runMonteCarlo } from './ukMonteCarlo.js';
 import { FanChart } from './FanChart.jsx';
 import { fmtGBPLarge } from './formatters.js';
@@ -50,7 +54,7 @@ const PLAN_OPTIONS = [
 
 // Default palette
 const SERIES_DEFAULT = [
-  { key: 'pension', name: 'Pension', color: '#4f8ef7', stackId: 'pos' },
+  { key: 'pension', name: 'Pension (pre-tax)', color: '#4f8ef7', stackId: 'pos' },
   { key: 'isa', name: 'ISA', color: '#34d399', stackId: 'pos' },
   { key: 'gia', name: 'GIA', color: '#e8b84b', stackId: 'pos' },
   { key: 'mortgage', name: 'Mortgage', color: '#f43f5e', stackId: 'neg' },
@@ -61,7 +65,7 @@ const SERIES_DEFAULT = [
 // Wong (2011) colourblind-safe palette — distinguishable for deuteranopia,
 // protanopia, and tritanopia. Assets above axis; debts below.
 const SERIES_HC = [
-  { key: 'pension', name: 'Pension', color: '#0072B2', stackId: 'pos' }, // blue
+  { key: 'pension', name: 'Pension (pre-tax)', color: '#0072B2', stackId: 'pos' }, // blue
   { key: 'isa', name: 'ISA', color: '#009E73', stackId: 'pos' }, // bluish green
   { key: 'gia', name: 'GIA', color: '#F0E442', stackId: 'pos' }, // yellow
   { key: 'mortgage', name: 'Mortgage', color: '#D55E00', stackId: 'neg' }, // vermillion
@@ -737,7 +741,16 @@ function SpendingFan({ data, target, floor, ceilingPct, mobile }) {
   );
 }
 
-function StatCard({ label, value, color, subtitle, help }) {
+// Shared explanation for the "≈ after tax" pension figures.
+const PENSION_AFTER_TAX_HELP =
+  'Pension balances are shown before the income tax due when you withdraw them. ' +
+  'The ≈ after-tax figure is a rough guide, not a forecast: it assumes basic-rate (20%) tax on the taxable part of the pot. ' +
+  'That is all of it once the tax-free lump sum has been taken; otherwise 75%, because the other 25% can still come out tax-free (up to the £268,275 Lump Sum Allowance). ' +
+  'Your real rate depends on your other income and how fast you draw: 0% on withdrawals covered by an unused personal allowance, 40% or more on large ones. ' +
+  'A full state pension uses almost all of the personal allowance, so once it starts most withdrawals are taxed at 20% or more. ' +
+  "Spending, shortfalls and success rates don't use this estimate: they already include the exact tax on every withdrawal.";
+
+function StatCard({ label, value, color, subtitle, note, help }) {
   return (
     <div
       style={{
@@ -788,6 +801,18 @@ function StatCard({ label, value, color, subtitle, help }) {
           }}
         >
           {subtitle}
+        </div>
+      )}
+      {note && (
+        <div
+          style={{
+            color: 'var(--text-muted)',
+            fontSize: 11,
+            marginTop: 2,
+            fontFamily: 'var(--font-body)',
+          }}
+        >
+          {note}
         </div>
       )}
     </div>
@@ -2548,7 +2573,10 @@ function TabContent({ tab, p, set, derived, topUp, annuity }) {
               'No — the pension stays uncrystallised and is accessed via UFPLS (Uncrystallised Fund Pension Lump Sum Payments). Each individual withdrawal is split 25% tax-free + 75% taxable income, with the cumulative tax-free portion tracked against the same £268,275 lifetime Lump Sum Allowance. Once that allowance is exhausted, 100% of each withdrawal becomes taxable.\n\n'
             }
             {
-              'Drawdown order each year: tax-free pension (within personal allowance) → CGT-exempt GIA harvest → ISA → taxable GIA → taxable pension.'
+              'Drawdown order each year: tax-free pension (within personal allowance) → CGT-exempt GIA harvest → ISA → taxable GIA → taxable pension.\n\n'
+            }
+            {
+              "Comparing the two: pension balances are shown before income tax. Taking the lump sum moves 25% of the pot into your ISA/GIA and leaves the rest fully taxable, while without it 25% of the pot can still come out tax-free. So two pots of the same size aren't worth the same. To compare the choices, use the ≈ after-tax figures on the result cards, or the shortfall and success-rate results (which already include all tax), rather than the pre-tax balances."
             }
           </InfoBox>
           <SecHead>Lifetime Annuity</SecHead>
@@ -2859,6 +2887,17 @@ function YearDetailPanel({ row, mobile = false }) {
             color="#4f8ef7"
             bold
           />
+          {row.pension.closingBalance > 0 && (
+            <DetailLine
+              label="≈ after income tax"
+              value={fmtGBP(
+                row.pension.closingBalance - (row.pension.estimatedTaxOnWithdrawal ?? 0)
+              )}
+              color="#4f8ef7"
+              indent={1}
+              dim
+            />
+          )}
           <DetailLine
             label="ISA — opening"
             value={fmtGBP(row.isa.openingBalance)}
@@ -3166,6 +3205,15 @@ function YearDetailPanel({ row, mobile = false }) {
           color="#4f8ef7"
           bold
         />
+        {row.pension.closingBalance > 0 && (
+          <DetailLine
+            label="≈ after income tax"
+            value={fmtGBP(row.pension.closingBalance - (row.pension.estimatedTaxOnWithdrawal ?? 0))}
+            color="#4f8ef7"
+            indent={1}
+            dim
+          />
+        )}
         <DetailLine label="ISA — opening" value={fmtGBP(row.isa.openingBalance)} color="#34d399" />
         {row.isa.withdrawal > 0 && (
           <DetailLine
@@ -3548,6 +3596,7 @@ export default function App() {
         age: row.age,
         phase: row.phase ?? 'accumulation',
         pension: row.pension?.closingBalance ?? 0,
+        pensionTax: row.pension?.estimatedTaxOnWithdrawal ?? 0,
         isa: row.isa?.closingBalance ?? 0,
         gia: row.gia?.closingBalance ?? 0,
         mortgage: -(row.mortgage?.closingBalance ?? 0),
@@ -3567,6 +3616,8 @@ export default function App() {
           age: p.retirementAge,
           phase: 'accumulation',
           pension: s.pensionPot,
+          // No retirement phase: the pot is still uncrystallised.
+          pensionTax: estimatePensionWithdrawalTax(s.pensionPot),
           isa: s.isaBalance,
           gia: s.giaBalance,
           mortgage: -s.mortgageOutstanding,
@@ -3697,6 +3748,7 @@ export default function App() {
       return {
         ...row,
         pension: row.pension * f,
+        pensionTax: row.pensionTax * f,
         isa: row.isa * f,
         gia: row.gia * f,
         mortgage: row.mortgage * f,
@@ -4345,6 +4397,20 @@ Use Available funds to see whether an early-retirement plan can bridge the gap u
                 (d) => d.phase === 'retirement' && d.shortfall > 0
               );
               const lastRetRow = [...displayData].reverse().find((d) => d.phase === 'retirement');
+              const retNetWorth = retYearEndRow
+                ? retYearEndRow.pension +
+                  retYearEndRow.isa +
+                  retYearEndRow.gia +
+                  retYearEndRow.mortgage +
+                  retYearEndRow.unsecuredDebt +
+                  retYearEndRow.studentLoan
+                : displaySummary.netWorth;
+              // "≈ after tax" line for a figure that includes the row's pension
+              // balance (see PENSION_AFTER_TAX_HELP); hidden when there's no pension.
+              const afterTaxNote = (total, row, suffix) =>
+                row && row.pension > 0
+                  ? `≈ ${fmtGBPLarge(total - row.pensionTax)} ${suffix}`
+                  : null;
               return (
                 <div
                   style={{
@@ -4356,19 +4422,14 @@ Use Available funds to see whether an early-retirement plan can bridge the gap u
                 >
                   <StatCard
                     label="Net Worth at Retirement"
-                    value={fmtGBPLarge(
-                      retYearEndRow
-                        ? retYearEndRow.pension +
-                            retYearEndRow.isa +
-                            retYearEndRow.gia +
-                            retYearEndRow.mortgage +
-                            retYearEndRow.unsecuredDebt +
-                            retYearEndRow.studentLoan
-                        : displaySummary.netWorth
-                    )}
+                    value={fmtGBPLarge(retNetWorth)}
                     color="var(--accent-gold)"
                     subtitle={`Age ${p.retirementAge} · year-end${realTerms ? " · today's £" : ''}`}
-                    help="Pension + ISA + GIA balances at the end of your first retirement year, minus any outstanding debts. Matches the chart value at that age. Property equity is deliberately excluded, even though the mortgage liability is counted: the mortgage is a contractual cash-flow commitment that must be serviced regardless of house prices, whereas home equity is illiquid, costly to access, and shouldn't silently prop up a retirement plan. If a plan only works by selling or borrowing against your home, this tool is designed to show that as a shortfall rather than hide it. Defined benefit pensions and other illiquid assets are also excluded."
+                    note={afterTaxNote(retNetWorth, retYearEndRow, 'with pension after tax')}
+                    help={
+                      "Pension + ISA + GIA balances at the end of your first retirement year, minus any outstanding debts. Matches the chart value at that age. Property equity is deliberately excluded, even though the mortgage liability is counted: the mortgage is a contractual cash-flow commitment that must be serviced regardless of house prices, whereas home equity is illiquid, costly to access, and shouldn't silently prop up a retirement plan. If a plan only works by selling or borrowing against your home, this tool is designed to show that as a shortfall rather than hide it. Defined benefit pensions and other illiquid assets are also excluded.\n\n" +
+                      PENSION_AFTER_TAX_HELP
+                    }
                   />
                   <StatCard
                     label="Pension Pot"
@@ -4377,7 +4438,15 @@ Use Available funds to see whether an early-retirement plan can bridge the gap u
                     )}
                     color="#4f8ef7"
                     subtitle={`ISA: ${fmtGBPLarge(retYearEndRow ? retYearEndRow.isa : displaySummary.isaBalance)} · GIA: ${fmtGBPLarge(retYearEndRow ? retYearEndRow.gia : displaySummary.giaBalance)}`}
-                    help="Your defined contribution pension pot at the end of your first retirement year, after PCLS distribution (if taken), one year of drawdown, and one year of investment growth. Matches the chart value at that age."
+                    note={
+                      retYearEndRow
+                        ? afterTaxNote(retYearEndRow.pension, retYearEndRow, 'after income tax')
+                        : null
+                    }
+                    help={
+                      'Your defined contribution pension pot at the end of your first retirement year, after PCLS distribution (if taken), one year of drawdown, and one year of investment growth. Matches the chart value at that age.\n\n' +
+                      PENSION_AFTER_TAX_HELP
+                    }
                   />
                   <StatCard
                     label={
@@ -4406,11 +4475,20 @@ Use Available funds to see whether an early-retirement plan can bridge the gap u
                             ? 'at retirement'
                             : 'at retirement'
                     }
+                    note={
+                      !firstShortfall && lastRetRow
+                        ? afterTaxNote(
+                            lastRetRow.pension + lastRetRow.isa + lastRetRow.gia,
+                            lastRetRow,
+                            'with pension after tax'
+                          )
+                        : null
+                    }
                     help={
                       firstShortfall
                         ? `Your pots run out at this age — combined pension, ISA, and GIA can no longer cover the inflation-adjusted target spending of ${fmtGBP(p.targetNetExpenses)}/yr. Consider increasing savings, reducing target expenses, or retiring later.`
                         : lastRetRow
-                          ? `Combined pension + ISA + GIA balance at age ${p.maxAge}, after funding all retirement spending. Property equity and other illiquid assets are deliberately not included — the projection never draws on your home, so any shortfall is shown honestly rather than backfilled by assumed downsizing or equity release.`
+                          ? `Combined pension + ISA + GIA balance at age ${p.maxAge}, after funding all retirement spending. Property equity and other illiquid assets are deliberately not included — the projection never draws on your home, so any shortfall is shown honestly rather than backfilled by assumed downsizing or equity release.\n\n${PENSION_AFTER_TAX_HELP} What your heirs would pay on a pension left unspent depends on their own circumstances.`
                           : 'Total outstanding debt (mortgage + unsecured + student loan) at retirement.'
                     }
                   />
@@ -5068,7 +5146,7 @@ Use Available funds to see whether an early-retirement plan can bridge the gap u
                     <tr style={{ background: 'var(--bg-card)' }}>
                       {[
                         'Age',
-                        'Pension',
+                        'Pension (pre-tax)',
                         'ISA',
                         'GIA',
                         'Mortgage',
