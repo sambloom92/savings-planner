@@ -2384,6 +2384,113 @@ describe('estimated tax on pension withdrawal', () => {
   });
 });
 
+describe('state pension uprating: adjusted triple lock from April 2030', () => {
+  // A pensioner already receiving the full state pension, so each April's
+  // uprating shows in that year's row. Projection year i is calendar 2026 + i.
+  const pensioner = {
+    ...baseProfile,
+    currentAge: 67,
+    retirementAge: 68,
+    currentYear: 2026,
+    grossIncome: 0,
+    niContributionYears: 35,
+  };
+  const steady = {
+    savingsRate: 0.04,
+    retirementRate: 0.04,
+    wageGrowthRate: 0.03,
+    inflationRate: 0.025,
+  };
+  const retOpts = { targetNetAnnualExpenses: 10_000, maxAge: 85 };
+  const pots = { isaBalance: 300_000 };
+  // Per-year rate overrides keyed by calendar year (others use `steady`).
+  const byYear = (yearly) => Array.from({ length: 20 }, (_, i) => yearly[2026 + i] ?? {});
+  const spByYear = (rule, yearly = {}, rates = steady) => {
+    const profile = rule ? { ...pensioner, statePensionUprating: rule } : pensioner;
+    const r = projectLifecycle(profile, rates, pots, retOpts, byYear(yearly));
+    return Object.fromEntries(r.yearlyBreakdown.map((x) => [x.year, x.statePensionGross]));
+  };
+  const near = (actual, expected, label) =>
+    assert.ok(Math.abs(actual - expected) < 1e-4, `${label}: expected ${expected}, got ${actual}`);
+
+  it('defaults to the triple lock', () => {
+    assert.deepEqual(spByYear(null), spByYear('triple-lock'));
+  });
+
+  it('with constant rates the adjusted rule gives the same pension as the triple lock', () => {
+    // Earnings ahead of prices: both rise with earnings every year.
+    assert.deepEqual(spByYear('adjusted'), spByYear('triple-lock'));
+    // Prices ahead of earnings: both rise with prices every year.
+    const pricesAhead = { ...steady, wageGrowthRate: 0.02, inflationRate: 0.035 };
+    assert.deepEqual(
+      spByYear('adjusted', {}, pricesAhead),
+      spByYear('triple-lock', {}, pricesAhead)
+    );
+  });
+
+  // April 2030: inflation 6%, earnings 2%. April 2031: inflation 2%, earnings 6%.
+  const spikeThenRebound = {
+    2030: { inflationRate: 0.06, wageGrowthRate: 0.02 },
+    2031: { inflationRate: 0.02, wageGrowthRate: 0.06 },
+  };
+
+  it('keeps the triple lock up to the April 2029 increase', () => {
+    const tl = spByYear('triple-lock', spikeThenRebound);
+    const adj = spByYear('adjusted', spikeThenRebound);
+    for (const y of [2026, 2027, 2028, 2029]) assert.equal(adj[y], tl[y], `year ${y}`);
+  });
+
+  it('from 2030 an inflation-led rise is not topped up again when earnings catch up', () => {
+    const tl = spByYear('triple-lock', spikeThenRebound);
+    const adj = spByYear('adjusted', spikeThenRebound);
+    // Triple lock: +6% (prices) then +6% (earnings) = ×1.1236.
+    near(tl[2031] / tl[2029], 1.06 * 1.06, 'triple lock');
+    // Adjusted: +6% (prices), then earnings are still below the pension's 2029/30
+    // level relative to earnings (×1.0812 vs ×1.06 → ratio held above), so only
+    // the 2.5% floor applies: ×1.06 × 1.025 = ×1.0865.
+    near(adj[2030] / adj[2029], 1.06, 'adjusted, 2030');
+    near(adj[2031] / adj[2029], 1.06 * 1.025, 'adjusted, 2031');
+  });
+
+  it('rises with earnings when needed to restore its 2029/30 value relative to earnings', () => {
+    // 2030: prices and earnings both +1% → the 2.5% floor lifts the pension above
+    // earnings. 2031: earnings +6%, prices +2% → the floor path (×1.025²) falls
+    // short of earnings since 2029 (×1.01 × 1.06), so it catches up to earnings.
+    const lowThenWages = {
+      2030: { inflationRate: 0.01, wageGrowthRate: 0.01 },
+      2031: { inflationRate: 0.02, wageGrowthRate: 0.06 },
+    };
+    const tl = spByYear('triple-lock', lowThenWages);
+    const adj = spByYear('adjusted', lowThenWages);
+    near(adj[2031] / adj[2029], 1.01 * 1.06, 'adjusted tracks earnings since 2029/30');
+    near(tl[2031] / tl[2029], 1.025 * 1.06, 'triple lock');
+  });
+
+  it('never exceeds the triple lock and always rises by at least prices or 2.5%', () => {
+    // Pseudo-random but reproducible year-to-year rates.
+    let seed = 7;
+    const rnd = () => (seed = (seed * 1103515245 + 12345) % 2 ** 31) / 2 ** 31;
+    for (let run = 0; run < 25; run++) {
+      const yearly = {};
+      for (let y = 2027; y <= 2045; y++)
+        yearly[y] = { inflationRate: -0.01 + rnd() * 0.08, wageGrowthRate: -0.02 + rnd() * 0.09 };
+      const tl = spByYear('triple-lock', yearly);
+      const adj = spByYear('adjusted', yearly);
+      // Rows run to age 85, i.e. calendar 2044. Each row is rounded to the penny,
+      // so comparing with the previous (rounded) row allows a couple of pence.
+      for (let y = 2027; y <= 2044; y++) {
+        assert.ok(adj[y] <= tl[y] + 0.02, `run ${run}, ${y}: adjusted above triple lock`);
+        const floor = adj[y - 1] * (1 + Math.max(yearly[y].inflationRate, 0.025));
+        assert.ok(adj[y] >= floor - 0.02, `run ${run}, ${y}: rose less than prices / 2.5%`);
+      }
+    }
+  });
+
+  it('rejects an unknown rule', () => {
+    assert.throws(() => spByYear('double-lock'), RangeError);
+  });
+});
+
 // Small local rounding helper mirroring the module's round2, for test sums.
 function round2Test(n) {
   return Math.round(n * 100) / 100;

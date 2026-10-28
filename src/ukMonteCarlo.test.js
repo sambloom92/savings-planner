@@ -510,6 +510,34 @@ describe('annuity and essential-floor security', () => {
 // Summary
 // ---------------------------------------------------------------------------
 
+describe('state pension uprating rule', () => {
+  // Same seed → identical market and macro paths, so only the uprating differs.
+  const run = (statePensionUprating) =>
+    runMonteCarlo({ ...profile, statePensionUprating }, rates, pots, retirementOpts, {
+      trials: 60,
+      seed: 11,
+    });
+  const tl = run('triple-lock');
+  const adj = run('adjusted');
+
+  it('the adjusted rule never leaves a trial better off than the triple lock', () => {
+    // Each trial's state pension is no higher, so its pots are no larger, and
+    // order statistics (the percentile lines) can only move down or stay put.
+    tl.percentileData.forEach((row, i) => {
+      for (const k of ['p10', 'p25', 'p50', 'p75', 'p90'])
+        assert.ok(adj.percentileData[i][k] <= row[k] + 0.01, `age ${row.age} ${k}`);
+    });
+  });
+
+  it('removing the ratchet lowers some outcomes when earnings and inflation vary', () => {
+    const last = tl.percentileData.length - 1;
+    assert.ok(
+      adj.percentileData[last].p50 < tl.percentileData[last].p50,
+      'median end wealth unchanged'
+    );
+  });
+});
+
 console.log(`\n${'─'.repeat(50)}`);
 if (failed === 0) {
   console.log(`All ${passed} tests passed.`);

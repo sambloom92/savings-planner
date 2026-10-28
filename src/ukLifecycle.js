@@ -69,6 +69,17 @@ export const LIFECYCLE_CONSTANTS = {
     // £18.40/week × 52). Today's money — inflated when paid. Each year bought
     // adds 1/35 of the full state pension. Source: gov.uk/voluntary-national-insurance-contributions
     class3AnnualCost: 956.8,
+    // Adjusted triple lock (announced 29 September 2026; not yet legislated).
+    // The triple lock applies up to the April 2029 increase. From April 2030
+    // the full state pension rises each year by the highest of CPI, 2.5%, or
+    // the amount needed to keep (or restore) its value relative to earnings at
+    // the 2029/30 level — so earnings growth no longer ratchets it up on top of
+    // earlier inflation-led rises. Sources: gov.uk/government/publications/
+    // state-pension-uprating-analysis-2026/triple-lock-reform-factsheet;
+    // gov.uk/government/news/prime-minister-andy-burnham-sets-out-plans-for-a-
+    // new-national-care-service
+    adjustedTripleLockFromYear: 2030,
+    upratingFloor: 0.025, // the 2.5% minimum, under both rules
   },
   pension: {
     // Normal Minimum Pension Age (NMPA): earliest age a DC pension is accessible.
@@ -318,6 +329,16 @@ function applyGIAWithdrawal(bal, costBasis, gross) {
  *                                             statePensionAge (default 0). Each deferred
  *                                             year raises the weekly amount by 1% per
  *                                             9 weeks ≈ 5.8% (new state pension rules).
+ *   statePensionUprating?:  string,         - 'triple-lock' (default): each April the
+ *                                             state pension rises by the highest of
+ *                                             earnings growth, CPI and 2.5%. 'adjusted':
+ *                                             the announced reform — triple lock up to
+ *                                             April 2029, then from April 2030 the
+ *                                             highest of CPI, 2.5%, or the rise needed to
+ *                                             hold its 2029/30 value relative to earnings.
+ *                                             With constant rates the two coincide; they
+ *                                             differ when earnings and inflation vary
+ *                                             year to year (Monte Carlo).
  *   topUpStatePension?:     boolean,        - Buy voluntary Class 3 NI years during the
  *                                             retirement→state-pension-age bridge to reach the
  *                                             35 qualifying years for the full state pension.
@@ -462,6 +483,7 @@ export function projectLifecycle(
     niContributionYears,
     statePensionAge = LIFECYCLE_CONSTANTS.statePension.defaultStatePensionAge,
     statePensionDeferralYears = 0,
+    statePensionUprating = 'triple-lock',
     // When true, buy voluntary Class 3 NI years during the bridge between
     // retirement and state pension age to top the state pension up toward the
     // full 35 qualifying years. Cost is funded from the pots; see the retirement
@@ -505,6 +527,8 @@ export function projectLifecycle(
   assertNonNegativeInteger(niContributionYears, 'niContributionYears');
   assertPositiveInteger(statePensionAge, 'statePensionAge');
   assertNonNegativeInteger(statePensionDeferralYears, 'statePensionDeferralYears');
+  if (statePensionUprating !== 'triple-lock' && statePensionUprating !== 'adjusted')
+    throw new RangeError("statePensionUprating must be 'triple-lock' or 'adjusted'");
   assertPositiveInteger(pensionAccessAge, 'pensionAccessAge');
 
   if (studentLoanPlan !== null && !STUDENT_LOAN_PLANS[studentLoanPlan])
@@ -983,7 +1007,33 @@ export function projectLifecycle(
   // When yearlyRatesOverride is null these reproduce the same values as Math.pow().
   let cumulInflation = 1; // product of (1 + inflRate) from year 1..i
   let thresholdScale = 1; // product of (1 + inflRate - fiscalDragRate) from year 1..i
-  let cumulTriplelock = 1; // product of (1 + max(wages,CPI,2.5%)) from year 1..i
+  let spIndex = 1; // state pension uprating since today (see uprateStatePension)
+  let earningsIndex = 1; // average earnings since today, product of (1 + wage growth)
+  // Adjusted triple lock: the state pension's value relative to earnings
+  // (spIndex / earningsIndex) after the last triple-lock year, which it must
+  // hold. Fixed at the first adjusted uprating.
+  let spEarningsRef = null;
+
+  /**
+   * Apply one April uprating to the state pension index, for the given year's
+   * rates and calendar year. Triple lock: the highest of earnings growth, CPI
+   * and 2.5%. Adjusted rule (from April 2030 when selected): the highest of CPI
+   * and 2.5%, or more if needed to keep the pension's value relative to
+   * earnings at its pre-reform level — that level, not each year's earnings
+   * growth, is the floor, so an inflation-led rise isn't topped up again when
+   * earnings later catch up.
+   */
+  function uprateStatePension(yr, calendarYear) {
+    const priceRise = Math.max(yr.inflationRate, LIFECYCLE_CONSTANTS.statePension.upratingFloor);
+    const adjusted =
+      statePensionUprating === 'adjusted' &&
+      calendarYear >= LIFECYCLE_CONSTANTS.statePension.adjustedTripleLockFromYear;
+    if (adjusted) spEarningsRef ??= spIndex / earningsIndex;
+    earningsIndex *= 1 + yr.wageGrowthRate;
+    spIndex = adjusted
+      ? Math.max(spIndex * (1 + priceRise), spEarningsRef * earningsIndex)
+      : spIndex * (1 + Math.max(yr.wageGrowthRate, priceRise));
+  }
 
   // State pension claim point (state pension age + any deferral). The extra
   // from deferring is fixed at claim as a share of the pension then payable and
@@ -993,14 +1043,14 @@ export function projectLifecycle(
   // projection starts is treated as claimed at the start.
   const spClaimAge = statePensionAge + statePensionDeferralYears;
   let spClaimCumInfl = spClaimAge <= currentAge ? 1 : null;
-  let spClaimCumTriplelock = spClaimAge <= currentAge ? 1 : null;
+  let spClaimSpIndex = spClaimAge <= currentAge ? 1 : null;
   const spDeferralExtraShare =
     LIFECYCLE_CONSTANTS.statePension.deferralUpliftPerYear * statePensionDeferralYears;
 
   /**
    * Nominal state pension payable in the year the projection is at `age`, from
-   * the running inflation / triple-lock factors: nothing before the claim age
-   * or below the minimum qualifying years; otherwise the triple-locked base plus
+   * the running inflation / uprating factors: nothing before the claim age
+   * or below the minimum qualifying years; otherwise the uprated base plus
    * any deferral extra (CPI-uprated since the claim). Used by both the working
    * and retirement phases — the pension is paid from the claim age whether or
    * not the person is still working.
@@ -1010,10 +1060,10 @@ export function projectLifecycle(
     const fullRate = computeStatePension(qualifyingYears); // 0 below the minimum
     if (fullRate <= 0) return 0;
     const claimInfl = spClaimCumInfl ?? cumulInflation; // always recorded; defensive
-    const claimTriplelock = spClaimCumTriplelock ?? cumulTriplelock;
+    const claimSpIndex = spClaimSpIndex ?? spIndex;
     const deferralExtra =
-      fullRate * claimTriplelock * spDeferralExtraShare * (cumulInflation / claimInfl);
-    return round2(fullRate * cumulTriplelock + deferralExtra);
+      fullRate * claimSpIndex * spDeferralExtraShare * (cumulInflation / claimInfl);
+    return round2(fullRate * spIndex + deferralExtra);
   }
 
   // ── Annual loop ──────────────────────────────────────────────────────────
@@ -1063,17 +1113,15 @@ export function projectLifecycle(
             ...yearlyRatesOverride[i],
           }
         : { savingsRate, retirementRate, wageGrowthRate, inflationRate, boeRate };
-    const yrTriplelock = Math.max(yr.wageGrowthRate, yr.inflationRate, 0.025);
-
     // Update running products (i=0 leaves them at 1, matching Math.pow(..., 0)=1)
     if (i > 0) {
       cumulInflation *= 1 + yr.inflationRate;
       thresholdScale *= 1 + yr.inflationRate - fiscalDragRate;
-      cumulTriplelock *= 1 + yrTriplelock;
+      uprateStatePension(yr, currentYear + i);
     }
     if (age === spClaimAge) {
       spClaimCumInfl = cumulInflation;
-      spClaimCumTriplelock = cumulTriplelock;
+      spClaimSpIndex = spIndex;
     }
 
     // Wage growth applies from year 1 onwards; floor at 0 (salary cannot go negative)
@@ -1666,15 +1714,13 @@ export function projectLifecycle(
               ...yearlyRatesOverride[retYearIdx],
             }
           : { savingsRate, retirementRate, wageGrowthRate, inflationRate, boeRate };
-      const yrRetTriplelock = Math.max(yrRet.wageGrowthRate, yrRet.inflationRate, 0.025);
-
       // Update running products for this retirement year
       cumulInflation *= 1 + yrRet.inflationRate;
       thresholdScale *= 1 + yrRet.inflationRate - fiscalDragRate;
-      cumulTriplelock *= 1 + yrRetTriplelock;
+      uprateStatePension(yrRet, rYear);
       if (rAge === spClaimAge) {
         spClaimCumInfl = cumulInflation;
-        spClaimCumTriplelock = cumulTriplelock;
+        spClaimSpIndex = spIndex;
       }
 
       // Annuity income already in payment this year (set at purchase below for
@@ -1855,7 +1901,7 @@ export function projectLifecycle(
             rAge >= spStartAge
               ? spGross
               : finalNiYears >= minimumQualifyingYears
-                ? round2(computeStatePension(finalNiYears) * cumulTriplelock * spDeferralUplift)
+                ? round2(computeStatePension(finalNiYears) * spIndex * spDeferralUplift)
                 : 0;
           const spPlannedNet = round2(
             spPlanned - calculateIncomeTax(spPlanned, retThresholdScale).totalTax
@@ -2271,6 +2317,7 @@ export function projectLifecycle(
       : round2(debts.reduce((s, d) => s + d.balance, 0));
   // Nominal state pension at the age it first becomes payable, triple-lock grown from today.
   // Uses the base-rate triplelock for the summary figure (independent of yearlyRatesOverride).
+  // With constant rates the adjusted rule gives the same path, so this holds for both.
   const baseTriplelockForSummary = Math.max(wageGrowthRate, inflationRate, 0.025);
   const summaryStartAge = statePensionAge + statePensionDeferralYears;
   const summaryDeferralUplift =
