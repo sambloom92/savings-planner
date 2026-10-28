@@ -95,6 +95,10 @@ const DEFAULTS = {
   niContributionYears: 3,
   statePensionAge: 67,
   statePensionDeferralYears: 0,
+  // How the state pension rises each April: 'adjusted' = the government's
+  // announced reform from April 2030 (triple lock until then); 'triple-lock' =
+  // the current rule. They differ only when earnings and inflation vary.
+  statePensionUprating: 'adjusted',
   topUpStatePension: false, // auto-buy voluntary Class 3 NI years to reach the full 35
   pensionAccessAge: 57, // NMPA — earliest age the DC pension can be accessed
   sex: 'neutral', // mortality basis for the lifetime-solvency metric
@@ -2051,7 +2055,20 @@ function TabContent({ tab, p, set, derived, topUp, annuity }) {
             step={1}
             format={fmtYrs}
             onChange={(v) => set('statePensionDeferralYears')(Math.max(0, Math.round(v)))}
-            help="Years to defer claiming your state pension past state pension age. Each deferred year adds about 5.8% of the pension at the time you claim (1% per 9 weeks, new state pension rules). That extra then rises with CPI each year, while the base pension keeps the triple lock. It takes roughly 17 years to earn back each year deferred, and under the new rules a partner can't inherit it — so it mainly suits people still working (especially higher-rate taxpayers) or expecting a long life. Deferring means drawing more from your pots in the gap years."
+            help="Years to defer claiming your state pension past state pension age. Each deferred year adds about 5.8% of the pension at the time you claim (1% per 9 weeks, new state pension rules). That extra then rises with CPI each year, while the base pension keeps its normal annual increases. It takes roughly 17 years to earn back each year deferred, and under the new rules a partner can't inherit it — so it mainly suits people still working (especially higher-rate taxpayers) or expecting a long life. Deferring means drawing more from your pots in the gap years."
+          />
+          <Toggle
+            label="State Pension Increases"
+            value={p.statePensionUprating}
+            optA={{ value: 'adjusted', label: 'Adjusted lock' }}
+            optB={{ value: 'triple-lock', label: 'Triple lock' }}
+            onChange={set('statePensionUprating')}
+            help={
+              'How the state pension rises each April.\n\n' +
+              'Adjusted lock: the government announced on 29 September 2026 that the triple lock continues up to the April 2029 increase. From April 2030 the pension rises by the higher of CPI inflation and 2.5%, or by more if needed to keep its value relative to average earnings at the 2029/30 level. It still keeps pace with earnings over time, but a year when inflation beats wages is no longer topped up again when wages catch up. Not yet law: the government says it will legislate this Parliament.\n\n' +
+              'Triple lock: the current rule. The pension rises by the highest of earnings growth, CPI inflation and 2.5% every year.\n\n' +
+              'With steady assumptions, as in the main chart, both give the same pension. The difference shows in Monte Carlo, where earnings and inflation vary from year to year.'
+            }
           />
           <Toggle
             label="State Pension Top-up (Class 3)"
@@ -4043,6 +4060,7 @@ export default function App() {
         niContributionYears: p.niContributionYears,
         statePensionAge: p.statePensionAge,
         statePensionDeferralYears: p.statePensionDeferralYears,
+        statePensionUprating: p.statePensionUprating,
         topUpStatePension: p.topUpStatePension,
         pensionAccessAge: p.pensionAccessAge,
         studentLoanPlan: p.studentLoanPlan || null,
@@ -4154,6 +4172,7 @@ export default function App() {
           niContributionYears: p.niContributionYears,
           statePensionAge: p.statePensionAge,
           statePensionDeferralYears: p.statePensionDeferralYears,
+          statePensionUprating: p.statePensionUprating,
           topUpStatePension: p.topUpStatePension,
           pensionAccessAge: p.pensionAccessAge,
           studentLoanPlan: p.studentLoanPlan || null,
@@ -4876,7 +4895,7 @@ Use Available funds to see whether an early-retirement plan can bridge the gap u
                   }
                   return `Only ${niShown} qualifying NI yrs — need 10`;
                 })()}
-                help="Your projected state pension, based on total NI qualifying years accrued by retirement (plus any voluntary Class 3 years bought via the top-up toggle). This is a real government entitlement (inflation-linked via triple lock), not an investment return. It offsets retirement expenses before drawing from personal pots."
+                help="Your projected state pension, based on total NI qualifying years accrued by retirement (plus any voluntary Class 3 years bought via the top-up toggle). This is a real government entitlement that rises each year at least in line with inflation (see State Pension Increases in the Personal tab), not an investment return. It offsets retirement expenses before drawing from personal pots."
               />
             </div>
           );
