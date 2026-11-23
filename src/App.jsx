@@ -401,6 +401,9 @@ const DB_NEW_SCHEME = {
   lumpSum: 'none',
   commutationFactor: 12,
   automaticLumpSum: 0,
+  // Couple mode: survivor's pension on the member's death.
+  survivorPensionPct: 50,
+  survivorUnmarried: 'yes',
 };
 
 const DB_STATUS_OPTIONS = [
@@ -454,6 +457,8 @@ function buildDbPensions(p) {
       lumpSum: s.lumpSum === 'max' ? 'max' : 'none',
       commutationFactor: Math.min(40, Math.max(1, s.commutationFactor)),
       automaticLumpSum: Math.max(0, s.automaticLumpSum ?? 0),
+      survivorPensionShare: Math.min(1, Math.max(0, s.survivorPensionPct ?? 50) / 100),
+      survivorPensionForUnmarriedPartner: (s.survivorUnmarried ?? 'yes') === 'yes',
     }));
 }
 
@@ -2113,6 +2118,30 @@ function DbSchemeCard({ p, scheme: s, result, onChange, onRemove }) {
             onChange={(v) => onChange({ paymentIncreases: v })}
             help="How the pension rises each year once it's being paid. Public-sector pensions rise with CPI; private schemes often cap increases at 5% or 2.5%, and some pay none."
           />
+          {p.householdMode === 'couple' && (
+            <>
+              <Slider
+                label="Survivor's pension"
+                value={s.survivorPensionPct ?? 50}
+                min={0}
+                max={100}
+                step={1}
+                format={(v) => `${v}%`}
+                onChange={(v) => onChange({ survivorPensionPct: Math.min(100, Math.max(0, v)) })}
+                color="#2dd4bf"
+                allowInput
+                help="If this member dies, the share of their pension paid for life to their surviving partner — commonly 50% (e.g. 37.5% in the NHS 2015 scheme, 50% in many private schemes). Based on the pension built up, or being paid, at the death."
+              />
+              <Toggle
+                label="Paid to an unmarried partner"
+                value={s.survivorUnmarried ?? 'yes'}
+                optA={{ value: 'yes', label: 'Yes' }}
+                optB={{ value: 'no', label: 'No' }}
+                onChange={(v) => onChange({ survivorUnmarried: v })}
+                help="Most public-sector schemes pay a survivor's pension to a partner you weren't married to if you've nominated them; many private schemes pay only spouses and civil partners. Check your scheme rules."
+              />
+            </>
+          )}
         </>
       )}
       {enabled && result && (
