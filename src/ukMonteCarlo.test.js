@@ -506,6 +506,64 @@ describe('annuity and essential-floor security', () => {
   });
 });
 
+describe('couple mode: random death ages', () => {
+  const coupleProfile = {
+    ...profile,
+    partner: {
+      currentAge: profile.currentAge - 3,
+      retirementAge: profile.retirementAge,
+      grossIncome: 25_000,
+      employeePensionRate: 0.05,
+      employerPensionRate: 0.03,
+      niContributionYears: 15,
+      pots: { pensionBalance: 40_000, isaBalance: 10_000 },
+    },
+  };
+  const run = (opts = {}) =>
+    runMonteCarlo(coupleProfile, rates, pots, retirementOpts, {
+      trials: 60,
+      seed: 7,
+      sex: 'male',
+      partnerSex: 'female',
+      ...opts,
+    });
+  const r = run();
+
+  it('runs until the younger partner reaches the horizon', () => {
+    assert.equal(r.percentileData.at(-1).age, retirementOpts.maxAge + 3);
+  });
+
+  it('reports how often a death falls in the plan and the survivor runs short', () => {
+    const c = r.solvency.couple;
+    assert.equal(c.partnerSex, 'female');
+    assert.ok(c.deathInPlanProb > 0.5 && c.deathInPlanProb <= 1, `deaths ${c.deathInPlanProb}`);
+    assert.ok(c.survivorShortfallProb >= 0 && c.survivorShortfallProb <= 1);
+    assert.ok(c.survivorShortfallProb <= 1 - r.solvency.solventForLife + 1e-12);
+  });
+
+  it('lifetime solvency is at least solvency to the horizon (deaths only remove risk)', () => {
+    assert.ok(r.solvency.solventForLife >= r.solvency.solventToHorizon - 1e-12);
+  });
+
+  it('the survival curve is the chance at least one of you is alive', () => {
+    const s = r.solvency.survival;
+    assert.equal(s[0].survival, 1);
+    for (let k = 1; k < s.length; k++) assert.ok(s[k].survival <= s[k - 1].survival + 1e-9);
+    assert.ok(s.at(-1).survival > 0);
+  });
+
+  it('is deterministic for a seed', () => {
+    const again = run();
+    assert.equal(again.solvency.solventForLife, r.solvency.solventForLife);
+    assert.deepEqual(again.solvency.couple, r.solvency.couple);
+  });
+
+  it('single mode reports no couple figures', () => {
+    const single = runMonteCarlo(profile, rates, pots, retirementOpts, { trials: 10, seed: 7 });
+    assert.equal(single.solvency.couple, undefined);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Summary
 // ---------------------------------------------------------------------------
