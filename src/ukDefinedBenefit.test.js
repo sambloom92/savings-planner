@@ -56,6 +56,8 @@ describe('normaliseDbScheme', () => {
     assert.equal(s.commutationFactor, 12);
     assert.equal(s.lumpSum, 'none');
     assert.equal(s.label, '');
+    assert.equal(s.survivorPensionShare, 0.5);
+    assert.equal(s.survivorPensionForUnmarriedPartner, true);
   });
 
   it('rejects bad inputs', () => {
@@ -68,6 +70,14 @@ describe('normaliseDbScheme', () => {
     assert.throws(
       () => normaliseDbScheme({ ...deferred, inServiceRevaluation: { basis: 'rpi' } }, 40),
       RangeError
+    );
+    assert.throws(
+      () => normaliseDbScheme({ ...deferred, survivorPensionShare: 1.5 }, 40),
+      RangeError
+    );
+    assert.throws(
+      () => normaliseDbScheme({ ...deferred, survivorPensionForUnmarriedPartner: 'yes' }, 40),
+      TypeError
     );
   });
 
