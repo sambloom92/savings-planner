@@ -356,6 +356,11 @@ export function runMonteCarlo(profile, baseRates, pots, retirementOpts, opts = {
       ? shortfallAges.filter((a) => a !== Infinity && a < accessAge).length / ranTrials
       : 0;
 
+  // Death rates follow the person's own generation (ONS cohort tables), so they
+  // depend on year of birth as well as sex. The projection reports its start
+  // year (the profile's currentYear, or the engine's default).
+  const birthYear = (successful[0]?.startYear ?? profile.currentYear) - currentAge;
+
   // Lifetime (mortality-weighted) view — the actuarially correct metric.
   // For a trial that runs dry at age A, the probability you actually experience
   // that ruin is P(alive at A) = survivalToAge(currentAge, A). Averaging that
@@ -367,7 +372,7 @@ export function runMonteCarlo(profile, baseRates, pots, retirementOpts, opts = {
   const lifetimeRuinProb =
     ranTrials > 0
       ? shortfallAges.reduce(
-          (sum, a) => sum + (a === Infinity ? 0 : survivalToAge(currentAge, a, sex)),
+          (sum, a) => sum + (a === Infinity ? 0 : survivalToAge(currentAge, a, sex, birthYear)),
           0
         ) / ranTrials
       : 0;
@@ -395,7 +400,7 @@ export function runMonteCarlo(profile, baseRates, pots, retirementOpts, opts = {
       n > 0
         ? 1 -
           belowFloorAges.reduce(
-            (sum, a) => sum + (a === Infinity ? 0 : survivalToAge(currentAge, a, sex)),
+            (sum, a) => sum + (a === Infinity ? 0 : survivalToAge(currentAge, a, sex, birthYear)),
             0
           ) /
             n
@@ -404,7 +409,7 @@ export function runMonteCarlo(profile, baseRates, pots, retirementOpts, opts = {
 
   // Survival curve over the projection ages — for the optional chart overlay
   // and to show how much of the horizon is discounted by mortality.
-  const survival = survivalCurve(currentAge, ages[maxAgeIdx], sex);
+  const survival = survivalCurve(currentAge, ages[maxAgeIdx], sex, birthYear);
 
   // Per-percentile insolvency markers for the fan chart: the age by which each
   // percentile of trials has become insolvent (first failed to meet spending).
