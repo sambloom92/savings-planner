@@ -20,6 +20,7 @@ import { runMonteCarlo } from './ukMonteCarlo.js';
 import { FanChart } from './FanChart.jsx';
 import { fmtGBPLarge } from './formatters.js';
 import { illustrativeAnnuityRate } from './ukAnnuity.js';
+import { DB_CONSTANTS, dbPaymentFactor } from './ukDefinedBenefit.js';
 
 // ── Formatters ────────────────────────────────────────────────────────────────
 const fmtGBP = (n) => `£${Math.round(Math.abs(n)).toLocaleString('en-GB')}`;
@@ -107,6 +108,8 @@ const DEFAULTS = {
   employerMatch: false, // when true, employer pays its rate only if employee ≥ threshold
   employerMatchThreshold: 5, // employee % required to earn the full employer contribution
   pensionBalance: 10_000,
+  // Defined benefit schemes (see DB_NEW_SCHEME for the fields of each).
+  dbPensions: [],
   equityReturnPct: 7,
   bondReturnPct: 3,
   preRetirementEquityPct: 80,
@@ -221,12 +224,107 @@ function manualEmployeePensionPct(p) {
 // from the current salary and employer contribution.
 function effectiveEmployeePensionRate(p) {
   if (p.employeePensionAuto) {
+    const db = dbFirstYear(p);
     return optimalEmployeePensionContribution(p.grossIncome, p.employerPensionPct / 100, {
       employerMatch: p.employerMatch,
       employerMatchThreshold: p.employerMatchThreshold / 100,
+      netPayContributions: db.memberContribution,
+      otherPensionInput: db.pensionInput,
     }).employeeRate;
   }
   return manualEmployeePensionPct(p) / 100;
+}
+
+// ── Defined benefit schemes ──────────────────────────────────────────────────
+// A new scheme card's starting values (UI form; buildDbPensions converts).
+const DB_NEW_SCHEME = {
+  label: '',
+  enabled: true,
+  status: 'active',
+  pension: 5_000,
+  accrualDenominator: 54,
+  memberContributionPct: 8,
+  inServiceRevaluation: 'cpi+1.5',
+  normalPensionAge: 67,
+  paymentAge: 67,
+  earlyReductionPct: 5,
+  lateIncreasePct: 5,
+  deferredIncreases: 'cpi',
+  paymentIncreases: 'cpi',
+  lumpSum: 'none',
+  commutationFactor: 12,
+  automaticLumpSum: 0,
+};
+
+const DB_STATUS_OPTIONS = [
+  { value: 'active', label: 'Still building it up' },
+  { value: 'deferred', label: 'Left the scheme' },
+  { value: 'inPayment', label: 'Already being paid' },
+];
+
+const DB_REVALUATION_OPTIONS = [
+  { value: 'cpi+1.5', label: 'CPI + 1.5% (e.g. NHS 2015)' },
+  { value: 'cpi+1.6', label: 'CPI + 1.6% (e.g. Teachers 2015)' },
+  { value: 'cpi', label: 'CPI (e.g. LGPS)' },
+  { value: 'earnings', label: 'With your pay (final salary)' },
+];
+const DB_REVALUATION = {
+  'cpi+1.5': { basis: 'cpi', margin: 0.015 },
+  'cpi+1.6': { basis: 'cpi', margin: 0.016 },
+  cpi: { basis: 'cpi', margin: 0 },
+  earnings: { basis: 'earnings' },
+};
+
+const DB_INCREASE_OPTIONS = [
+  { value: 'cpi', label: 'In line with CPI' },
+  { value: 'cpi-5', label: 'CPI, capped at 5%' },
+  { value: 'cpi-2.5', label: 'CPI, capped at 2.5%' },
+  { value: 'none', label: 'None (level)' },
+];
+const DB_INCREASE_CAP = { cpi: null, 'cpi-5': 0.05, 'cpi-2.5': 0.025, none: 0 };
+
+const clampInt = (v, lo, hi) => Math.min(hi, Math.max(lo, Math.round(v)));
+
+// Enabled scheme cards → the engine's dbPensions (see ukDefinedBenefit.js).
+function buildDbPensions(p) {
+  return (p.dbPensions ?? [])
+    .filter((s) => s.enabled !== false)
+    .map((s) => ({
+      label: s.label ?? '',
+      status: s.status,
+      pension: Math.max(0, s.pension),
+      accrualRate: 1 / Math.max(10, s.accrualDenominator),
+      memberContributionRate: Math.min(0.5, Math.max(0, s.memberContributionPct) / 100),
+      inServiceRevaluation: DB_REVALUATION[s.inServiceRevaluation] ?? DB_REVALUATION.cpi,
+      normalPensionAge: clampInt(s.normalPensionAge, 50, 75),
+      ...(s.status === 'inPayment'
+        ? {}
+        : { paymentAge: clampInt(s.paymentAge, Math.max(50, p.currentAge), 80) }),
+      earlyReductionPerYear: Math.min(0.2, Math.max(0, s.earlyReductionPct) / 100),
+      lateIncreasePerYear: Math.min(0.2, Math.max(0, s.lateIncreasePct) / 100),
+      deferredIncreaseCap: DB_INCREASE_CAP[s.deferredIncreases] ?? null,
+      paymentIncreaseCap: DB_INCREASE_CAP[s.paymentIncreases] ?? null,
+      lumpSum: s.lumpSum === 'max' ? 'max' : 'none',
+      commutationFactor: Math.min(40, Math.max(1, s.commutationFactor)),
+      automaticLumpSum: Math.max(0, s.automaticLumpSum ?? 0),
+    }));
+}
+
+// First-year DB figures at today's salary, for the DC contribution helpers:
+// member contributions (net pay, so they lower taxable pay) and the pension
+// input amount (16 × the year's build-up), which uses annual allowance.
+function dbFirstYear(p) {
+  let memberContribution = 0;
+  let pensionInput = 0;
+  for (const s of buildDbPensions(p)) {
+    if (s.status !== 'active' || s.paymentAge <= p.currentAge) continue;
+    memberContribution += s.memberContributionRate * p.grossIncome;
+    pensionInput += DB_CONSTANTS.pensionInputFactor * s.accrualRate * p.grossIncome;
+  }
+  return {
+    memberContribution: Math.round(memberContribution * 100) / 100,
+    pensionInput: Math.round(pensionInput * 100) / 100,
+  };
 }
 
 // First-year annual-allowance check for the MANUAL employee contribution: does
@@ -239,10 +337,13 @@ function manualAllowanceStatus(p) {
     // Manual mode floors the employee at the match threshold, so a matched
     // employer is always paid in full; a fixed employer is always paid.
     const employer = Math.round(p.grossIncome * (p.employerPensionPct / 100) * 100) / 100;
-    const total = Math.round((employee + employer) * 100) / 100;
-    const thresholdIncome = Math.max(0, p.grossIncome - employee);
-    const allowance = taperedAnnualAllowance(thresholdIncome, p.grossIncome + employer);
-    return { breached: total > allowance + 0.005, total, allowance };
+    // Any DB scheme's build-up uses the same allowance, and its member
+    // contributions (net pay) lower threshold income.
+    const db = dbFirstYear(p);
+    const total = Math.round((employee + employer + db.pensionInput) * 100) / 100;
+    const thresholdIncome = Math.max(0, p.grossIncome - employee - db.memberContribution);
+    const allowance = taperedAnnualAllowance(thresholdIncome, thresholdIncome + total);
+    return { breached: total > allowance + 0.005, total, allowance, db: db.pensionInput > 0 };
   } catch {
     return { breached: false, total: 0, allowance: 0 };
   }
@@ -1602,12 +1703,290 @@ function EventsEditor({ p, set }) {
 // Solves the optimal salary-sacrifice rate from the current salary and employer
 // rate, then explains what it did — the value used by the projection comes from
 // the same solver via effectiveEmployeePensionRate.
+// ── Defined benefit scheme editor (Pension tab) ─────────────────────────────
+// Last number in a typed value, so "1/54" reads as 54.
+const parseLastNumber = (str) => {
+  const m = String(str).match(/(\d+(?:\.\d+)?)\s*$/);
+  return m ? parseFloat(m[1]) : NaN;
+};
+
+function DbSchemeCard({ p, scheme: s, result, onChange, onRemove }) {
+  const [showDetails, setShowDetails] = useState(false);
+  const enabled = s.enabled !== false;
+  const inPayment = s.status === 'inPayment';
+  const active = s.status === 'active';
+  const factor = dbPaymentFactor(
+    s.normalPensionAge,
+    s.paymentAge,
+    s.earlyReductionPct / 100,
+    s.lateIncreasePct / 100
+  );
+  const yearsOff = Math.abs(s.paymentAge - s.normalPensionAge);
+  return (
+    <EventCard
+      accent="#2dd4bf"
+      enabled={enabled}
+      label={s.label}
+      placeholder="Scheme name"
+      onLabel={(v) => onChange({ label: v })}
+      onToggle={() => onChange({ enabled: !enabled })}
+      onRemove={onRemove}
+    >
+      <Select
+        label="Status"
+        value={s.status}
+        options={DB_STATUS_OPTIONS}
+        onChange={(v) => onChange({ status: v })}
+        help="Still building it up: you're an active member, earning more pension each year you work. Left the scheme: a deferred pension that grows until you take it. Already being paid: a pension in payment now."
+      />
+      <Slider
+        label={inPayment ? 'Pension being paid' : 'Pension built up so far'}
+        value={s.pension}
+        min={0}
+        max={60_000}
+        step={100}
+        format={(v) => `${fmtGBP(v)}/yr`}
+        onChange={(v) => onChange({ pension: Math.max(0, v) })}
+        color="#2dd4bf"
+        allowInput
+        help={
+          inPayment
+            ? 'The yearly pension you are paid now, before tax.'
+            : "The yearly pension you have built up so far, from your latest benefit statement (in today's money, before any lump sum or early/late adjustment). Not the projected figure at retirement — the app projects that itself."
+        }
+      />
+      {active && (
+        <>
+          <Slider
+            label="Build-up rate"
+            value={s.accrualDenominator}
+            min={30}
+            max={100}
+            step={1}
+            format={(v) => `1/${v}`}
+            parse={parseLastNumber}
+            onChange={(v) => onChange({ accrualDenominator: Math.max(10, v) })}
+            color="#2dd4bf"
+            allowInput
+            help="The share of each year's pensionable pay you earn as pension: 1/54 means £1,000 a year of pension for every £54,000 of pay. Career average examples: NHS 2015 1/54, Teachers 2015 1/57, LGPS 1/49. Pensionable pay is taken as your salary (after any working-hours change)."
+          />
+          <Slider
+            label="Your contribution"
+            value={s.memberContributionPct}
+            min={0}
+            max={15}
+            step={0.1}
+            format={fmtPct}
+            onChange={(v) => onChange({ memberContributionPct: Math.max(0, v) })}
+            color="#2dd4bf"
+            allowInput
+            help="Your own contribution, as a % of pay. Paid through payroll by a net pay arrangement: it gets income tax relief but, unlike salary sacrifice, no National Insurance relief."
+          />
+          <Select
+            label="Growth while building up"
+            value={s.inServiceRevaluation}
+            options={DB_REVALUATION_OPTIONS}
+            onChange={(v) => onChange({ inServiceRevaluation: v })}
+            help="How pension you have already built up grows each year while you're still in the scheme. Career average schemes add a set rate (CPI or CPI plus a margin); in a final salary scheme it effectively follows your pay."
+          />
+        </>
+      )}
+      {!inPayment && (
+        <>
+          <Slider
+            label="Normal pension age"
+            value={s.normalPensionAge}
+            min={55}
+            max={70}
+            step={1}
+            format={fmtAge}
+            onChange={(v) => onChange({ normalPensionAge: Math.round(v) })}
+            color="#2dd4bf"
+            allowInput
+            help="The age the scheme pays your full pension without reduction. In most current public-sector schemes it's your state pension age; older sections often use 60 or 65."
+          />
+          <Slider
+            label="Take it from"
+            value={s.paymentAge}
+            min={Math.max(55, p.currentAge)}
+            max={75}
+            step={1}
+            format={fmtAge}
+            onChange={(v) => onChange({ paymentAge: Math.round(v) })}
+            color="#2dd4bf"
+            allowInput
+            annotation={() =>
+              factor === 1
+                ? 'Full pension — taken at normal pension age.'
+                : `${factor < 1 ? 'Reduced' : 'Increased'} to ${Math.round(factor * 100)}% for taking it ${yearsOff} year${yearsOff === 1 ? '' : 's'} ${factor < 1 ? 'early' : 'late'}.`
+            }
+            help="When the pension starts. Taking it before normal pension age reduces it for life; taking it later increases it (rates in Scheme details). An active scheme stops building up when you retire or start taking it."
+          />
+          <Toggle
+            label="Tax-free cash"
+            value={s.lumpSum}
+            optA={{ value: 'none', label: 'Full pension' }}
+            optB={{ value: 'max', label: 'Maximum cash' }}
+            onChange={(v) => onChange({ lumpSum: v })}
+            help="Most schemes let you give up some pension for a tax-free lump sum when it starts. Maximum takes as much as HMRC allows (about 4.3× the pension at 12:1), within the Lump Sum Allowance you share with your other pensions. The cash goes into your ISA, then GIA. At 12:1, each £12 of cash costs £1 a year of pension for life — about 15 years of it after basic-rate tax — so it's usually poor value if you expect a long retirement, though the cash is flexible."
+          />
+          {s.lumpSum === 'max' && (
+            <Slider
+              label="Commutation factor"
+              value={s.commutationFactor}
+              min={8}
+              max={25}
+              step={0.5}
+              format={(v) => `${v}:1`}
+              parse={parseLastNumber}
+              onChange={(v) => onChange({ commutationFactor: Math.max(1, v) })}
+              color="#2dd4bf"
+              allowInput
+              help="Pounds of tax-free cash you get for each £1 a year of pension you give up. 12:1 is standard in public-sector schemes; private schemes often offer more at older ages."
+            />
+          )}
+        </>
+      )}
+      <button
+        onClick={() => setShowDetails((v) => !v)}
+        style={{
+          background: 'none',
+          border: 'none',
+          padding: '0 0 10px',
+          color: 'var(--text-secondary)',
+          fontFamily: 'var(--font-body)',
+          fontSize: 11,
+          cursor: 'pointer',
+        }}
+      >
+        {showDetails ? 'Scheme details ▾' : 'Scheme details ▸'}
+      </button>
+      {showDetails && (
+        <>
+          {!inPayment && (
+            <>
+              <Slider
+                label="Reduction per year early"
+                value={s.earlyReductionPct}
+                min={0}
+                max={10}
+                step={0.1}
+                format={fmtPct}
+                onChange={(v) => onChange({ earlyReductionPct: Math.max(0, v) })}
+                color="#2dd4bf"
+                allowInput
+                help="How much the pension is cut for each year it starts before normal pension age. Schemes use actuarial tables; around 4–6% a year is typical."
+              />
+              <Slider
+                label="Increase per year late"
+                value={s.lateIncreasePct}
+                min={0}
+                max={10}
+                step={0.1}
+                format={fmtPct}
+                onChange={(v) => onChange({ lateIncreasePct: Math.max(0, v) })}
+                color="#2dd4bf"
+                allowInput
+                help="How much the pension rises for each year it starts after normal pension age, if the scheme allows it."
+              />
+              <Select
+                label="Increases before it's paid"
+                value={s.deferredIncreases}
+                options={DB_INCREASE_OPTIONS.filter((o) => o.value !== 'none')}
+                onChange={(v) => onChange({ deferredIncreases: v })}
+                help="How a deferred pension grows between leaving the scheme and taking it. Public-sector schemes increase it in line with CPI; private schemes usually cap the increase."
+              />
+              <Slider
+                label="Automatic lump sum"
+                value={s.automaticLumpSum}
+                min={0}
+                max={200_000}
+                step={500}
+                format={fmtGBP}
+                onChange={(v) => onChange({ automaticLumpSum: Math.max(0, v) })}
+                color="#2dd4bf"
+                allowInput
+                help="Tax-free cash some older sections pay on top of the pension (e.g. 3× pension in the NHS 1995 section), from your statement in today's money. It grows like the pension and uses your Lump Sum Allowance."
+              />
+            </>
+          )}
+          <Select
+            label="Increases once paid"
+            value={s.paymentIncreases}
+            options={DB_INCREASE_OPTIONS}
+            onChange={(v) => onChange({ paymentIncreases: v })}
+            help="How the pension rises each year once it's being paid. Public-sector pensions rise with CPI; private schemes often cap increases at 5% or 2.5%, and some pay none."
+          />
+        </>
+      )}
+      {enabled && result && (
+        <div
+          style={{
+            color: 'var(--text-muted)',
+            fontSize: 11,
+            fontFamily: 'var(--font-body)',
+            lineHeight: 1.5,
+          }}
+        >
+          {result.startAge === null
+            ? `Not paid before age ${p.maxAge}, the end of the projection.`
+            : inPayment
+              ? `Paying ${fmtGBP(result.pensionAtStartReal)}/yr, rising each year as set.`
+              : `Paid from ${result.startAge}: ${fmtGBP(result.pensionAtStartReal)}/yr in today's money` +
+                (result.lumpSumReal > 0 ? ` + ${fmtGBP(result.lumpSumReal)} tax-free cash.` : '.')}
+        </div>
+      )}
+    </EventCard>
+  );
+}
+
+function DbPensionsEditor({ p, set, dbSummary }) {
+  const schemes = p.dbPensions ?? [];
+  const update = (i, patch) =>
+    set('dbPensions')(schemes.map((s, j) => (j === i ? { ...s, ...patch } : s)));
+  // The projection only includes enabled schemes, in order.
+  const resultIndex = [];
+  let k = 0;
+  for (const s of schemes) resultIndex.push(s.enabled !== false ? k++ : -1);
+  return (
+    <div style={{ marginBottom: 20 }}>
+      <p style={eventIntroStyle}>
+        A defined benefit (final salary or career average) pension pays a guaranteed income for life
+        from your scheme, worked out from your pay and service rather than an invested pot. Add each
+        scheme from its latest benefit statement.
+      </p>
+      {schemes.map((s, i) => (
+        <DbSchemeCard
+          key={i}
+          p={p}
+          scheme={s}
+          result={resultIndex[i] >= 0 ? dbSummary?.[resultIndex[i]] : null}
+          onChange={(patch) => update(i, patch)}
+          onRemove={() => set('dbPensions')(schemes.filter((_, j) => j !== i))}
+        />
+      ))}
+      <AddEventButton
+        onClick={() =>
+          set('dbPensions')([
+            ...schemes,
+            { ...DB_NEW_SCHEME, paymentAge: Math.max(DB_NEW_SCHEME.paymentAge, p.currentAge) },
+          ])
+        }
+        label="+ Add a defined benefit scheme"
+      />
+    </div>
+  );
+}
+
 function AutoContributionReadout({ p }) {
   let auto;
+  const db = dbFirstYear(p);
   try {
     auto = optimalEmployeePensionContribution(p.grossIncome, p.employerPensionPct / 100, {
       employerMatch: p.employerMatch,
       employerMatchThreshold: p.employerMatchThreshold / 100,
+      netPayContributions: db.memberContribution,
+      otherPensionInput: db.pensionInput,
     });
   } catch {
     return <InfoBox>Enter a valid salary to compute the tax-optimal contribution.</InfoBox>;
@@ -1617,7 +1996,6 @@ function AutoContributionReadout({ p }) {
   const gross = fmtGBP(p.grossIncome);
   const target = fmtGBP(auto.targetIncome); // £100,000 at today's thresholds
   const emp = fmtGBP(auto.employeeContribution);
-  const adjusted = fmtGBP(auto.adjustedGrossIncome);
   const total = fmtGBP(auto.totalContribution);
   const employer = fmtGBP(auto.employerContribution);
   const erPct = (auto.employerRate * 100).toFixed(1);
@@ -1629,13 +2007,21 @@ function AutoContributionReadout({ p }) {
     ? ` This exceeds the ${fmtGBP(auto.annualAllowance)} annual allowance, so an annual-allowance charge would apply to the excess.`
     : '';
 
-  const abovePA = p.grossIncome > auto.targetIncome + 0.5;
+  // Taxable pay before and after the sacrifice: a DB scheme's member
+  // contributions (net pay) have already come off.
+  const startTaxable = p.grossIncome - db.memberContribution;
+  const endTaxable = startTaxable - auto.employeeContribution;
+  const dbNote =
+    db.pensionInput > 0
+      ? `Your DB scheme is allowed for: its ${fmtGBP(db.memberContribution)}/yr contribution already lowers taxable pay, and its build-up counts as ${fmtGBP(db.pensionInput)} of pension input against the annual allowance. `
+      : '';
+  const abovePA = startTaxable > auto.targetIncome + 0.5;
   let explanation;
   if (!abovePA) {
     // Income at/below £100,000 — the personal allowance is safe already.
     if (auto.employeeContribution === 0) {
       explanation =
-        `At ${gross} your income is below ${target}, so your full tax-free personal allowance is ` +
+        `At ${fmtGBP(startTaxable)} your taxable income is below ${target}, so your full tax-free personal allowance is ` +
         `already safe — there is nothing to protect` +
         (auto.employerMatched ? ', and no employer match to capture' : '') +
         `. The tax-optimal contribution is 0%. `;
@@ -1646,16 +2032,16 @@ function AutoContributionReadout({ p }) {
         `${pct}% (${emp}/yr) to earn the full ${erPct}% employer match — ${total}/yr into your ` +
         `pension in total. `;
     }
-  } else if (auto.adjustedGrossIncome <= auto.targetIncome + 0.5) {
+  } else if (endTaxable <= auto.targetIncome + 0.5) {
     // Income above £100,000, and the sacrifice reaches the target.
     explanation =
-      `Sacrificing ${pct}% (${emp}/yr) brings your taxable income from ${gross} down to ${target}, ` +
+      `Sacrificing ${pct}% (${emp}/yr) brings your taxable income from ${fmtGBP(startTaxable)} down to ${target}, ` +
       `reclaiming your full tax-free personal allowance. Total pension input ${total}/yr ` +
       `(incl. ${employer} employer${matchClause}).${breachNote} `;
   } else {
     // The annual allowance stops the sacrifice reaching £100,000.
     explanation =
-      `Sacrificing ${pct}% (${emp}/yr) brings your taxable income from ${gross} down to ${adjusted}. ` +
+      `Sacrificing ${pct}% (${emp}/yr) brings your taxable income from ${fmtGBP(startTaxable)} down to ${fmtGBP(endTaxable)}. ` +
       `The ${fmtGBP(auto.annualAllowance)} annual allowance stops it reaching ${target}, so part of ` +
       `your personal allowance stays tapered away. Total pension input ${total}/yr ` +
       `(incl. ${employer} employer${matchClause}).${breachNote} `;
@@ -1700,6 +2086,7 @@ function AutoContributionReadout({ p }) {
       </div>
       <InfoBox>
         {explanation}
+        {dbNote}
         Based on today&apos;s salary and 2026/27 thresholds; the rate is held constant as your pay
         grows, and affordability is not considered.
       </InfoBox>
@@ -1710,14 +2097,15 @@ function AutoContributionReadout({ p }) {
 // Warns (without capping) when a manual employee + employer contribution exceeds
 // the annual allowance in the first year. Auto mode carries its own breach note.
 function ManualAllowanceWarning({ p }) {
-  const { breached, total, allowance } = manualAllowanceStatus(p);
+  const { breached, total, allowance, db } = manualAllowanceStatus(p);
   if (!breached) return null;
   return (
     <InfoBox tone="warn">
-      ⚠ Your employee + employer contributions total {fmtGBP(total)} this year — above the{' '}
-      {fmtGBP(allowance)} annual allowance. The excess would normally face an annual-allowance
-      charge, which this model flags but doesn&apos;t apply (nor does it model carrying forward
-      unused allowance from the past three years). Based on today&apos;s salary.
+      ⚠ Your employee + employer contributions{db ? ' plus your DB build-up' : ''} total{' '}
+      {fmtGBP(total)} this year — above the {fmtGBP(allowance)} annual allowance. The excess would
+      normally face an annual-allowance charge, which this model flags but doesn&apos;t apply (nor
+      does it model carrying forward unused allowance from the past three years). Based on
+      today&apos;s salary.
     </InfoBox>
   );
 }
@@ -1970,7 +2358,7 @@ function AnnuityControls({ p, set, annuity }) {
   );
 }
 
-function TabContent({ tab, p, set, derived, topUp, annuity }) {
+function TabContent({ tab, p, set, derived, topUp, annuity, dbSummary }) {
   switch (tab) {
     case 'Personal':
       return (
@@ -2169,6 +2557,8 @@ function TabContent({ tab, p, set, derived, topUp, annuity }) {
             allowance: £60,000. PCLS (tax-free lump sum): up to 25%. Pension accessible from age{' '}
             {p.pensionAccessAge}.
           </InfoBox>
+          <SecHead>Defined Benefit Pensions</SecHead>
+          <DbPensionsEditor p={p} set={set} dbSummary={dbSummary} />
         </>
       );
 
@@ -3184,11 +3574,34 @@ function YearDetailPanel({ row, mobile = false }) {
             indent={1}
           />
           <DetailLine label="Adjusted gross" value={fmtGBP(row.adjustedGrossIncome)} dim />
+          {(row.dbPension?.memberContribution ?? 0) > 0 && (
+            <DetailLine
+              label="− DB contribution (tax relief, no NI relief)"
+              value={fmtGBP(row.dbPension.memberContribution)}
+              color="#2dd4bf"
+              indent={1}
+            />
+          )}
           {(row.statePensionGross ?? 0) > 0 && (
             <DetailLine
               label="+ State pension (while working)"
               value={fmtGBP(row.statePensionGross)}
               color="#a78bfa"
+            />
+          )}
+          {(row.dbPension?.gross ?? 0) > 0 && (
+            <DetailLine
+              label="+ DB pension (while working)"
+              value={fmtGBP(row.dbPension.gross)}
+              color="#2dd4bf"
+            />
+          )}
+          {(row.dbPension?.lumpSumTaxFree ?? 0) > 0 && (
+            <DetailLine
+              label="DB tax-free cash (to GIA)"
+              value={fmtGBP(row.dbPension.lumpSumTaxFree)}
+              color="#2dd4bf"
+              dim
             />
           )}
           <DetailLine
@@ -3461,11 +3874,18 @@ function YearDetailPanel({ row, mobile = false }) {
   // Guaranteed income (state pension + any annuity), net of its own tax, is
   // netted against the whole year's obligations — as the engine does.
   const spNet = row.statePensionNet ?? 0;
+  const dbNet = row.dbPensionNet ?? 0;
   const annuityNet = row.annuityNet ?? 0;
+  const hasDb = dbNet > 0;
   const hasAnnuity = (row.annuityGross ?? 0) > 0;
+  // Stacked as the engine taxes them: state pension, then DB, then annuity.
   const spCoversLiving = Math.min(spNet, totalObligations);
-  const annuityCovers = Math.min(annuityNet, Math.max(0, totalObligations - spCoversLiving));
-  const fromPotsNeeded = Math.max(0, totalObligations - spCoversLiving - annuityCovers);
+  const dbCovers = Math.min(dbNet, Math.max(0, totalObligations - spCoversLiving));
+  const annuityCovers = Math.min(
+    annuityNet,
+    Math.max(0, totalObligations - spCoversLiving - dbCovers)
+  );
+  const fromPotsNeeded = Math.max(0, totalObligations - spCoversLiving - dbCovers - annuityCovers);
   const grossFromPots =
     (row.taxFreePensionDrawdown ?? 0) +
     (row.taxablePensionDrawdown ?? 0) +
@@ -3473,8 +3893,14 @@ function YearDetailPanel({ row, mobile = false }) {
     (row.giaWithdrawal ?? 0);
   // Tax on the pot withdrawals alone: the year's income tax less the tax already
   // taken off the (net) guaranteed income shown in the first column.
+  const dbGross =
+    (row.dbPension?.gross ?? 0) +
+    ((row.dbPension?.lumpSum ?? 0) - (row.dbPension?.lumpSumTaxFree ?? 0));
   const guaranteedTax =
-    (row.statePensionGross ?? 0) - spNet + ((row.annuityGross ?? 0) - annuityNet);
+    (row.statePensionGross ?? 0) -
+    spNet +
+    (dbGross - dbNet) +
+    ((row.annuityGross ?? 0) - annuityNet);
   const potIncomeTax = Math.max(0, (row.incomeTax ?? 0) - guaranteedTax);
   const netFromPots = grossFromPots - potIncomeTax - (row.giaCGT ?? 0);
   const rate = fmtPct((row.investmentRate ?? 0) * 100);
@@ -3505,6 +3931,13 @@ function YearDetailPanel({ row, mobile = false }) {
             color="#a78bfa"
           />
         )}
+        {(row.dbPension?.lumpSumTaxFree ?? 0) > 0 && (
+          <DetailLine
+            label="DB tax-free cash (one-off)"
+            value={fmtGBP(row.dbPension.lumpSumTaxFree)}
+            color="#2dd4bf"
+          />
+        )}
         <DetailLine label="Living expenses" value={fmtGBP(row.targetNetExpenses)} />
         {hasMortgage && (
           <DetailLine label="+ Mortgage payment" value={fmtGBP(mortgagePayment)} color="#f43f5e" />
@@ -3530,6 +3963,14 @@ function YearDetailPanel({ row, mobile = false }) {
             label="− State pension (net)"
             value={fmtGBP(spCoversLiving)}
             color="#a78bfa"
+            indent={1}
+          />
+        )}
+        {hasDb && (
+          <DetailLine
+            label="− DB pension (net)"
+            value={fmtGBP(dbCovers)}
+            color="#2dd4bf"
             indent={1}
           />
         )}
@@ -4045,6 +4486,7 @@ export default function App() {
         statePensionDeferralYears: p.statePensionDeferralYears,
         topUpStatePension: p.topUpStatePension,
         pensionAccessAge: p.pensionAccessAge,
+        dbPensions: buildDbPensions(p),
         studentLoanPlan: p.studentLoanPlan || null,
         windfalls: p.windfalls,
         oneOffExpenses: p.oneOffExpenses,
@@ -4156,6 +4598,7 @@ export default function App() {
           statePensionDeferralYears: p.statePensionDeferralYears,
           topUpStatePension: p.topUpStatePension,
           pensionAccessAge: p.pensionAccessAge,
+          dbPensions: buildDbPensions(p),
           studentLoanPlan: p.studentLoanPlan || null,
           windfalls: p.windfalls,
           oneOffExpenses: p.oneOffExpenses,
@@ -4292,6 +4735,16 @@ export default function App() {
   // Annuity purchase age for the chart's reference line: the age the central
   // projection actually buys it (null when no annuity is bought).
   const annuityChartAge = summary?.annuity?.purchased ? summary.annuity.purchaseAge : null;
+  // Ages defined benefit pensions start within the projection (reference lines).
+  // Kept stable between renders unless the ages change, so the chart doesn't redraw.
+  const dbChartAgesKey = (summary?.dbPensions ?? [])
+    .map((d) => d.startAge)
+    .filter((a) => a !== null && a > p.currentAge)
+    .join(',');
+  const dbChartAges = useMemo(
+    () => (dbChartAgesKey ? dbChartAgesKey.split(',').map(Number) : null),
+    [dbChartAgesKey]
+  );
 
   // 4% rule: need 25× annual spending as a portfolio (1 / 0.04 = 25).
   // Expressed in the same terms as the chart (real or nominal).
@@ -4741,6 +5194,7 @@ Use Available funds to see whether an early-retirement plan can bridge the gap u
         derived={derivedSavings}
         topUp={topUpInfo}
         annuity={summary?.annuity ?? null}
+        dbSummary={summary?.dbPensions ?? []}
       />
     </>
   );
@@ -4876,7 +5330,15 @@ Use Available funds to see whether an early-retirement plan can bridge the gap u
                   }
                   return `Only ${niShown} qualifying NI yrs — need 10`;
                 })()}
-                help="Your projected state pension, based on total NI qualifying years accrued by retirement (plus any voluntary Class 3 years bought via the top-up toggle). This is a real government entitlement (inflation-linked via triple lock), not an investment return. It offsets retirement expenses before drawing from personal pots."
+                note={(() => {
+                  // Defined benefit pensions paid within the projection, in today's money.
+                  const paid = (displaySummary.dbPensions ?? []).filter((d) => d.startAge !== null);
+                  if (paid.length === 0) return null;
+                  const total = paid.reduce((sum, d) => sum + d.pensionAtStartReal, 0);
+                  const from = Math.min(...paid.map((d) => d.startAge));
+                  return `+ DB ${fmtGBPLarge(total)}/yr (today's £) from ${from}`;
+                })()}
+                help="Your projected state pension, based on total NI qualifying years accrued by retirement (plus any voluntary Class 3 years bought via the top-up toggle). This is a real government entitlement (inflation-linked via triple lock), not an investment return. It offsets retirement expenses before drawing from personal pots. Any defined benefit pensions are shown below it, in today's money from when each starts; like the state pension, they're guaranteed income counted before your pots are drawn."
               />
             </div>
           );
@@ -5080,6 +5542,7 @@ Use Available funds to see whether an early-retirement plan can bridge the gap u
           logScale={logScale}
           eventMarkers={eventMarkers}
           annuityAge={annuityChartAge}
+          dbPensionAges={dbChartAges}
           retirementIsTarget={p.flexibleRetirement}
           survivalSeries={mcResults.solvency?.survival}
           shortfallMarkers={mcResults.solvency?.shortfallMarkers}
@@ -5379,6 +5842,7 @@ Use Available funds to see whether an early-retirement plan can bridge the gap u
             logScale={logScale}
             eventMarkers={eventMarkers}
             annuityAge={annuityChartAge}
+            dbPensionAges={dbChartAges}
             fundsView={fundsView}
             compact={mobile}
             onSelectRow={mobile ? selectDetail : null}
