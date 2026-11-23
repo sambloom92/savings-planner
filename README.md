@@ -85,7 +85,8 @@ src/
   ukGIA.js                GIA CGT model (annual exempt amount, basic/higher rates)
   ukPension.js            Pension: PCLS, annual-allowance taper, tax-optimal contribution solver, after-tax estimate
   ukDefinedBenefit.js     Defined benefit rules: early/late factors, commutation limit, 16× pension input, increases
-  ukLifecycle.js          Full lifecycle projection engine (accumulation + retirement)
+  ukLifecycle.js          Lifecycle projection engine: the household year loop (spending, debts, events, drawdown order)
+  ukLifecyclePerson.js    One person in the projection: pay and tax, pots, state/DB pensions, lump sums, drawdown steps
   ukMonteCarlo.js         Monte Carlo simulation — two-regime Markov model
   ukMortality.js          UK survival model (ONS cohort life tables) for lifetime solvency
   ukMortalityTable.js     ONS 2024-based cohort death rates by sex and year of birth (generated)
@@ -94,9 +95,12 @@ src/
   App.jsx                 React UI — sidebar, charts, year-detail panel
 scripts/
   build_ons_mortality_table.py  Regenerates ukMortalityTable.js from the ONS qx spreadsheet
+  compare-engine.mjs            Checks the engine gives identical results to a git ref (for refactors)
 ```
 
 Each `*.js` module (except `formatters.js` and the generated `ukMortalityTable.js`) has a corresponding `*.test.js` file with unit tests (no test framework dependency — plain Node assertions via `node:assert`).
+
+When restructuring the engine without meaning to change any numbers, run `node scripts/compare-engine.mjs` (optionally a git ref, default `origin/main`, and `--count N`). It runs a few hundred seeded random scenarios — every feature, including invalid inputs and Monte Carlo runs — through both versions and reports the first difference.
 
 ## Monte Carlo model
 
