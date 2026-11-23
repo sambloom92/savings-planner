@@ -87,7 +87,8 @@ function drawFanChart(
   shortfallMarks,
   annuityAge,
   retirementIsTarget,
-  dbPensionAges
+  dbPensionAges,
+  extraLines
 ) {
   const ctx = canvas.getContext('2d');
 
@@ -255,6 +256,18 @@ function drawFanChart(
     ctx.beginPath();
     ctx.moveTo(dbX, PAD.top);
     ctx.lineTo(dbX, PAD.top + cH);
+    ctx.stroke();
+  }
+
+  // Other labelled reference lines (couple mode: the partner's retirement and
+  // state pension, a death in a "what if" plan).
+  const extras = (extraLines ?? []).filter((l) => l.age >= minAge && l.age <= maxAgeVal);
+  for (const line of extras) {
+    const lx = xOf(line.age);
+    ctx.strokeStyle = line.color;
+    ctx.beginPath();
+    ctx.moveTo(lx, PAD.top);
+    ctx.lineTo(lx, PAD.top + cH);
     ctx.stroke();
   }
 
@@ -529,6 +542,13 @@ function drawFanChart(
   if (showAnnuity) {
     refLabels.push({ text: 'Annuity', age: annuityAge, color: 'rgba(232,121,249,0.9)', row: 1 });
   }
+  for (const line of extras)
+    refLabels.push({
+      text: line.label,
+      age: line.age,
+      color: line.labelColor ?? line.color,
+      row: 1,
+    });
   const labelRowY = (row) => (row === 0 ? PAD.top - 8 : PAD.top - 1 + 12 * row);
   const LABEL_GAP = 6;
   const placedLabels = []; // per row: [left, right] extents already drawn
@@ -824,6 +844,7 @@ function FanLegend({ compact = false }) {
  *   annuityAge?: number | null,       - annuity purchase age (reference line)
  *   retirementIsTarget?: boolean,     - label retirement as a target (flexible date)
  *   dbPensionAges?: number[],         - ages defined benefit pensions start (reference lines)
+ *   extraLines?: Array<{ age, label, color, labelColor? }> - other labelled reference lines
  *   onHoverRow: function,
  *   showDetails: boolean,
  *   colorMode?: string,
@@ -856,6 +877,7 @@ export function FanChart({
   annuityAge = null,
   retirementIsTarget = false,
   dbPensionAges = null,
+  extraLines = null,
   onSelectRow = null,
   compact = false,
   height = 390,
@@ -1059,7 +1081,8 @@ export function FanChart({
       shortfallMarks,
       annuityAge,
       retirementIsTarget,
-      dbPensionAges
+      dbPensionAges,
+      extraLines
     );
     coordRef.current = { ...coords, adjData: effectiveAdjData };
     // colorMode in deps: theme change re-reads CSS vars via cssVar() at draw time
@@ -1088,6 +1111,7 @@ export function FanChart({
     annuityAge,
     retirementIsTarget,
     dbPensionAges,
+    extraLines,
   ]);
 
   // Hit-test a pointer event: the nearest age column and, in fan mode, the
