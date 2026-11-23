@@ -2384,6 +2384,245 @@ describe('estimated tax on pension withdrawal', () => {
   });
 });
 
+describe('defined benefit pensions', () => {
+  // Flat pay and 2% CPI keep the arithmetic checkable by hand.
+  const dbRates = {
+    savingsRate: 0,
+    retirementRate: 0,
+    wageGrowthRate: 0,
+    inflationRate: 0.02,
+    debtRate: 0.05,
+  };
+  const worker = {
+    currentAge: 40,
+    retirementAge: 43,
+    currentYear: 2026,
+    grossIncome: 50_000,
+    employeePensionRate: 0,
+    employerPensionRate: 0,
+    niContributionYears: 20,
+  };
+  const careScheme = {
+    status: 'active',
+    pension: 10_000,
+    accrualRate: 1 / 50,
+    memberContributionRate: 0.1,
+    inServiceRevaluation: { basis: 'cpi', margin: 0.015 },
+    normalPensionAge: 67,
+    paymentAge: 67,
+  };
+  const rowAt = (r, age) => r.yearlyBreakdown.find((x) => x.age === age);
+
+  it('builds up on pay and revalues at CPI + margin while active', () => {
+    const r = projectLifecycle({ ...worker, dbPensions: [careScheme] }, dbRates);
+    // Year 0: no revaluation yet; accrual £50,000 / 50 = £1,000.
+    assertApprox(rowAt(r, 40).dbPension.schemes[0].pension, 11_000, 'age 40');
+    // Year 1: £11,000 × 1.035 + £1,000 = £12,385.
+    assertApprox(rowAt(r, 41).dbPension.schemes[0].pension, 12_385, 'age 41');
+    assert.equal(rowAt(r, 41).dbPension.schemes[0].active, true);
+  });
+
+  it('member contributions get income tax relief but not NI relief', () => {
+    const row = rowAt(projectLifecycle({ ...worker, dbPensions: [careScheme] }, dbRates), 40);
+    assertApprox(row.dbPension.memberContribution, 5_000, 'contribution');
+    // Income tax on £45,000; NI on the full £50,000.
+    assertApprox(row.incomeTax, (45_000 - 12_570) * 0.2, 'income tax');
+    assertApprox(row.employeeNI, (50_000 - 12_570) * 0.08, 'NI');
+    assertApprox(row.netTakeHome, 50_000 - 5_000 - row.incomeTax - row.employeeNI, 'take-home');
+  });
+
+  it('counts DB build-up towards the annual allowance (16× rule)', () => {
+    const r = projectLifecycle({ ...worker, dbPensions: [careScheme] }, dbRates);
+    // Year 0: 16 × (£11,000 − £10,000) = £16,000.
+    assertApprox(rowAt(r, 40).dbPension.pensionInput, 16_000, 'year 0');
+    // Year 1: 16 × (£12,385 − £11,000 × 1.02) = 16 × £1,165 = £18,640.
+    assertApprox(rowAt(r, 41).dbPension.pensionInput, 18_640, 'year 1');
+    // A generous scheme plus DC contributions can breach the £60,000 allowance.
+    const rich = projectLifecycle(
+      {
+        ...worker,
+        grossIncome: 100_000,
+        employeePensionRate: 0.1,
+        dbPensions: [{ ...careScheme, accrualRate: 1 / 30, memberContributionRate: 0 }],
+      },
+      dbRates
+    );
+    const first = rowAt(rich, 40);
+    // DC £10,000 + 16 × £3,333.33 (the year's accrual, to the penny).
+    assertApprox(first.pensionInput, 10_000 + 16 * 3_333.33, 'total input');
+    assert.equal(first.annualAllowanceBreached, true);
+  });
+
+  it('a deferred scheme grows with CPI and is reduced for early payment', () => {
+    const r = projectLifecycle(
+      { ...worker, currentAge: 58, retirementAge: 59, dbPensions: [] },
+      dbRates,
+      { isaBalance: 200_000 },
+      { targetNetAnnualExpenses: 10_000, maxAge: 70 }
+    );
+    assert.equal(rowAt(r, 62).dbPension, null);
+    const withDb = projectLifecycle(
+      {
+        ...worker,
+        currentAge: 58,
+        retirementAge: 59,
+        dbPensions: [{ status: 'deferred', pension: 6_000, normalPensionAge: 65, paymentAge: 62 }],
+      },
+      dbRates,
+      { isaBalance: 200_000 },
+      { targetNetAnnualExpenses: 10_000, maxAge: 70 }
+    );
+    // Four CPI increases (ages 59–62), then 3 years early at 5% a year → ×0.85.
+    const expected = 6_000 * 1.02 ** 4 * 0.85;
+    assertApprox(rowAt(withDb, 61).dbPension.gross, 0, 'not yet paid');
+    assert.ok(Math.abs(rowAt(withDb, 62).dbPension.gross - expected) < 0.05, 'first payment');
+    // Then rises with CPI each year in payment.
+    assert.ok(
+      Math.abs(rowAt(withDb, 63).dbPension.gross - expected * 1.02) < 0.05,
+      'second payment'
+    );
+    assert.equal(withDb.summary.dbPensions[0].startAge, 62);
+  });
+
+  it('swaps pension for the maximum tax-free cash at the commutation factor', () => {
+    const r = projectLifecycle(
+      {
+        ...worker,
+        currentAge: 64,
+        retirementAge: 65,
+        dbPensions: [
+          {
+            status: 'deferred',
+            pension: 10_000,
+            normalPensionAge: 65,
+            paymentAge: 65,
+            lumpSum: 'max',
+            commutationFactor: 12,
+          },
+        ],
+      },
+      dbRates,
+      {},
+      { targetNetAnnualExpenses: 5_000, maxAge: 75 }
+    );
+    // £10,200 after one CPI rise; cash = 5P / (0.75 + 5/12) = 4.2857 × £10,200.
+    const P = 10_200;
+    const cash = (5 * P) / (0.75 + 5 / 12);
+    const s = r.summary.dbPensions[0];
+    assert.ok(Math.abs(s.lumpSum - cash) < 0.05, `lump sum ${s.lumpSum}`);
+    assert.ok(Math.abs(s.pensionAtStart - (P - cash / 12)) < 0.05, `pension ${s.pensionAtStart}`);
+    // The cash lands in the ISA (up to £20,000) and the GIA.
+    const row = rowAt(r, 65);
+    assertApprox(row.dbPension.lumpSumTaxFree, s.lumpSum, 'tax-free');
+  });
+
+  it('DB and DC tax-free cash share one Lump Sum Allowance', () => {
+    // A £250,000 automatic DB lump sum at 60 leaves £18,275 of the £268,275
+    // allowance for the DC lump sum at 65 (which would otherwise be £100,000).
+    const r = projectLifecycle(
+      {
+        ...worker,
+        currentAge: 59,
+        retirementAge: 65,
+        dbPensions: [
+          {
+            status: 'deferred',
+            pension: 30_000,
+            automaticLumpSum: 250_000,
+            normalPensionAge: 60,
+            paymentAge: 60,
+            deferredIncreaseCap: 0,
+          },
+        ],
+      },
+      { ...dbRates, inflationRate: 0 },
+      { pensionBalance: 400_000 },
+      { targetNetAnnualExpenses: 20_000, maxAge: 75, takePCLS: true }
+    );
+    assertApprox(rowAt(r, 60).dbPension.lumpSumTaxFree, 250_000, 'DB lump sum');
+    const firstRet = rowAt(r, 65);
+    assertApprox(firstRet.pclsLumpSum, 18_275, 'PCLS');
+    assert.equal(firstRet.pclsCapped, true);
+  });
+
+  it('is taxed as income alongside other pension income', () => {
+    // Already paid £20,000; no state pension (no qualifying years); no salary.
+    const r = projectLifecycle(
+      {
+        ...worker,
+        currentAge: 70,
+        retirementAge: 71,
+        grossIncome: 0,
+        niContributionYears: 0,
+        dbPensions: [{ status: 'inPayment', pension: 20_000 }],
+      },
+      dbRates,
+      {},
+      { targetNetAnnualExpenses: 15_000, maxAge: 80 }
+    );
+    assertApprox(rowAt(r, 70).incomeTax, (20_000 - 12_570) * 0.2, 'age 70');
+    // Age 71: £20,400 after CPI; tax bands have also risen 2%.
+    const row = rowAt(r, 71);
+    assertApprox(row.dbPension.gross, 20_400, 'gross');
+    assertApprox(row.dbPensionNet, 20_400 - (20_400 - 12_570 * 1.02) * 0.2, 'net');
+    // Guaranteed income covers the £15,300 need, so nothing is drawn and the
+    // surplus is saved.
+    assert.equal(row.isaWithdrawal + row.giaWithdrawal + row.pensionDrawdown, 0);
+    assert.ok(row.incomeSurplusSaved > 0);
+  });
+
+  it('flexible retirement counts DB income as guaranteed income', () => {
+    const plan = (dbPensions) =>
+      projectLifecycle(
+        { ...worker, currentAge: 59, retirementAge: 60, dbPensions },
+        dbRates,
+        { isaBalance: 20_000 },
+        {
+          targetNetAnnualExpenses: 20_000,
+          maxAge: 85,
+          flexibleRetirement: true,
+          maxRetirementDelayYears: 3,
+        }
+      ).summary.retirementDelayYears;
+    // Without the DB pension the small ISA can't fund retirement at 60.
+    assert.ok(plan([]) > 0, 'no delay without DB');
+    // A £26,000 pension paid from 60 covers the £20,000 target after tax.
+    assert.equal(
+      plan([{ status: 'deferred', pension: 26_000, normalPensionAge: 60, paymentAge: 60 }]),
+      0
+    );
+  });
+
+  it('an annuity sized to cover essentials counts DB income first', () => {
+    const r = projectLifecycle(
+      {
+        ...worker,
+        currentAge: 70,
+        retirementAge: 71,
+        grossIncome: 0,
+        niContributionYears: 0,
+        dbPensions: [{ status: 'inPayment', pension: 30_000 }],
+      },
+      dbRates,
+      { pensionBalance: 200_000 },
+      {
+        targetNetAnnualExpenses: 25_000,
+        maxAge: 85,
+        annuity: { purchaseAge: 75, sizing: 'essential', amountReal: 20_000 },
+      }
+    );
+    assert.equal(r.summary.annuity.notNeeded, true);
+  });
+
+  it('rejects an invalid scheme', () => {
+    assert.throws(
+      () => projectLifecycle({ ...worker, dbPensions: [{ status: 'pending' }] }, dbRates),
+      RangeError
+    );
+    assert.throws(() => projectLifecycle({ ...worker, dbPensions: {} }, dbRates), TypeError);
+  });
+});
+
 // Small local rounding helper mirroring the module's round2, for test sums.
 function round2Test(n) {
   return Math.round(n * 100) / 100;

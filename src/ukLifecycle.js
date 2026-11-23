@@ -46,6 +46,14 @@ import {
 } from './ukPension.js';
 import { GIA_CGT_CONSTANTS } from './ukGIA.js';
 import { illustrativeAnnuityRate } from './ukAnnuity.js';
+import {
+  normaliseDbScheme,
+  dbPaymentFactor,
+  maxCommutationLumpSum,
+  dbPensionInputAmount,
+  cappedIncrease,
+  inServiceRevaluationRate,
+} from './ukDefinedBenefit.js';
 
 const TAX_YEAR = '2026/27';
 
@@ -324,6 +332,14 @@ function applyGIAWithdrawal(bal, costBasis, gross) {
  *                                             Cost funded from the pots; buys fewer years if
  *                                             unaffordable, never below the 10-year minimum
  *                                             benefit. Default false.
+ *   dbPensions?:            object[],       - Defined benefit schemes (see ukDefinedBenefit.js),
+ *                                             in today's money. Active schemes build up while
+ *                                             working, with member contributions taxed under a
+ *                                             net pay arrangement (income tax relief, no NI
+ *                                             relief) and accrual counted towards the annual
+ *                                             allowance. From its payment age each pays a
+ *                                             guaranteed, taxable income; any lump sum uses the
+ *                                             same Lump Sum Allowance as the DC pension.
  *   pensionAccessAge?:      number,         - Earliest age the DC pension can be accessed
  *                                             (NMPA; default 57). Before it, no PCLS or
  *                                             pension drawdown — spending is bridged from
@@ -470,6 +486,7 @@ export function projectLifecycle(
     // Normal Minimum Pension Age — the earliest age a DC pension can be accessed
     // (55 today, rising to 57 in April 2028). Before it, no PCLS or drawdown.
     pensionAccessAge = LIFECYCLE_CONSTANTS.pension.defaultAccessAge,
+    dbPensions = [],
     studentLoanPlan = null,
     windfalls = [],
     oneOffExpenses = [],
@@ -506,6 +523,8 @@ export function projectLifecycle(
   assertPositiveInteger(statePensionAge, 'statePensionAge');
   assertNonNegativeInteger(statePensionDeferralYears, 'statePensionDeferralYears');
   assertPositiveInteger(pensionAccessAge, 'pensionAccessAge');
+  if (!Array.isArray(dbPensions)) throw new TypeError('dbPensions must be an array');
+  const dbSchemes = dbPensions.map((scheme) => normaliseDbScheme(scheme, currentAge));
 
   if (studentLoanPlan !== null && !STUDENT_LOAN_PLANS[studentLoanPlan])
     throw new TypeError(`studentLoanPlan '${studentLoanPlan}' is not a recognised plan`);
@@ -827,9 +846,12 @@ export function projectLifecycle(
       const annuityReal = annuityInflationLinked
         ? annuityReal0
         : annuityReal0 / Math.pow(1 + inflationRate, a - atAge);
+      // DB pensions are guaranteed income too, taxed like the annuity.
       let need = Math.max(
         0,
-        spendReal - (a >= spStart ? stateReal : 0) - ANNUITY_NET_FACTOR * annuityReal
+        spendReal -
+          (a >= spStart ? stateReal : 0) -
+          ANNUITY_NET_FACTOR * (annuityReal + dbRealIncomeAt(a, atAge, deflate))
       );
       if (need > 0) {
         const fromAccessible = Math.min(accessible, need);
@@ -846,6 +868,48 @@ export function projectLifecycle(
       locked *= 1 + centralRealReturn;
     }
     return true;
+  }
+
+  /**
+   * DB income at age `a` in today's money, projected from the schemes' state at
+   * `atAge` under central inflation — for the rundown checks above. A scheme
+   * not yet paid stops building up (the check asks "if I stopped now") and
+   * grows by its deferred increases until paid, after its early/late
+   * adjustment and any lump sum swap; once paid it rises by its increases.
+   * Increases that are capped (or none) lose value against central inflation.
+   * Lump sums are left out, which is slightly conservative.
+   */
+  function dbRealIncomeAt(a, atAge, deflate) {
+    let total = 0;
+    const realGrowth = (cap, years) =>
+      Math.pow(
+        (1 + (cap === null ? inflationRate : Math.min(cap, inflationRate))) / (1 + inflationRate),
+        Math.max(0, years)
+      );
+    for (const st of dbStates) {
+      const s = st.scheme;
+      if (st.inPayment) {
+        total += st.pension * deflate * realGrowth(s.paymentIncreaseCap, a - atAge);
+        continue;
+      }
+      if (a < s.paymentAge) continue;
+      let pension =
+        st.pension *
+        deflate *
+        realGrowth(s.deferredIncreaseCap, s.paymentAge - atAge) *
+        dbPaymentFactor(
+          s.normalPensionAge,
+          s.paymentAge,
+          s.earlyReductionPerYear,
+          s.lateIncreasePerYear
+        );
+      if (s.lumpSum === 'max')
+        pension -=
+          maxCommutationLumpSum(pension, s.commutationFactor, st.automaticLumpSum * deflate) /
+          s.commutationFactor;
+      total += pension * realGrowth(s.paymentIncreaseCap, a - s.paymentAge);
+    }
+    return total;
   }
 
   // Flexible-retirement on-track test: can the target spend be funded for life?
@@ -900,6 +964,7 @@ export function projectLifecycle(
       totalReal +
       computeStatePension(niYearsNow) * statePensionDeferralUplift +
       Math.max(0, annuityGrossNominal * deflate) +
+      dbStates.reduce((sum, st) => sum + st.pension * deflate * 2, 0) +
       1;
     let lo = 0;
     for (let iter = 0; iter < 30; iter++) {
@@ -996,6 +1061,161 @@ export function projectLifecycle(
   let spClaimCumTriplelock = spClaimAge <= currentAge ? 1 : null;
   const spDeferralExtraShare =
     LIFECYCLE_CONSTANTS.statePension.deferralUpliftPerYear * statePensionDeferralYears;
+
+  // ── Defined benefit pensions ──────────────────────────────────────────────
+  // Running state of each scheme, in cash terms: the pension built up (or being
+  // paid) and any automatic lump sum. Statements are in today's money, which is
+  // cash at the projection start.
+  const dbStates = dbSchemes.map((scheme) => ({
+    scheme,
+    pension: scheme.pension,
+    automaticLumpSum: scheme.automaticLumpSum,
+    active: scheme.status === 'active',
+    inPayment: scheme.status === 'inPayment',
+    startAge: scheme.status === 'inPayment' ? currentAge : null,
+    pensionAtStart: scheme.status === 'inPayment' ? scheme.pension : null,
+    cumulInflationAtStart: 1,
+    lumpSum: 0,
+  }));
+
+  // Lump Sum Allowance left: the lifetime cap on tax-free cash, shared by DB
+  // lump sums, the DC tax-free lump sum (PCLS) and tax-free UFPLS withdrawals.
+  let lsaRemaining = PENSION_CONSTANTS.lumpSumAllowance;
+
+  /**
+   * Advance every DB scheme through the year at `age`. `yr` holds this year's
+   * rates; `revalue` is false in the first projection year (values are already
+   * as at today). An active scheme builds up while `working`, on `pay`, until
+   * it is paid; after leaving it grows by its deferred increases. At its
+   * payment age it is adjusted for early or late payment, part may be swapped
+   * for tax-free cash, and it is paid from that year, rising each year after.
+   *
+   * Returns this year's totals: gross income, member contributions, annual
+   * allowance pension input, and lump sums (tax-free within the remaining Lump
+   * Sum Allowance, any excess taxable).
+   */
+  function advanceDbSchemes(age, yr, revalue, working, pay) {
+    const out = {
+      gross: 0,
+      memberContribution: 0,
+      pensionInput: 0,
+      lumpTaxFree: 0,
+      lumpTaxable: 0,
+    };
+    for (const st of dbStates) {
+      const s = st.scheme;
+      if (st.inPayment) {
+        if (revalue && age > st.startAge)
+          st.pension = round2(
+            st.pension * (1 + cappedIncrease(yr.inflationRate, s.paymentIncreaseCap))
+          );
+        out.gross = round2(out.gross + st.pension);
+        continue;
+      }
+      // Building up only while working for the scheme and before taking it.
+      if (st.active && !(working && age < s.paymentAge)) st.active = false;
+      const opening = st.pension;
+      if (revalue) {
+        const rate = st.active
+          ? inServiceRevaluationRate(s.inServiceRevaluation, yr.inflationRate, yr.wageGrowthRate)
+          : cappedIncrease(yr.inflationRate, s.deferredIncreaseCap);
+        st.pension = round2(st.pension * (1 + rate));
+        st.automaticLumpSum = round2(st.automaticLumpSum * (1 + rate));
+      }
+      if (st.active) {
+        st.pension = round2(st.pension + s.accrualRate * pay);
+        out.memberContribution = round2(out.memberContribution + s.memberContributionRate * pay);
+        out.pensionInput = round2(
+          out.pensionInput +
+            dbPensionInputAmount(opening, st.pension, revalue ? Math.max(0, yr.inflationRate) : 0)
+        );
+      }
+      if (age === s.paymentAge) {
+        const factor = dbPaymentFactor(
+          s.normalPensionAge,
+          s.paymentAge,
+          s.earlyReductionPerYear,
+          s.lateIncreasePerYear
+        );
+        let pension = round2(st.pension * factor);
+        const automatic = round2(st.automaticLumpSum * factor);
+        let commuted = 0;
+        if (s.lumpSum === 'max') {
+          // Up to the HMRC maximum, and only as far as it stays tax-free.
+          const room = Math.max(0, lsaRemaining - automatic);
+          commuted = round2(
+            Math.min(maxCommutationLumpSum(pension, s.commutationFactor, automatic), room)
+          );
+          pension = round2(pension - commuted / s.commutationFactor);
+        }
+        const lump = round2(automatic + commuted);
+        const taxFree = round2(Math.min(lump, lsaRemaining));
+        lsaRemaining = round2(lsaRemaining - taxFree);
+        out.lumpTaxFree = round2(out.lumpTaxFree + taxFree);
+        out.lumpTaxable = round2(out.lumpTaxable + lump - taxFree);
+        Object.assign(st, {
+          pension,
+          inPayment: true,
+          startAge: age,
+          pensionAtStart: pension,
+          cumulInflationAtStart: cumulInflation,
+          lumpSum: lump,
+        });
+        out.gross = round2(out.gross + pension);
+      }
+    }
+    return out;
+  }
+
+  /**
+   * DB income this year in cash terms if every scheme not yet paid were taken
+   * now at its planned terms — what is in payment, plus each future pension
+   * after any early/late adjustment and lump sum swap. Used to size an annuity
+   * around the guaranteed income the plan will have.
+   */
+  function dbPlannedGross() {
+    let total = 0;
+    for (const st of dbStates) {
+      if (st.inPayment) {
+        total += st.pension;
+        continue;
+      }
+      const s = st.scheme;
+      let pension =
+        st.pension *
+        dbPaymentFactor(
+          s.normalPensionAge,
+          s.paymentAge,
+          s.earlyReductionPerYear,
+          s.lateIncreasePerYear
+        );
+      if (s.lumpSum === 'max') {
+        const automatic = st.automaticLumpSum;
+        pension -=
+          maxCommutationLumpSum(pension, s.commutationFactor, automatic) / s.commutationFactor;
+      }
+      total += pension;
+    }
+    return round2(total);
+  }
+
+  // Per-year DB figures for a projection row (null when there are no schemes).
+  function dbRowSummary(db) {
+    if (dbStates.length === 0) return null;
+    return {
+      gross: db.gross,
+      memberContribution: db.memberContribution,
+      pensionInput: db.pensionInput,
+      lumpSum: round2(db.lumpTaxFree + db.lumpTaxable),
+      lumpSumTaxFree: db.lumpTaxFree,
+      schemes: dbStates.map((st) => ({
+        label: st.scheme.label,
+        pension: st.pension,
+        active: st.active,
+        inPayment: st.inPayment,
+      })),
+    };
+  }
 
   /**
    * Nominal state pension payable in the year the projection is at `age`, from
@@ -1105,23 +1325,32 @@ export function projectLifecycle(
     const pastStatePensionAge = age >= statePensionAge;
     const workingStatePension = statePensionGrossAt(age, niYears);
 
+    // ── Defined benefit pensions ─────────────────────────────────────────
+    // Active schemes build up on this year's pay. Member contributions are paid
+    // under a net pay arrangement: they come off pay for income tax only, not
+    // for NI or student loan repayments. A scheme already being paid (or taken
+    // this year) adds taxable income on top of salary.
+    const db = advanceDbSchemes(age, yr, i > 0, true, effectiveIncome);
+    const taxablePay = round2(adjustedGross - db.memberContribution);
+    const otherTaxableIncome = round2(workingStatePension + db.gross + db.lumpTaxable);
+
     // High earners: annual allowance tapers when threshold income > £200k and
-    // adjusted income (threshold income + all pension contributions) > £260k.
-    // Threshold income counts all taxable income, including any state pension.
+    // adjusted income (threshold income + all pension input) > £260k. Threshold
+    // income counts all taxable income, including any state or DB pension.
+    // Pension input is the DC contributions plus the DB pension input amount.
+    const thresholdIncome = round2(taxablePay + otherTaxableIncome);
+    const pensionInput = round2(totalPensionContrib + db.pensionInput);
     const annualAllowance = taperedAnnualAllowance(
-      round2(adjustedGross + workingStatePension),
-      round2(adjustedGross + workingStatePension + totalPensionContrib)
+      thresholdIncome,
+      round2(thresholdIncome + pensionInput)
     );
-    const annualAllowanceBreached = totalPensionContrib > annualAllowance;
+    const annualAllowanceBreached = pensionInput > annualAllowance;
 
     // ── Tax and NI (with fiscal-drag-adjusted thresholds) ─────────────────
     // thresholdScale > 1 means bands have grown (less drag); < 1 means compressed (more drag).
-    // Income tax covers salary (after sacrifice) plus any state pension; NI is
-    // on earnings only, and the employee pays none from state pension age.
-    const taxResult = calculateIncomeTax(
-      round2(adjustedGross + workingStatePension),
-      thresholdScale
-    );
+    // Income tax covers taxable pay plus any state or DB pension; NI is on
+    // earnings only, and the employee pays none from state pension age.
+    const taxResult = calculateIncomeTax(thresholdIncome, thresholdScale);
     const niResult = calculateNationalInsurance(adjustedGross, thresholdScale);
     const incomeTax = taxResult.totalTax;
     const employeeNI = pastStatePensionAge ? 0 : niResult.employeeNI.total;
@@ -1177,7 +1406,13 @@ export function projectLifecycle(
 
     // ── Net take-home ───────────────────────────────────────────────────
     const netTakeHome = round2(
-      effectiveIncome + workingStatePension - employeeContrib - incomeTax - employeeNI - slRepayment
+      effectiveIncome +
+        otherTaxableIncome -
+        employeeContrib -
+        db.memberContribution -
+        incomeTax -
+        employeeNI -
+        slRepayment
     );
 
     // ── Debt payments ───────────────────────────────────────────────────
@@ -1283,6 +1518,12 @@ export function projectLifecycle(
     if (accWindfallAmt > 0) {
       giaBal = round2(giaBal + accWindfallAmt);
       costBasis = round2(costBasis + accWindfallAmt);
+    }
+    // Tax-free cash from a DB scheme taken while still working is invested the
+    // same way: into the GIA at cost, moved into the ISA over time by bed and ISA.
+    if (db.lumpTaxFree > 0) {
+      giaBal = round2(giaBal + db.lumpTaxFree);
+      costBasis = round2(costBasis + db.lumpTaxFree);
     }
 
     // ── One-off expenses ────────────────────────────────────────────────
@@ -1428,6 +1669,7 @@ export function projectLifecycle(
       employeeContribution: employeeContrib,
       employerContribution: employerContrib,
       adjustedGrossIncome: adjustedGross,
+      pensionInput,
       annualAllowance,
       annualAllowanceBreached,
       incomeTax,
@@ -1435,6 +1677,7 @@ export function projectLifecycle(
       employerNI,
       studentLoanRepayment: slRepayment,
       statePensionGross: workingStatePension,
+      dbPension: dbRowSummary(db),
       netTakeHome,
 
       mortgagePayment: mortgagePaymentThisYear,
@@ -1473,6 +1716,7 @@ export function projectLifecycle(
         // Rough tax due when drawn (basic rate on the taxable part), display only.
         estimatedTaxOnWithdrawal: estimatePensionWithdrawalTax(pensionBal, {
           taxFreeShare: uncrystallisedTaxFreeShare,
+          remainingLSA: lsaRemaining,
         }),
       },
       isa: {
@@ -1553,9 +1797,13 @@ export function projectLifecycle(
     // annual subscription limit, remainder into the GIA at cost. Returns the
     // ISA headroom consumed, so the same-year bed-and-ISA step doesn't reuse it.
     function applyPCLS() {
-      const pclsResult = calculatePCLS(pensionBal, { pclsPercentage: pclsPct });
+      // Capped by the Lump Sum Allowance still unused, which is less than the
+      // full allowance if a DB scheme has already paid tax-free cash.
+      const wanted = round2(pensionBal * pclsPct);
+      const pclsResult = calculatePCLS(pensionBal, { pclsAmount: Math.min(wanted, lsaRemaining) });
       pclsLumpSum = pclsResult.lumpSum;
-      pclsCapped = pclsResult.lumpSumCapped;
+      pclsCapped = wanted > pclsLumpSum + 0.005;
+      lsaRemaining = round2(lsaRemaining - pclsLumpSum);
       pensionBal = pclsResult.crystallisedFund;
       const toISA = Math.min(pclsLumpSum, ISA_LIMIT);
       const toGIA = round2(pclsLumpSum - toISA);
@@ -1581,11 +1829,10 @@ export function projectLifecycle(
     retEntryMortgage = mortgageBalance;
     retEntryUnsecured = round2(debts.reduce((s, d) => s + d.balance, 0));
 
-    // Track remaining Lump Sum Allowance across retirement years (UFPLS path only).
-    // Under UFPLS the tax-free component of each withdrawal counts against this £268,275
-    // lifetime cap; once exhausted, every £1 withdrawn becomes fully taxable income.
-    // The PCLS path consumes the LSA upfront via calculatePCLS, so no tracking needed there.
-    let remainingLSA = takePCLS ? 0 : PENSION_CONSTANTS.lumpSumAllowance;
+    // The Lump Sum Allowance left (lsaRemaining, shared with any DB lump sums)
+    // also caps UFPLS: the tax-free part of each withdrawal counts against it,
+    // and once it is used up every £1 withdrawn is taxable. On the PCLS path the
+    // pot is already crystallised, so withdrawals never use it.
 
     // ── Voluntary Class 3 NI top-up target ───────────────────────────────────
     // Fill the gap toward the 35 qualifying years for the full state pension by
@@ -1676,6 +1923,10 @@ export function projectLifecycle(
         spClaimCumInfl = cumulInflation;
         spClaimCumTriplelock = cumulTriplelock;
       }
+
+      // Defined benefit pensions: no longer building up; deferred schemes grow by
+      // their increases until paid, then pay a guaranteed income.
+      const db = advanceDbSchemes(rAge, yrRet, true, false, 0);
 
       // Annuity income already in payment this year (set at purchase below for
       // the purchase year itself). Inflation-linked follows this year's
@@ -1857,15 +2108,20 @@ export function projectLifecycle(
               : finalNiYears >= minimumQualifyingYears
                 ? round2(computeStatePension(finalNiYears) * cumulTriplelock * spDeferralUplift)
                 : 0;
-          const spPlannedNet = round2(
-            spPlanned - calculateIncomeTax(spPlanned, retThresholdScale).totalTax
+          // Any DB pensions are guaranteed income too: count what they pay, or
+          // will pay once taken, alongside the state pension.
+          const guaranteedPlanned = round2(spPlanned + dbPlannedGross());
+          const guaranteedPlannedNet = round2(
+            guaranteedPlanned - calculateIncomeTax(guaranteedPlanned, retThresholdScale).totalTax
           );
           const needNet = round2(
-            Math.max(0, annuityCfg.amountReal * cumulInflation - spPlannedNet)
+            Math.max(0, annuityCfg.amountReal * cumulInflation - guaranteedPlannedNet)
           );
-          // Gross up for income tax, stacked on top of the state pension.
+          // Gross up for income tax, stacked on top of the guaranteed income.
           targetIncome =
-            needNet > 0 ? pensionGrossForNet(needNet, Infinity, spPlanned, retThresholdScale) : 0;
+            needNet > 0
+              ? pensionGrossForNet(needNet, Infinity, guaranteedPlanned, retThresholdScale)
+              : 0;
         }
         const rate = annuityCfg.rate ?? illustrativeAnnuityRate(rAge, annuityCfg.inflationLinked);
         annuityResult.rate = rate;
@@ -1882,16 +2138,16 @@ export function projectLifecycle(
           let slice = wantedPrice;
           if (!takePCLS) {
             const grossedUp = wantedPrice / 0.75;
-            slice = 0.25 * grossedUp <= remainingLSA ? grossedUp : wantedPrice + remainingLSA;
+            slice = 0.25 * grossedUp <= lsaRemaining ? grossedUp : wantedPrice + lsaRemaining;
           }
           slice = round2(Math.min(slice, pensionBal));
-          const taxFreeCash = takePCLS ? 0 : round2(Math.min(0.25 * slice, remainingLSA));
+          const taxFreeCash = takePCLS ? 0 : round2(Math.min(0.25 * slice, lsaRemaining));
           const price = round2(slice - taxFreeCash);
           pensionBal = round2(pensionBal - slice);
           if (taxFreeCash > 0) {
             // Same destination as a PCLS: ISA up to this year's remaining headroom,
             // the rest into the GIA at cost.
-            remainingLSA = round2(remainingLSA - taxFreeCash);
+            lsaRemaining = round2(lsaRemaining - taxFreeCash);
             const toISA = round2(Math.min(taxFreeCash, Math.max(0, ISA_LIMIT - pclsToISAThisYear)));
             isaBal = round2(isaBal + toISA);
             giaBal = round2(giaBal + taxFreeCash - toISA);
@@ -1915,6 +2171,17 @@ export function projectLifecycle(
         // Otherwise the pension is already empty: nothing bought, coverage stays 0.
       }
 
+      // ── DB tax-free cash ──────────────────────────────────────────────────
+      // Like a PCLS: into the ISA up to this year's remaining headroom, the rest
+      // into the GIA at cost — before the drawdown, so it can fund this year.
+      if (db.lumpTaxFree > 0) {
+        const toISA = round2(Math.min(db.lumpTaxFree, Math.max(0, ISA_LIMIT - pclsToISAThisYear)));
+        isaBal = round2(isaBal + toISA);
+        giaBal = round2(giaBal + db.lumpTaxFree - toISA);
+        costBasis = round2(costBasis + db.lumpTaxFree - toISA);
+        pclsToISAThisYear = round2(pclsToISAThisYear + toISA);
+      }
+
       // ── Voluntary Class 3 NI purchase (this year) ─────────────────────────
       // A bridge year (before state pension age) buys one qualifying year while
       // any remain to buy. The cost joins the funding need below at LOWEST
@@ -1929,18 +2196,19 @@ export function projectLifecycle(
       // Mortgage, unsecured debt payments, and one-off expenses are added on top of
       // living expenses so the full drawdown need is accounted for. Any voluntary
       // Class 3 cost is added last (lowest priority).
-      // Guaranteed income is the state pension plus any annuity, taxed together
-      // (both are pension income; the annuity stacks on top). It is netted
-      // against the whole year's need — living costs, mortgage, debts, one-offs
-      // and Class 3 — and anything left over is saved (below), not lost.
-      const guaranteedGross = round2(spGross + annuityGross);
-      const guaranteedNet =
-        annuityGross > 0
-          ? round2(
-              guaranteedGross - calculateIncomeTax(guaranteedGross, retThresholdScale).totalTax
-            )
-          : spNet;
-      const annuityNet = round2(guaranteedNet - spNet);
+      // Guaranteed income is the state pension, any DB pensions and any annuity,
+      // taxed together (all pension income; DB stacks on the state pension and
+      // the annuity on top of both). It is netted against the whole year's need
+      // — living costs, mortgage, debts, one-offs and Class 3 — and anything left
+      // over is saved (below), not lost.
+      const netOf = (gross) =>
+        round2(gross - calculateIncomeTax(gross, retThresholdScale).totalTax);
+      const spDbGross = round2(spGross + db.gross + db.lumpTaxable);
+      const spDbNet = spDbGross > spGross ? netOf(spDbGross) : spNet;
+      const guaranteedGross = round2(spDbGross + annuityGross);
+      const guaranteedNet = annuityGross > 0 ? netOf(guaranteedGross) : spDbNet;
+      const dbNet = round2(spDbNet - spNet);
+      const annuityNet = round2(guaranteedNet - spDbNet);
       const totalNeed = round2(
         targetExpenses +
           mortgagePaymentThisRetYear +
@@ -1955,10 +2223,10 @@ export function projectLifecycle(
       // PCLS mode: the fund is fully crystallised — every £1 withdrawn is taxable income.
       // UFPLS mode: each £1 is [min(25%, LSA remaining / gross)] tax-free + rest taxable.
       // The step-1 limit is the gross needed so the taxable portion exactly fills the PA.
-      //   • LSA exhausted (remainingLSA = 0): 100% taxable → gross = taxFreeRoom
+      //   • LSA exhausted (lsaRemaining = 0): 100% taxable → gross = taxFreeRoom
       //   • LSA ≥ taxFreeRoom/3: normal 25%/75% split → gross = taxFreeRoom / 0.75
       //   • LSA < taxFreeRoom/3: use all remaining LSA, rest taxable
-      //       taxable = gross − remainingLSA = taxFreeRoom → gross = taxFreeRoom + remainingLSA
+      //       taxable = gross − lsaRemaining = taxFreeRoom → gross = taxFreeRoom + lsaRemaining
       // Skipped entirely before the pension is accessible (NMPA) — the pot is
       // left to grow and spending is met from GIA/ISA below.
       let tfPension = 0;
@@ -1969,20 +2237,20 @@ export function projectLifecycle(
         let step1Limit;
         if (takePCLS || taxFreeRoom <= 0) {
           step1Limit = taxFreeRoom;
-        } else if (remainingLSA <= 0) {
+        } else if (lsaRemaining <= 0) {
           step1Limit = taxFreeRoom; // fully taxable
-        } else if (remainingLSA >= taxFreeRoom / 3) {
+        } else if (lsaRemaining >= taxFreeRoom / 3) {
           step1Limit = round2(taxFreeRoom / 0.75); // normal UFPLS split
         } else {
-          step1Limit = round2(taxFreeRoom + remainingLSA); // exhaust remaining LSA
+          step1Limit = round2(taxFreeRoom + lsaRemaining); // exhaust remaining LSA
         }
         tfPension = round2(Math.min(remaining, Math.min(step1Limit, pensionBal)));
         pensionBal = round2(pensionBal - tfPension);
         remaining = round2(remaining - tfPension);
 
         // Compute the tax-free component and consume from the LSA.
-        step1TaxFree = takePCLS ? 0 : round2(Math.min(0.25 * tfPension, remainingLSA));
-        if (!takePCLS) remainingLSA = round2(Math.max(0, remainingLSA - step1TaxFree));
+        step1TaxFree = takePCLS ? 0 : round2(Math.min(0.25 * tfPension, lsaRemaining));
+        if (!takePCLS) lsaRemaining = round2(Math.max(0, lsaRemaining - step1TaxFree));
       }
       // Only the taxable portion counts as income for CGT band determination.
       const tfPensionIncome = round2(tfPension - step1TaxFree);
@@ -2050,9 +2318,9 @@ export function projectLifecycle(
       if (pensionAccessible && remaining > 0 && pensionBal > 0) {
         const gross = takePCLS
           ? pensionGrossForNet(remaining, pensionBal, incomeForCGT, retThresholdScale)
-          : ufplsGrossForNet(remaining, pensionBal, incomeForCGT, retThresholdScale, remainingLSA);
-        step5TaxFree = takePCLS ? 0 : round2(Math.min(0.25 * gross, remainingLSA));
-        if (!takePCLS) remainingLSA = round2(Math.max(0, remainingLSA - step5TaxFree));
+          : ufplsGrossForNet(remaining, pensionBal, incomeForCGT, retThresholdScale, lsaRemaining);
+        step5TaxFree = takePCLS ? 0 : round2(Math.min(0.25 * gross, lsaRemaining));
+        if (!takePCLS) lsaRemaining = round2(Math.max(0, lsaRemaining - step5TaxFree));
         const taxableIncome = round2(gross - step5TaxFree);
         const taxablePensionTax = round2(
           calculateIncomeTax(incomeForCGT + taxableIncome, retThresholdScale).totalTax -
@@ -2180,6 +2448,8 @@ export function projectLifecycle(
         unsecuredDebtPayments: retUnsecuredPayments,
         statePensionGross: spGross,
         statePensionNet: spNet,
+        dbPension: dbRowSummary(db),
+        dbPensionNet: dbNet,
         annuityGross,
         annuityNet,
         annuityPurchase: annuityPurchaseThisYear,
@@ -2218,7 +2488,7 @@ export function projectLifecycle(
               ? estimatePensionWithdrawalTax(pensionBal, { taxFreeShare: 0 })
               : estimatePensionWithdrawalTax(pensionBal, {
                   taxFreeShare: uncrystallisedTaxFreeShare,
-                  remainingLSA: takePCLS ? PENSION_CONSTANTS.lumpSumAllowance : remainingLSA,
+                  remainingLSA: lsaRemaining,
                 }),
         },
         isa: {
@@ -2316,6 +2586,19 @@ export function projectLifecycle(
       statePensionStartAge: summaryStartAge,
       statePensionEligibleAtRetirement: actualRetirementAge >= statePensionAge,
       annuity: annuityResult,
+      // Each DB scheme: when it was (or will be) paid, the yearly pension then
+      // and any lump sum, in cash and today's money. startAge is null if the
+      // scheme is not paid within the projection.
+      dbPensions: dbStates.map((st) => ({
+        label: st.scheme.label,
+        status: st.scheme.status,
+        startAge: st.startAge,
+        pensionAtStart: st.pensionAtStart,
+        pensionAtStartReal:
+          st.pensionAtStart === null ? null : round2(st.pensionAtStart / st.cumulInflationAtStart),
+        lumpSum: st.lumpSum,
+        lumpSumReal: round2(st.lumpSum / st.cumulInflationAtStart),
+      })),
     },
     taxYear: TAX_YEAR,
   };
