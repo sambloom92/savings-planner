@@ -21,6 +21,7 @@ import { FanChart } from './FanChart.jsx';
 import { fmtGBPLarge } from './formatters.js';
 import { illustrativeAnnuityRate } from './ukAnnuity.js';
 import { DB_CONSTANTS, dbPaymentFactor } from './ukDefinedBenefit.js';
+import { lifeExpectancy, survivalToAge } from './ukMortality.js';
 
 // ── Formatters ────────────────────────────────────────────────────────────────
 const fmtGBP = (n) => `£${Math.round(Math.abs(n)).toLocaleString('en-GB')}`;
@@ -1699,10 +1700,6 @@ function EventsEditor({ p, set }) {
   );
 }
 
-// Read-only display of the tax-optimal employee contribution (Auto mode).
-// Solves the optimal salary-sacrifice rate from the current salary and employer
-// rate, then explains what it did — the value used by the projection comes from
-// the same solver via effectiveEmployeePensionRate.
 // ── Defined benefit scheme editor (Pension tab) ─────────────────────────────
 // Last number in a typed value, so "1/54" reads as 54.
 const parseLastNumber = (str) => {
@@ -1978,6 +1975,34 @@ function DbPensionsEditor({ p, set, dbSummary }) {
   );
 }
 
+// How long the ONS life tables expect someone of this sex and year of birth to
+// live — context for the lifetime-solvency figure and the model horizon.
+function LifeExpectancyReadout({ p }) {
+  const birthYear = CURRENT_YEAR - p.currentAge;
+  const averageAge = Math.round(p.currentAge + lifeExpectancy(p.currentAge, p.sex, birthYear));
+  // Oldest age that at least one in four people of this cohort reach.
+  let quarterAge = p.currentAge;
+  while (survivalToAge(p.currentAge, quarterAge + 1, p.sex, birthYear) >= 0.25) quarterAge++;
+  const who = p.sex === 'neutral' ? 'Someone' : p.sex === 'female' ? 'A woman' : 'A man';
+  return (
+    <div
+      style={{
+        color: 'var(--text-muted)',
+        fontSize: 11,
+        fontFamily: 'var(--font-body)',
+        lineHeight: 1.5,
+      }}
+    >
+      {who} born in {birthYear} lives to {averageAge} on average; 1 in 4 reach {quarterAge} (ONS
+      life tables).
+    </div>
+  );
+}
+
+// Read-only display of the tax-optimal employee contribution (Auto mode).
+// Solves the optimal salary-sacrifice rate from the current salary and employer
+// rate, then explains what it did — the value used by the projection comes from
+// the same solver via effectiveEmployeePensionRate.
 function AutoContributionReadout({ p }) {
   let auto;
   const db = dbFirstYear(p);
@@ -3008,7 +3033,7 @@ function TabContent({ tab, p, set, derived, topUp, annuity, dbSummary }) {
                 Sex (for survival)
                 <HelpTip
                   title="Sex (for survival)"
-                  text="Sets the mortality table used for the lifetime-solvency figure — the chance of never running out of money while you're alive. Female mortality is lower, so a longer expected lifespan gives more exposure to late shortfalls. 'Neutral' blends the male and female rates. This affects only the lifetime-solvency number, never the projection itself or the fan bands. It's a rough population estimate, not individual health."
+                  text="Sets the death rates used for the lifetime-solvency figure — the chance of never running out of money while you're alive. They come from the ONS projected life tables (2024-based) for your sex and year of birth, so they include the improvements in life expectancy ONS expects in the years ahead. Women live longer on average, which means more exposure to late shortfalls. 'Neutral' averages the male and female rates. This affects only the lifetime-solvency number, never the projection itself or the fan bands. It's a population average, not your individual health."
                 />
               </span>
               <div
@@ -3047,6 +3072,7 @@ function TabContent({ tab, p, set, derived, topUp, annuity, dbSummary }) {
                 ))}
               </div>
             </div>
+            <LifeExpectancyReadout p={p} />
           </div>
           <Slider
             label="Trials"
@@ -5438,7 +5464,7 @@ Use Available funds to see whether an early-retirement plan can bridge the gap u
           title="Monte Carlo results"
           text={
             `${mcResults ? mcResults.trialCount : 0} trials shown. Each trial varies investment returns (market factor) and inflation / BoE / wage growth (macro factor) using correlated random shocks.\n\n` +
-            'Solvent for life: the chance you never run out of money while still alive — the complement of the lifetime probability of ruin. Each trial that runs dry is weighted by the probability you live to see it (from UK population mortality for the selected sex, set in the Simulation tab), so dying with money left counts as success. Set high enough that the age horizon reaches ~100 for this to be meaningful.\n\n' +
+            'Solvent for life: the chance you never run out of money while still alive — the complement of the lifetime probability of ruin. Each trial that runs dry is weighted by the probability you live to see it (from ONS life tables for your sex and year of birth, set in the Simulation tab), so dying with money left counts as success. Set high enough that the age horizon reaches ~100 for this to be meaningful.\n\n' +
             'Running dry means being unable to meet your target spending — including the bridge years before your pension access age, when a locked pension you cannot yet touch does not count as available. Early access penalties are not modelled.\n\n' +
             'The "to age N" figure is the simpler fixed-horizon view: the fraction of trials solvent all the way to the model horizon, ignoring survival. It is always the more pessimistic of the two.\n\n' +
             'Bands show the 10th–90th percentile range (faint) and 25th–75th range (stronger). Lines show the 5 key percentiles. The dotted curve is the probability of still being alive at each age.\n\n' +
