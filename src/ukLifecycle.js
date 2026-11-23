@@ -78,6 +78,7 @@ import {
   plannedGuaranteedGross,
   pensionGrossForTaxable,
   drawPensionGross,
+  drawInheritedWithinAllowance,
   drawInheritedTaxFree,
   drawInheritedTaxable,
   growInheritedPension,
@@ -1230,6 +1231,10 @@ export function projectLifecycle(
     remaining = step1.remaining;
     // Only the taxable portion counts as income for CGT band determination.
     let incomeForCGT = round2(guaranteedGross + round2(step1.draw - step1.taxFree));
+    // 1b. A taxable inherited pension within any allowance still unused.
+    const step1b = drawInheritedWithinAllowance(P, remaining, incomeForCGT, retThresholdScale);
+    remaining = step1b.remaining;
+    if (step1b.draw > 0) incomeForCGT = round2(incomeForCGT + step1b.draw);
 
     // 2. GIA up to the annual CGT exempt amount.
     const step2 = drawGiaWithinExemption(P, remaining, incomeForCGT, retThresholdScale);
@@ -1267,7 +1272,9 @@ export function projectLifecycle(
     // For UFPLS: may be less than 75% of draw once the LSA approaches exhaustion.
     // Any taxable inherited pension is taxable income too.
     let pensionTaxableIncome = round2(totalPensionDraw - step1.taxFree - step5.taxFree);
-    if (step4b.draw > 0) pensionTaxableIncome = round2(pensionTaxableIncome + step4b.draw);
+    const inheritedTaxableDraw = round2(step1b.draw + step4b.draw);
+    if (inheritedTaxableDraw > 0)
+      pensionTaxableIncome = round2(pensionTaxableIncome + inheritedTaxableDraw);
     const totalIncomeTax = round2(
       calculateIncomeTax(guaranteedGross + pensionTaxableIncome, retThresholdScale).totalTax
     );
@@ -1404,7 +1411,7 @@ export function projectLifecycle(
         P,
         openInherited,
         step3a.draw,
-        step4b.draw,
+        inheritedTaxableDraw,
         inheritedGrowth
       );
     yearlyBreakdown.push(decorateSurvivorRow(retRow, i, P, 'retired'));

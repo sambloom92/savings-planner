@@ -1477,6 +1477,19 @@ export function drawPensionGross(P, gross, incomeForCGT, scale) {
   return { draw, taxFree, net: round2(draw - tax) };
 }
 
+/**
+ * Step 1b. A taxable inherited pension (partner died at 75 or over) within
+ * whatever personal allowance is left after `taxableSoFar` of income — so a
+ * survivor with no pension of their own doesn't waste their allowance.
+ */
+export function drawInheritedWithinAllowance(P, remaining, taxableSoFar, scale) {
+  if (!P.inherited?.taxable || remaining <= 0) return { draw: 0, remaining };
+  const room = Math.max(0, round2(PERSONAL_ALLOWANCE * scale) - taxableSoFar);
+  const draw = round2(Math.min(remaining, room, P.inherited.taxable));
+  P.inherited.taxable = round2(P.inherited.taxable - draw);
+  return { draw, remaining: round2(remaining - draw) };
+}
+
 /** Step 3a. An inherited pension paid out tax-free (partner died before 75). */
 export function drawInheritedTaxFree(P, remaining) {
   if (!P.inherited?.taxFree) return { draw: 0, remaining };
