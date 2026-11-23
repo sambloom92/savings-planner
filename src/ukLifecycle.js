@@ -341,6 +341,8 @@ export function projectLifecycle(
     willsToEachOther = true,
     survivorSpendingShare = COUPLE_DEFAULTS.survivorSpendingShare,
     death = null,
+    // Couple mode: life insurance policies (see policyInForce).
+    lifePolicies = [],
   } = profile;
 
   if (!Number.isInteger(currentYear) || currentYear < 1990)
@@ -406,9 +408,128 @@ export function projectLifecycle(
     if (D === null) throw new RangeError("death.person must be 'self' or 'partner'");
     if (!Number.isInteger(death.age) || death.age < D.currentAge)
       throw new RangeError('death.age must be an integer no younger than that person is now');
-    deathPlan = { D, S: D === self ? partner : self, yearIndex: death.age - D.currentAge };
+    const { extraCover = 0 } = death;
+    assertNonNegativeFinite(extraCover, 'death.extraCover');
+    deathPlan = {
+      D,
+      S: D === self ? partner : self,
+      yearIndex: death.age - D.currentAge,
+      extraCover,
+    };
   }
   const estates = [];
+
+  // ── Life insurance (couple mode) ──────────────────────────────────────────
+  // Each policy pays its sum assured if the person it covers dies while it is
+  // in force: 'level' term pays the same throughout, 'decreasing' term falls
+  // in a straight line to nothing at the end of the term (a conservative
+  // stand-in for the repayment-mortgage curve real policies follow), and
+  // 'wholeOfLife' has no end. A 'joint' policy pays on the first death. The
+  // sum assured and premium are fixed in cash, as on a quote. Premiums are a
+  // household cost while the policy runs. On a payout the money goes to the
+  // mortgage or the survivor's savings (`payTo`), straight to the survivor if
+  // written in trust, otherwise through the estate (ukEstate.js).
+  const LIFE_POLICY_TYPES = ['level', 'decreasing', 'wholeOfLife'];
+  if (!Array.isArray(lifePolicies)) throw new TypeError('lifePolicies must be an array');
+  if (lifePolicies.length > 0 && !couple)
+    throw new RangeError('lifePolicies need a partner: only couple mode models a payout');
+  const policies = lifePolicies
+    .map((pol, idx) => {
+      const name = `lifePolicies[${idx}]`;
+      if (pol == null || typeof pol !== 'object') throw new TypeError(`${name} must be an object`);
+      const {
+        label = '',
+        enabled = true,
+        type,
+        lifeOf,
+        sumAssured,
+        termYears = null,
+        monthlyPremium = 0,
+        inTrust = true,
+        payTo = 'savings',
+      } = pol;
+      if (!LIFE_POLICY_TYPES.includes(type))
+        throw new RangeError(`${name}.type must be one of ${LIFE_POLICY_TYPES.join(', ')}`);
+      if (!['self', 'partner', 'joint'].includes(lifeOf))
+        throw new RangeError(`${name}.lifeOf must be 'self', 'partner' or 'joint'`);
+      assertNonNegativeFinite(sumAssured, `${name}.sumAssured`);
+      assertNonNegativeFinite(monthlyPremium, `${name}.monthlyPremium`);
+      if (type !== 'wholeOfLife') assertPositiveInteger(termYears, `${name}.termYears`);
+      if (typeof inTrust !== 'boolean') throw new TypeError(`${name}.inTrust must be a boolean`);
+      if (payTo !== 'savings' && payTo !== 'mortgage')
+        throw new RangeError(`${name}.payTo must be 'savings' or 'mortgage'`);
+      return {
+        label,
+        enabled,
+        type,
+        lifeOf,
+        sumAssured,
+        termYears,
+        monthlyPremium,
+        inTrust,
+        payTo,
+      };
+    })
+    .filter((pol) => pol.enabled !== false);
+
+  /** Whether a policy is still running in projection year i. */
+  function policyInForce(pol, i) {
+    if (pol.paidOut) return false;
+    if (pol.type !== 'wholeOfLife' && i >= pol.termYears) return false;
+    if (pol.lifeOf === 'joint') return estates.length === 0; // ends at the first death
+    return (pol.lifeOf === 'self' ? self : partner).diedAt === null;
+  }
+
+  /** This year's life cover premiums (a household cost). */
+  function lifeCoverPremiums(i) {
+    let total = 0;
+    for (const pol of policies) if (policyInForce(pol, i)) total += pol.monthlyPremium * 12;
+    return round2(total);
+  }
+
+  /** Lump sums paid on D's death in year i: life cover, death-in-service, and
+   *  any extra cover being tested (cover-gap search, today's money). */
+  function coverOnDeath(D, i) {
+    const cover = [];
+    for (const pol of policies) {
+      if (pol.lifeOf !== D.id && pol.lifeOf !== 'joint') continue;
+      if (!policyInForce(pol, i)) continue;
+      const amount =
+        pol.type === 'decreasing'
+          ? round2(pol.sumAssured * Math.max(0, 1 - i / pol.termYears))
+          : pol.sumAssured;
+      pol.paidOut = true;
+      if (amount > 0)
+        cover.push({
+          kind: 'lifeCover',
+          label: pol.label,
+          amount,
+          inTrust: pol.inTrust,
+          payTo: pol.payTo,
+        });
+    }
+    // Death-in-service: paid by the pension scheme, outside the estate, if the
+    // person dies while still working.
+    if (D.retiredAt === null && D.deathInServiceMultiple > 0) {
+      const salary = D.income * D.hoursFractionAtAge(D.currentAge + i);
+      cover.push({
+        kind: 'deathInService',
+        label: 'Death-in-service',
+        amount: round2(D.deathInServiceMultiple * salary),
+        inTrust: true,
+        payTo: 'savings',
+      });
+    }
+    if (deathPlan?.extraCover > 0)
+      cover.push({
+        kind: 'extra',
+        label: 'Extra cover',
+        amount: round2(deathPlan.extraCover * econ.cumulInflation),
+        inTrust: true,
+        payTo: 'savings',
+      });
+    return cover;
+  }
   // Household spending falls to the survivor's share after a death.
   const spendingShare = () => (estates.length > 0 ? survivorSpendingShare : 1);
 
@@ -925,8 +1046,10 @@ export function projectLifecycle(
     const livingExpenses = round2(annualLivingExpenses * share * econ.cumulInflation);
     // Savings = what's left of take-home after debts and living costs.
     // Floored at 0 — overspend is not modelled; the user should adjust inputs.
+    // Life cover premiums (couple mode) are a household cost too.
+    const premiums = lifeCoverPremiums(i);
     const availableForSavings = round2(
-      Math.max(0, pay.netTakeHome - totalDebtPayments - livingExpenses)
+      Math.max(0, pay.netTakeHome - totalDebtPayments - livingExpenses - premiums)
     );
 
     // Start-of-year pot snapshots, before any event or transfer this year.
@@ -1085,6 +1208,7 @@ export function projectLifecycle(
     };
     if (P.inherited)
       row.inheritedPension = inheritedPensionRow(P, openingInherited, 0, 0, inheritedGrowth);
+    if (premiums > 0) row.lifeCoverPremiums = premiums;
     yearlyBreakdown.push(decorateSurvivorRow(row, i, P, 'working'));
   }
 
@@ -1192,6 +1316,7 @@ export function projectLifecycle(
     // spending is always funded first; the year is only "bought" if the whole
     // need — including this cost — is met (see after the drawdown).
     const class3Cost = class3CostThisYear(P, rAge, econ);
+    const premiums = lifeCoverPremiums(i);
 
     // ── Drawdown strategy ─────────────────────────────────────────────────
     // Priority: tax-free pension → CGT-exempt GIA harvest → ISA → taxable GIA → taxable pension
@@ -1215,7 +1340,8 @@ export function projectLifecycle(
         mortgagePaymentThisRetYear +
         retUnsecuredPayments +
         retExpenseAmt +
-        class3Cost
+        class3Cost +
+        premiums
     );
     let remaining = round2(Math.max(0, totalNeed - guaranteedNet));
     const incomeSurplus = round2(Math.max(0, guaranteedNet - totalNeed));
@@ -1406,6 +1532,7 @@ export function projectLifecycle(
       retRow.pclsCapped = P.pcls.capped;
     }
     retRow.pensionAccessible = pensionAccessible;
+    if (premiums > 0) retRow.lifeCoverPremiums = premiums;
     if (P.inherited)
       retRow.inheritedPension = inheritedPensionRow(
         P,
@@ -1549,6 +1676,7 @@ export function projectLifecycle(
     const expenseAmt = expense?.nominal ?? 0;
     const income = round2(st[0].net + st[1].net);
     const class3Total = round2(st[0].class3Cost + st[1].class3Cost);
+    const premiums = lifeCoverPremiums(i);
 
     let savings = 0;
     let availableForSavings = null;
@@ -1559,7 +1687,7 @@ export function projectLifecycle(
     if (allWorking) {
       // Savings are what's left; a one-off expense is funded from them, then
       // from both GIAs (lower income first), then both ISAs.
-      availableForSavings = round2(Math.max(0, income - debtPayments - spending));
+      availableForSavings = round2(Math.max(0, income - debtPayments - spending - premiums));
       let cash = availableForSavings;
       let owed = expenseAmt;
       expenseFunding = { fromSavings: 0, fromGIAGross: 0, giaCGT: 0, fromISA: 0, shortfall: 0 };
@@ -1591,7 +1719,9 @@ export function projectLifecycle(
       savings = cash;
     } else {
       // Pooled income against the whole year's need, including any Class 3 top-up.
-      const cashFlow = round2(income - debtPayments - spending - expenseAmt - class3Total);
+      const cashFlow = round2(
+        income - debtPayments - spending - premiums - expenseAmt - class3Total
+      );
       if (cashFlow >= 0) savings = cashFlow;
       else remaining = round2(-cashFlow);
     }
@@ -1756,6 +1886,7 @@ export function projectLifecycle(
       guardrailAction,
       mortgagePayment: mort.payment,
       unsecuredDebtPayments: unsec.payments,
+      lifeCoverPremiums: premiums,
       netIncome: income,
       availableForSavings,
       saved: savings,
@@ -2001,16 +2132,31 @@ export function projectLifecycle(
     // ── A death ("what if one of us dies?") ─────────────────────────────
     if (deathPlan && i === deathPlan.yearIndex && deathPlan.D.diedAt === null) {
       const { D, S } = deathPlan;
-      estates.push(
-        settleDeath(D, S, {
-          age: D.currentAge + i,
-          survivorAge: S.currentAge + i,
-          year,
-          partnership,
-          willsToEachOther,
-          econ,
-        })
-      );
+      const estate = settleDeath(D, S, {
+        age: D.currentAge + i,
+        survivorAge: S.currentAge + i,
+        year,
+        partnership,
+        willsToEachOther,
+        econ,
+        cover: coverOnDeath(D, i),
+      });
+      // Cover reaching the survivor: towards the mortgage where the policy
+      // says so (if it has started), the rest into their savings.
+      for (const c of estate.coverPaid) {
+        let amount = c.amount;
+        if (c.payTo === 'mortgage' && mortgageStarted && mortgageBalance > 0) {
+          const repaid = round2(Math.min(amount, mortgageBalance));
+          mortgageBalance = round2(mortgageBalance - repaid);
+          estate.lifeCover.toMortgage = round2(estate.lifeCover.toMortgage + repaid);
+          amount = round2(amount - repaid);
+        }
+        if (amount > 0) {
+          investInGIA(S, amount);
+          estate.lifeCover.toSavings = round2(estate.lifeCover.toSavings + amount);
+        }
+      }
+      estates.push(estate);
     }
     const alive = alivePeople();
 

@@ -11,6 +11,7 @@ import {
 } from 'react';
 import { createPortal } from 'react-dom';
 import { projectLifecycle, LIFECYCLE_CONSTANTS } from './ukLifecycle.js';
+import { solveCoverGap } from './ukProtection.js';
 import { NI_THRESHOLDS } from './ukNationalInsurance.js';
 import {
   optimalEmployeePensionContribution,
@@ -55,6 +56,7 @@ const TAB_HELP = {
   Retire: 'Retirement spending target, model horizon and tax-free lump sum',
   Simulation: 'Monte Carlo settings (trials, volatility, downturns) and mortality basis',
   Household: 'Couple mode: partnership type, wills and spending after a death',
+  Protection: 'Couple mode: life cover policies and what the survivor would need',
 };
 
 // ── Couple mode ───────────────────────────────────────────────────────────────
@@ -84,6 +86,7 @@ const PERSON_KEYS = new Set([
   'studentLoanPlan',
   'studentLoanBalance',
   'studentLoanYears',
+  'deathInServiceMultiple',
 ]);
 
 const PARTNER_DEFAULTS = {
@@ -110,6 +113,7 @@ const PARTNER_DEFAULTS = {
   studentLoanPlan: '',
   studentLoanBalance: 0,
   studentLoanYears: 0,
+  deathInServiceMultiple: 0,
 };
 
 // The partner's inputs laid over the shared ones, so editors and helpers
@@ -122,7 +126,7 @@ const PARTNER_TABS = ['Personal', 'Pension', 'Savings', 'Events', 'Debts', 'Simu
 function tabsFor(couple, scope) {
   if (!couple) return TABS;
   if (scope === 'partner') return PARTNER_TABS;
-  return [TABS[0], 'Household', ...TABS.slice(1)];
+  return [TABS[0], 'Household', 'Protection', ...TABS.slice(1)];
 }
 
 const PLAN_OPTIONS = [
@@ -252,7 +256,50 @@ const DEFAULTS = {
   annuityOwner: 'self', // whose pension buys the annuity
   // "What if one of us dies?" on the deterministic chart.
   deathScenario: { enabled: false, person: 'partner', age: 80 },
+  // Protection (couple mode): death-in-service (× salary, per person) and
+  // life cover policies (see LIFE_POLICY_NEW).
+  deathInServiceMultiple: 0,
+  lifePolicies: [],
 };
+
+// A new life cover policy in the Protection tab.
+const LIFE_POLICY_NEW = {
+  label: '',
+  enabled: true,
+  type: 'level', // 'level' | 'decreasing' | 'wholeOfLife'
+  lifeOf: 'self', // 'self' | 'partner' | 'joint' (pays on the first death)
+  sumAssured: 250_000,
+  termYears: 25,
+  monthlyPremium: 25,
+  inTrust: true,
+  payTo: 'savings', // 'savings' | 'mortgage'
+};
+const LIFE_POLICY_TYPES = [
+  { value: 'level', label: 'Level term' },
+  { value: 'decreasing', label: 'Decreasing term' },
+  { value: 'wholeOfLife', label: 'Whole of life' },
+];
+const LIFE_POLICY_LIVES = [
+  { value: 'self', label: 'Your life' },
+  { value: 'partner', label: "Your partner's life" },
+  { value: 'joint', label: 'Joint (pays on the first death)' },
+];
+
+// Life cover policies for the engine (enabled ones, clamped).
+function buildLifePolicies(p) {
+  return (p.lifePolicies ?? [])
+    .filter((pol) => pol.enabled !== false)
+    .map((pol) => ({
+      label: pol.label ?? '',
+      type: pol.type,
+      lifeOf: pol.lifeOf,
+      sumAssured: Math.max(0, pol.sumAssured),
+      termYears: clampInt(pol.termYears, 1, 60),
+      monthlyPremium: Math.max(0, pol.monthlyPremium),
+      inTrust: pol.inTrust !== false,
+      payTo: pol.payTo === 'mortgage' ? 'mortgage' : 'savings',
+    }));
+}
 
 // Guardrail sensitivity presets → (band, step) for the engine. Band is how far
 // spending may drift from the sustainable rate before acting; step is the size
@@ -315,6 +362,7 @@ function personProfile(v) {
     dbPensions: buildDbPensions(v),
     studentLoanPlan: v.studentLoanPlan || null,
     employmentChanges: v.employmentChanges,
+    deathInServiceMultiple: v.deathInServiceMultiple ?? 0,
   };
 }
 
@@ -354,6 +402,7 @@ function buildProfile(p, death = null) {
     willsToEachOther: p.willsToEachOther,
     survivorSpendingShare: p.survivorSpendingPct / 100,
     death,
+    lifePolicies: buildLifePolicies(p),
   };
 }
 
@@ -1904,6 +1953,135 @@ function EventsEditor({ p, set, scope = null }) {
   );
 }
 
+// ── Life cover policies (Protection tab, couple mode) ───────────────────────
+function LifePolicyCard({ policy: pol, onChange, onRemove }) {
+  const enabled = pol.enabled !== false;
+  return (
+    <EventCard
+      accent="#f472b6"
+      enabled={enabled}
+      label={pol.label}
+      placeholder="Policy name"
+      onLabel={(v) => onChange({ label: v })}
+      onToggle={() => onChange({ enabled: !enabled })}
+      onRemove={onRemove}
+    >
+      <Select
+        label="Type"
+        value={pol.type}
+        options={LIFE_POLICY_TYPES}
+        onChange={(v) => onChange({ type: v })}
+        help="Level term pays the same sum throughout the term. Decreasing term falls over the term, usually to match a repayment mortgage — modelled here as a straight line to nothing, slightly less than a real policy pays early on. Whole of life pays whenever the death happens, so it's dearer; it's often used to cover an inheritance tax bill."
+      />
+      <Select
+        label="Covers"
+        value={pol.lifeOf}
+        options={LIFE_POLICY_LIVES}
+        onChange={(v) => onChange({ lifeOf: v })}
+        help="Whose death it pays out on. A joint policy pays once, on the first death, and then ends; two single policies cost a little more but leave the survivor still insured."
+      />
+      <Slider
+        label="Sum assured"
+        value={pol.sumAssured}
+        min={0}
+        max={2_000_000}
+        step={5_000}
+        format={fmtGBP}
+        onChange={(v) => onChange({ sumAssured: Math.max(0, v) })}
+        color="#f472b6"
+        allowInput
+        help="The payout, as on your policy schedule. It's fixed in cash, so inflation erodes its value over the term."
+      />
+      {pol.type !== 'wholeOfLife' && (
+        <Slider
+          label="Term remaining"
+          value={pol.termYears}
+          min={1}
+          max={40}
+          step={1}
+          format={fmtYrs}
+          onChange={(v) => onChange({ termYears: Math.round(v) })}
+          color="#f472b6"
+          allowInput
+          help="Years left on the policy, from now. It pays nothing after the term ends."
+        />
+      )}
+      <Slider
+        label="Premium"
+        value={pol.monthlyPremium}
+        min={0}
+        max={500}
+        step={1}
+        format={(v) => `${fmtGBP(v)}/mo`}
+        onChange={(v) => onChange({ monthlyPremium: Math.max(0, v) })}
+        color="#f472b6"
+        allowInput
+        help="What the policy costs each month, from your policy or a quote — the app doesn't price cover, as that depends on your health, smoking and the insurer. Paid by the household while the policy runs."
+      />
+      <Toggle
+        label="Written in trust"
+        value={pol.inTrust ? 'yes' : 'no'}
+        optA={{ value: 'yes', label: 'Yes' }}
+        optB={{ value: 'no', label: 'No' }}
+        onChange={(v) => onChange({ inTrust: v === 'yes' })}
+        help="In trust, the payout goes straight to your chosen beneficiaries, quickly and outside your estate. Not in trust, it's paid into your estate: for a couple living together it counts towards inheritance tax, and without a will it goes to relatives. Insurers set up a trust for free."
+      />
+      <Toggle
+        label="Pays towards"
+        value={pol.payTo}
+        optA={{ value: 'savings', label: 'Savings' }}
+        optB={{ value: 'mortgage', label: 'Mortgage' }}
+        onChange={(v) => onChange({ payTo: v })}
+        help="Mortgage: the payout clears what's left of the mortgage (if it has started) and the rest goes into the survivor's savings. Savings: all of it is invested for the survivor."
+      />
+    </EventCard>
+  );
+}
+
+function LifePoliciesEditor({ p, set }) {
+  const policies = p.lifePolicies ?? [];
+  const update = (i, patch) =>
+    set('lifePolicies')(policies.map((pol, j) => (j === i ? { ...pol, ...patch } : pol)));
+  const premiums = policies
+    .filter((pol) => pol.enabled !== false)
+    .reduce((sum, pol) => sum + pol.monthlyPremium, 0);
+  return (
+    <>
+      <InfoBox>
+        What would the survivor have if one of you died? Add any life cover you hold;
+        death-in-service is set per person on the Pension tab. Then switch on What if one of us
+        dies? under the chart to see the payouts and the cover gap — how much more cover the
+        survivor would need.
+      </InfoBox>
+      {policies.map((pol, i) => (
+        <LifePolicyCard
+          key={i}
+          policy={pol}
+          onChange={(patch) => update(i, patch)}
+          onRemove={() => set('lifePolicies')(policies.filter((_, j) => j !== i))}
+        />
+      ))}
+      <AddEventButton
+        onClick={() => set('lifePolicies')([...policies, { ...LIFE_POLICY_NEW }])}
+        label="+ Add a life cover policy"
+      />
+      {premiums > 0 && (
+        <div
+          style={{
+            color: 'var(--text-muted)',
+            fontSize: 11,
+            fontFamily: 'var(--font-body)',
+            marginTop: 10,
+          }}
+        >
+          Premiums: {fmtGBP(premiums)} a month ({fmtGBP(premiums * 12)} a year), paid while each
+          policy runs.
+        </div>
+      )}
+    </>
+  );
+}
+
 // ── Defined benefit scheme editor (Pension tab) ─────────────────────────────
 // Last number in a typed value, so "1/54" reads as 54.
 const parseLastNumber = (str) => {
@@ -2815,6 +2993,19 @@ function TabContent({ tab, p, set, derived, topUp, annuity, dbSummary, scope = n
             allowance: £60,000. PCLS (tax-free lump sum): up to 25%. Pension accessible from age{' '}
             {p.pensionAccessAge}.
           </InfoBox>
+          {scope && (
+            <Slider
+              label="Death-in-service"
+              value={p.deathInServiceMultiple ?? 0}
+              min={0}
+              max={10}
+              step={1}
+              format={(v) => (v > 0 ? `${v}× salary` : 'None')}
+              onChange={(v) => set('deathInServiceMultiple')(Math.min(20, Math.max(0, v)))}
+              allowInput
+              help="A lump sum your employer's scheme pays if you die while working there, as a multiple of salary (often 2× to 4×; check your scheme booklet). Paid to your partner, normally outside your estate, so no inheritance tax. It stops when you stop working."
+            />
+          )}
           <SecHead>Defined Benefit Pensions</SecHead>
           <DbPensionsEditor p={p} set={set} dbSummary={dbSummary} />
         </>
@@ -3633,6 +3824,9 @@ function TabContent({ tab, p, set, derived, topUp, annuity, dbSummary, scope = n
         </>
       );
 
+    case 'Protection':
+      return <LifePoliciesEditor p={p} set={set} />;
+
     case 'Household':
       return (
         <>
@@ -3987,6 +4181,13 @@ function CoupleYearDetail({ row, mobile }) {
             color="#fb923c"
           />
         )}
+        {row.lifeCoverPremiums > 0 && (
+          <DetailLine
+            label="+ Life cover premiums"
+            value={fmtGBP(row.lifeCoverPremiums)}
+            color="#f472b6"
+          />
+        )}
         {row.oneOffExpense > 0 && (
           <DetailLine
             label={`+ ${row.oneOffExpenseLabels.join(', ') || 'One-off expense'}`}
@@ -4173,6 +4374,13 @@ function SingleYearDetail({ row, mobile = false }) {
               label="− Unsecured debts"
               value={fmtGBP(row.unsecuredDebtPayments)}
               color="#fb923c"
+            />
+          )}
+          {row.lifeCoverPremiums > 0 && (
+            <DetailLine
+              label="− Life cover premiums"
+              value={fmtGBP(row.lifeCoverPremiums)}
+              color="#f472b6"
             />
           )}
           {row.livingExpenses != null && row.livingExpenses > 0 && (
@@ -4390,7 +4598,8 @@ function SingleYearDetail({ row, mobile = false }) {
 
   const mortgagePayment = row.mortgage?.payment ?? 0;
   const unsecuredPayments = row.unsecuredDebtPayments ?? 0;
-  const totalObligations = row.targetNetExpenses + mortgagePayment + unsecuredPayments;
+  const premiums = row.lifeCoverPremiums ?? 0;
+  const totalObligations = row.targetNetExpenses + mortgagePayment + unsecuredPayments + premiums;
   // Guaranteed income (state pension + any annuity), net of its own tax, is
   // netted against the whole year's obligations — as the engine does.
   const spNet = row.statePensionNet ?? 0;
@@ -4475,6 +4684,9 @@ function SingleYearDetail({ row, mobile = false }) {
         )}
         {hasUnsecured && (
           <DetailLine label="+ Unsecured debts" value={fmtGBP(unsecuredPayments)} color="#fb923c" />
+        )}
+        {premiums > 0 && (
+          <DetailLine label="+ Life cover premiums" value={fmtGBP(premiums)} color="#f472b6" />
         )}
         <Divider />
         <DetailLine label="Total obligations" value={fmtGBP(totalObligations)} bold />
@@ -5003,7 +5215,7 @@ export default function App() {
     return pots;
   }
 
-  const { chartData, summary, error, baseline } = useMemo(() => {
+  const { chartData, summary, error, baseline, coverGap } = useMemo(() => {
     try {
       // Couple mode's "what if one of us dies?": the chart shows the survivor's
       // plan, compared with both of you alive (`baseline`).
@@ -5030,6 +5242,8 @@ export default function App() {
       const baseline = whatIf
         ? projectLifecycle(buildProfile(p), rates, pots, retirementOptions)
         : null;
+      // The extra cover the survivor would need for their plan to stay funded.
+      const coverGap = whatIf ? solveCoverGap(profile, rates, pots, retirementOptions) : null;
 
       const toRow = (row) => ({
         age: row.age,
@@ -5069,9 +5283,9 @@ export default function App() {
         });
       }
 
-      return { chartData: data, summary: result.summary, error: null, baseline };
+      return { chartData: data, summary: result.summary, error: null, baseline, coverGap };
     } catch (e) {
-      return { chartData: [], summary: null, error: e.message, baseline: null };
+      return { chartData: [], summary: null, error: e.message, baseline: null, coverGap: null };
     }
   }, [p]);
 
@@ -6771,6 +6985,38 @@ Use Available funds to see whether an early-retirement plan can bridge the gap u
                           value={`${fmtGBP(estate.survivorDbPension)}/yr`}
                           color="#2dd4bf"
                         />
+                      )}
+                      {estate.lifeCover?.paid > 0 && (
+                        <DetailLine
+                          label={
+                            estate.lifeCover.toMortgage > 0
+                              ? `Life cover & death-in-service (${fmtGBP(estate.lifeCover.toMortgage)} cleared the mortgage)`
+                              : 'Life cover & death-in-service'
+                          }
+                          value={fmtGBP(estate.lifeCover.paid)}
+                          color="#f472b6"
+                        />
+                      )}
+                      {coverGap && (
+                        <DetailLine
+                          label="Cover gap (today's £)"
+                          value={
+                            coverGap.fundedWithoutExtra
+                              ? 'None — fully funded'
+                              : coverGap.exceedsMax
+                                ? 'Over £20m'
+                                : fmtGBP(coverGap.gap)
+                          }
+                          color={coverGap.fundedWithoutExtra ? '#34d399' : '#f43f5e'}
+                          bold
+                        />
+                      )}
+                      {coverGap && !coverGap.fundedWithoutExtra && (
+                        <div style={{ color: 'var(--text-muted)', fontSize: 11 }}>
+                          More cover paid on this death that would keep the survivor's plan from
+                          ever running short — on top of any cover above. Add a policy in the
+                          Protection tab to see it close the gap.
+                        </div>
                       )}
                       <div style={{ color: 'var(--text-muted)', fontSize: 11, marginTop: 6 }}>
                         Amounts in the money of the year of the death. Spending falls to{' '}

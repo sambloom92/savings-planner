@@ -25,6 +25,12 @@
  * 2026); DB survivor's pensions don't. The nil-rate band is held at its
  * frozen £325,000 (frozen since 2009, legislated to April 2031).
  *
+ * Life cover and death-in-service lump sums (`cover`): a policy written in
+ * trust, or a pension scheme's death-in-service benefit, is paid straight to
+ * the survivor, outside the estate. A policy not in trust is paid into the
+ * estate as cash — so for a cohabiting couple it counts towards inheritance
+ * tax and, without wills, goes to relatives.
+ *
  * Each death produces an estate snapshot recording what the person held and
  * where it went. Inheritance for heirs after the second death is not modelled
  * yet; the snapshot records the unused nil-rate band so it can be added.
@@ -61,9 +67,18 @@ export function inheritanceTax(estate, nilRateBand = IHT_CONSTANTS.nilRateBand) 
  * @param {object} D, S - people (ukLifecyclePerson.js)
  * @param {{ age: number, survivorAge: number, year: number,
  *           partnership: 'married'|'cohabiting', willsToEachOther: boolean,
- *           econ: { cumulInflation: number } }} ctx
+ *           econ: { cumulInflation: number },
+ *           cover?: Array<{ amount: number, inTrust: boolean, payTo: string,
+ *                           kind: string, label?: string }> }} ctx
+ *   cover: lump sums paid on this death (life cover, death-in-service). What
+ *   reaches the survivor is returned in `coverPaid` for the household to apply
+ *   (to the mortgage or savings).
  */
-export function settleDeath(D, S, { age, survivorAge, year, partnership, willsToEachOther, econ }) {
+export function settleDeath(
+  D,
+  S,
+  { age, survivorAge, year, partnership, willsToEachOther, econ, cover = [] }
+) {
   const married = partnership === 'married';
   const assets = {
     isa: D.isa,
@@ -71,7 +86,11 @@ export function settleDeath(D, S, { age, survivorAge, year, partnership, willsTo
     pension: round2(D.pension + inheritedPensionBalance(D)),
   };
   const pensionsInEstate = year >= IHT_CONSTANTS.pensionsInEstateFromYear;
-  const estateForIHT = round2(assets.isa + assets.gia + (pensionsInEstate ? assets.pension : 0));
+  // Cover not written in trust is paid into the estate as cash.
+  const coverInEstate = round2(cover.reduce((t, c) => t + (c.inTrust ? 0 : c.amount), 0));
+  const estateForIHT = round2(
+    assets.isa + assets.gia + (pensionsInEstate ? assets.pension : 0) + coverInEstate
+  );
 
   // Married couples and civil partners pay nothing on what passes between them.
   const iht = married ? 0 : inheritanceTax(estateForIHT);
@@ -113,6 +132,22 @@ export function settleDeath(D, S, { age, survivorAge, year, partnership, willsTo
   if (toSurvivor.gia > 0) {
     S.gia = round2(S.gia + toSurvivor.gia);
     S.costBasis = round2(S.costBasis + toSurvivor.gia);
+  }
+
+  // ── Life cover and death-in-service ──────────────────────────────────────
+  // In trust: straight to the survivor, in full. In the estate: after its
+  // share of the tax, to the survivor by the same rules as savings.
+  const coverPaid = [];
+  let coverToOthers = 0;
+  for (const c of cover) {
+    if (c.inTrust) {
+      coverPaid.push({ kind: c.kind, label: c.label ?? '', amount: c.amount, payTo: c.payTo });
+      continue;
+    }
+    const net = round2(c.amount * keep);
+    if (married || willsToEachOther)
+      coverPaid.push({ kind: c.kind, label: c.label ?? '', amount: net, payTo: c.payTo });
+    else coverToOthers = round2(coverToOthers + net);
   }
 
   // ── DB survivor's pensions ───────────────────────────────────────────────
@@ -177,5 +212,16 @@ export function settleDeath(D, S, { age, survivorAge, year, partnership, willsTo
     // For a later heirs feature: a spouse's unused nil-rate band passes to the
     // survivor's estate (a cohabitant's does not).
     unusedNilRateBandTransferable: married,
+    // Lump sums paid on the death and where they went (the household fills in
+    // how much went to the mortgage and to savings).
+    lifeCover: {
+      paid: round2(cover.reduce((t, c) => t + c.amount, 0)),
+      inEstate: coverInEstate,
+      toSurvivor: round2(coverPaid.reduce((t, c) => t + c.amount, 0)),
+      toOthers: coverToOthers,
+      toMortgage: 0,
+      toSavings: 0,
+    },
+    coverPaid,
   };
 }
