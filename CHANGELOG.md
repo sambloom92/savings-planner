@@ -8,7 +8,13 @@ Every change to Savings Planner, newest first. Each release is tagged `vX.Y.Z` o
 
 Versions before 1.0.0 are the early history, up to couple mode. Each pull request adds its entry here and bumps the version in `package.json`; the release is tagged automatically when it merges.
 
-## [1.2.0]
+## [1.3.0]
+
+### Added
+
+- A roadmap of ideas for what comes next, starting with tutorial mode and the proposed triple lock changes. It's on the site under Roadmap in the footer, and anyone can suggest ideas by editing `ROADMAP.md` (#42).
+
+## [1.2.0] — 2026-11-24
 
 ### Added
 

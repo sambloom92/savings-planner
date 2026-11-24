@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { parseChangelog, inlineTokens, compareVersions } from './changelog.js';
+import { parseChangelog, parseRoadmap, inlineTokens, compareVersions } from './changelog.js';
 
 // ---------------------------------------------------------------------------
 // Minimal test runner
@@ -140,6 +140,44 @@ describe('CHANGELOG.md, package.json and releases.json agree', () => {
         /^[0-9a-f]{40}$/.test(r.commit ?? '') || Number.isInteger(r.pr),
         `${r.version} has no commit or PR`
       );
+  });
+});
+
+describe('parseRoadmap', () => {
+  it('reads sections and items, skipping the introduction', () => {
+    const sections = parseRoadmap(
+      [
+        '# Roadmap',
+        '',
+        'How to add an idea:',
+        '',
+        '    - **Example** — not an item.',
+        '',
+        '## Planned',
+        '',
+        '- **Tutorial mode** — a guided',
+        '  introduction.',
+        '',
+        '## Ideas',
+        '',
+        '- **Left to heirs** — after the second death.',
+      ].join('\n')
+    );
+    assert.deepEqual(sections, [
+      {
+        title: 'Planned',
+        items: [{ text: '**Tutorial mode** — a guided introduction.', children: [] }],
+      },
+      {
+        title: 'Ideas',
+        items: [{ text: '**Left to heirs** — after the second death.', children: [] }],
+      },
+    ]);
+  });
+
+  it('ROADMAP.md has at least one section with items', () => {
+    const sections = parseRoadmap(read('../ROADMAP.md'));
+    assert.ok(sections.length > 0 && sections.some((s) => s.items.length > 0));
   });
 });
 
