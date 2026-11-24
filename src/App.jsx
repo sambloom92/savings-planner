@@ -3057,7 +3057,9 @@ function TabContent({ tab, p, set, derived, topUp, annuity, dbSummary, scope = n
           />
           <InfoBox>
             ISA fills first (£20,000/yr limit) — excess goes to GIA. CGT annual exempt amount:
-            £3,000. Basic rate 18%, higher rate 24%.
+            £3,000, used every year: moving GIA into the ISA and sales use it first, and the rest is
+            used at the year end by realising gains and reinvesting, so they're never taxed. Basic
+            rate 18%, higher rate 24%.
           </InfoBox>
         </>
       );
@@ -4158,6 +4160,15 @@ function CoupleYearDetail({ row, mobile }) {
         <DetailLine label="Pension" value={fmtGBP(q.pension.closingBalance)} color="#4f8ef7" />
         <DetailLine label="ISA" value={fmtGBP(q.isa.closingBalance)} color="#34d399" />
         <DetailLine label="GIA" value={fmtGBP(q.gia.closingBalance)} color="#e8b84b" />
+        {(q.gia.gainsRealisedTaxFree ?? 0) > 0 && (
+          <DetailLine
+            label="gains realised tax-free"
+            value={fmtGBP(q.gia.gainsRealisedTaxFree)}
+            color="#34d399"
+            indent={1}
+            dim
+          />
+        )}
       </DetailSection>
     );
   };
@@ -4585,6 +4596,15 @@ function SingleYearDetail({ row, mobile = false }) {
             indent={1}
             dim
           />
+          {(row.gia.gainsRealisedTaxFree ?? 0) > 0 && (
+            <DetailLine
+              label="gains realised tax-free"
+              value={fmtGBP(row.gia.gainsRealisedTaxFree)}
+              color="#34d399"
+              indent={2}
+              dim
+            />
+          )}
           <DetailLine
             label="GIA — closing"
             value={fmtGBP(row.gia.closingBalance)}
@@ -4929,6 +4949,15 @@ function SingleYearDetail({ row, mobile = false }) {
           indent={1}
           dim
         />
+        {(row.gia.gainsRealisedTaxFree ?? 0) > 0 && (
+          <DetailLine
+            label="gains realised tax-free"
+            value={fmtGBP(row.gia.gainsRealisedTaxFree)}
+            color="#34d399"
+            indent={2}
+            dim
+          />
+        )}
         <DetailLine
           label="GIA — closing"
           value={fmtGBP(row.gia.closingBalance)}

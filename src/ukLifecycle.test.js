@@ -307,12 +307,15 @@ describe('pot growth', () => {
     assertApprox(y.isa.growthAmount, 1_400, 'ISA growth');
   });
 
-  it('GIA: (opening + contribution) × (1 + savingsRate); costBasis tracks contributions only', () => {
+  it('GIA: (opening + contribution) × (1 + savingsRate); the gain is realised within the CGT allowance', () => {
+    // The year's £761.57 gain is under the £3,000 allowance, so it's realised
+    // and reinvested: the base cost rises to the value and no gain is left.
     const y = run().yearlyBreakdown[0];
     assertApprox(y.gia.closingBalance, 11_641.17, 'GIA closing');
     assertApprox(y.gia.growthAmount, 761.57, 'GIA growth');
-    assertApprox(y.gia.closingCostBasis, 10_879.6, 'GIA costBasis');
-    assertApprox(y.gia.unrealisedGain, 761.57, 'unrealisedGain');
+    assertApprox(y.gia.gainsRealisedTaxFree, 761.57, 'gain realised');
+    assertApprox(y.gia.closingCostBasis, 11_641.17, 'GIA costBasis');
+    assertApprox(y.gia.unrealisedGain, 0, 'unrealisedGain');
   });
 
   it('existing balances in pots compound from year one', () => {
@@ -327,8 +330,98 @@ describe('pot growth', () => {
   it('giaCostBasis from pots is preserved and contributions accumulate', () => {
     const r = run(baseProfile, baseRates, { giaBalance: 10_000, giaCostBasis: 7_000 });
     const y = r.yearlyBreakdown[0];
-    // costBasis = 7,000 + 10,879.60 = 17,879.60
-    assertApprox(y.gia.closingCostBasis, 17_879.6, 'costBasis with existing');
+    // costBasis = 7,000 + 10,879.60 contributed + 3,000 of gain realised within
+    // the CGT allowance (the gain is 22,341.17 − 17,879.60 = 4,461.57).
+    assertApprox(y.gia.gainsRealisedTaxFree, 3_000, 'gain realised');
+    assertApprox(y.gia.closingCostBasis, 20_879.6, 'costBasis with existing');
+    assertApprox(y.gia.unrealisedGain, 1_461.57, 'gain left');
+  });
+});
+
+describe('the CGT allowance is used every year', () => {
+  it('realises gains up to the £3,000 allowance, leaving the rest unrealised', () => {
+    // GIA: (100,000 + 10,879.60) × 1.07 = 118,641.17 on a base cost of
+    // 60,879.60. £3,000 of the gain is realised; the base cost rises by it.
+    const y = run(baseProfile, baseRates, { giaBalance: 100_000, giaCostBasis: 50_000 })
+      .yearlyBreakdown[0];
+    assertApprox(y.gia.closingBalance, 118_641.17, 'GIA closing');
+    assertApprox(y.gia.gainsRealisedTaxFree, 3_000, 'gain realised');
+    assertApprox(y.gia.closingCostBasis, 63_879.6, 'base cost');
+  });
+
+  it('bed and ISA uses the allowance first', () => {
+    // £20,000 of living costs leave £10,879.60 to save, so £9,120.40 of ISA
+    // headroom is filled from a GIA that is half gain: well over £3,000 of
+    // gain, so CGT is due and nothing is left to realise.
+    const y = run({ ...baseProfile, annualLivingExpenses: 20_000 }, baseRates, {
+      giaBalance: 100_000,
+      giaCostBasis: 50_000,
+    }).yearlyBreakdown[0];
+    assert.ok(y.gia.bedIsaCGT > 0, `bed and ISA CGT ${y.gia.bedIsaCGT}`);
+    assert.equal(y.gia.gainsRealisedTaxFree, 0);
+  });
+
+  it('what bed and ISA leaves of the allowance is used at the year end', () => {
+    // A GIA that is 10% gain: bed and ISA realises 10% of what it sells.
+    const y = run({ ...baseProfile, annualLivingExpenses: 20_000 }, baseRates, {
+      giaBalance: 100_000,
+      giaCostBasis: 90_000,
+    }).yearlyBreakdown[0];
+    assert.equal(y.gia.bedIsaCGT, 0);
+    assertApprox(y.gia.gainsRealisedTaxFree, 3_000 - 0.1 * y.gia.bedIsaGross, 'the rest');
+  });
+
+  it('while the yearly gain is under the allowance, no gain is ever left to tax', () => {
+    const r = projectLifecycle(
+      {
+        currentAge: 66,
+        retirementAge: 67,
+        currentYear: 2026,
+        grossIncome: 0,
+        employeePensionRate: 0,
+        employerPensionRate: 0,
+        niContributionYears: 35,
+      },
+      { savingsRate: 0.04, wageGrowthRate: 0.03, inflationRate: 0.02 },
+      { giaBalance: 50_000 },
+      { targetNetAnnualExpenses: 5_000, maxAge: 75 }
+    );
+    const retired = r.yearlyBreakdown.filter((y) => y.phase === 'retirement');
+    assert.ok(retired.length > 5);
+    for (const y of retired) {
+      assertApprox(y.gia.unrealisedGain, 0, `gain left at ${y.age}`);
+      assertApprox(y.gia.gainsRealisedTaxFree, y.gia.growthAmount, `realised at ${y.age}`);
+      assert.equal(y.gia.cgt + y.gia.bedIsaCGT, 0);
+    }
+  });
+
+  it('drawdown from the GIA within the allowance uses it first', () => {
+    // No pension: spending comes first from a GIA with large gains. Step 2
+    // sells it up to a £3,000 gain (no CGT), so nothing is left to realise.
+    const r = projectLifecycle(
+      {
+        currentAge: 60,
+        retirementAge: 61,
+        currentYear: 2026,
+        grossIncome: 0,
+        employeePensionRate: 0,
+        employerPensionRate: 0,
+        niContributionYears: 35,
+      },
+      baseRates,
+      { giaBalance: 200_000, giaCostBasis: 100_000 },
+      { targetNetAnnualExpenses: 10_000, maxAge: 65 }
+    );
+    const y = r.yearlyBreakdown.find((x) => x.age === 61);
+    assert.ok(y.gia.withdrawal > 0);
+    assert.equal(y.gia.cgt, 0);
+    assert.equal(y.gia.gainsRealisedTaxFree, 0);
+  });
+
+  it('nothing is realised in a year at a loss', () => {
+    const y = run(baseProfile, { ...baseRates, savingsRate: -0.1 }).yearlyBreakdown[0];
+    assert.equal(y.gia.gainsRealisedTaxFree, 0);
+    assertApprox(y.gia.closingCostBasis, 10_879.6, 'base cost');
   });
 });
 
@@ -675,9 +768,10 @@ describe('windfalls', () => {
   it('full windfall amount is added to the cost basis (no phantom gains)', () => {
     const base = run(wfProfile);
     const wf = run({ ...wfProfile, windfalls: [{ age: 30, amount: 10_000 }] });
-    const cbBase = base.yearlyBreakdown[0].gia.closingCostBasis;
-    const cbWf = wf.yearlyBreakdown[0].gia.closingCostBasis;
-    assertApprox(cbWf - cbBase, 10_000, 'cost basis increase');
+    // Before the year-end realisation of gains within the CGT allowance.
+    const cb = (r) =>
+      r.yearlyBreakdown[0].gia.closingCostBasis - r.yearlyBreakdown[0].gia.gainsRealisedTaxFree;
+    assertApprox(cb(wf) - cb(base), 10_000, 'cost basis increase');
   });
 
   it('multiple windfalls in the same year sum, labels both reported', () => {
@@ -2702,6 +2796,31 @@ describe('couple mode — both alive', () => {
     );
     assert.equal(row.people[0].giaContribution, 0);
     near(row.people[1].giaContribution, row.saved - 40_000);
+  });
+
+  it('each partner uses their own CGT allowance every year', () => {
+    // Both ISAs fill from pay, so nothing is sold; each partner's GIA holds a
+    // £30,000 gain, and £3,000 of each is realised at the year end.
+    const r = projectLifecycle(
+      {
+        ...earner,
+        grossIncome: 90_000,
+        partner: {
+          ...nonEarner,
+          grossIncome: 20_000,
+          pots: { giaBalance: 50_000, giaCostBasis: 20_000 },
+        },
+      },
+      { savingsRate: 0.05, wageGrowthRate: 0, inflationRate: 0 },
+      { giaBalance: 50_000, giaCostBasis: 20_000 }
+    );
+    const row = r.yearlyBreakdown[0];
+    assert.deepEqual(
+      row.people.map((p) => p.gia.gainsRealisedTaxFree),
+      [3_000, 3_000]
+    );
+    assert.equal(row.gia.gainsRealisedTaxFree, 6_000);
+    assert.equal(row.people[0].gia.closingCostBasis, 23_000);
   });
 
   it('two retirees each use their whole personal allowance — no tax on £30k', () => {
