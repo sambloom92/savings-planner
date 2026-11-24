@@ -27,7 +27,7 @@ Versions before 1.0.0 are the early history, up to couple mode. Each pull reques
 
 ### Added
 
-- Couple mode: plan for two (#39). Each of you has your own pay, tax, pensions, savings, state pension and retirement age; spending, the mortgage, debts and life events are shared. Savings fill both £20k ISAs, and in retirement the drawdown uses both personal allowances, both CGT exemptions and both basic-rate bands. Marriage Allowance for married couples and civil partners.
+- Couple mode: plan for two (#39). Each of you has your own pay, tax, pensions, savings, state pension and retirement age; spending, the mortgage, debts and life events are shared. Savings fill both £20k ISAs, and in retirement the drawdown uses both personal allowances, both CGT exemptions and both basic-rate bands. A retiree whose personal allowance would otherwise go unused (say their partner still works) draws pension up to it each year, tax-free, and saves it. Marriage Allowance for married couples and civil partners.
 - "What if one of us dies?" (#39): the survivor's plan beside the plan with both alive. Spending falls to the survivor's share (default 72%, from the Retirement Living Standards 2026); pensions, ISAs and investments pass to the survivor by the rules for married or cohabiting couples, including inheritance tax for couples living together and the effect of wills; DB schemes pay a survivor's pension.
 - Monte Carlo draws a death age for each of you from your own life table, and reports how often the survivor runs short (#39).
 
