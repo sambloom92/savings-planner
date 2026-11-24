@@ -27,104 +27,88 @@
  *   gov.uk/income-tax-rates
  *   gov.uk/national-insurance
  *   gov.uk/new-state-pension
+ *
+ * Structure: this module is the household — shared spending, the mortgage
+ * and other debts, life events, the economy and the year loop. Everything
+ * that belongs to one person (pay and tax, pots, state and DB pensions,
+ * lump sums, annuity, drawdown steps) lives in ukLifecyclePerson.js.
  */
 
-import { calculateIncomeTax, calculateTaxableIncome } from './ukIncomeTax.js';
-import { calculateNationalInsurance } from './ukNationalInsurance.js';
-import {
-  calculateStudentLoan,
-  calculateAnnualInterestRate,
-  STUDENT_LOAN_PLANS,
-} from './ukStudentLoan.js';
+import { calculateIncomeTax } from './ukIncomeTax.js';
 import { calculateMonthlyMortgagePayment } from './ukDebt.js';
 import { ISA_CONSTANTS } from './ukISA.js';
-import {
-  PENSION_CONSTANTS,
-  calculatePCLS,
-  estimatePensionWithdrawalTax,
-  taperedAnnualAllowance,
-} from './ukPension.js';
+import { PENSION_CONSTANTS, estimatePensionWithdrawalTax } from './ukPension.js';
 import { GIA_CGT_CONSTANTS } from './ukGIA.js';
-import { illustrativeAnnuityRate } from './ukAnnuity.js';
+import {
+  LIFECYCLE_CONSTANTS,
+  round2,
+  assertNonNegativeFinite,
+  assertFinite,
+  assertPositiveInteger,
+  computeStatePension,
+  getRateForAge,
+  createPerson,
+  recordStatePensionClaim,
+  statePensionGrossAt,
+  advanceDbSchemes,
+  dbRealIncomeAt,
+  dbRowSummary,
+  dbSchemeSummaries,
+  workingYearPay,
+  recordNiQualifyingYear,
+  investInGIA,
+  investTaxFreeCash,
+  fundExpenseWhileWorking,
+  bedAndIsa,
+  harvestGainsWithinExemption,
+  growPotsWhileWorking,
+  growPotsInRetirement,
+  estimatedPensionTaxShare,
+  enterRetirement,
+  takePensionLumpSum,
+  annuityGrossThisYear,
+  maybeBuyAnnuity,
+  class3CostThisYear,
+  settleClass3,
+  drawPensionWithinAllowance,
+  drawGiaWithinExemption,
+  drawIsa,
+  drawGiaTaxable,
+  drawPensionTaxable,
+  PERSONAL_ALLOWANCE,
+  plannedGuaranteedGross,
+  pensionGrossForTaxable,
+  drawPensionGross,
+  drawInheritedWithinAllowance,
+  drawInheritedTaxFree,
+  drawInheritedTaxable,
+  growInheritedPension,
+  inheritedPensionBalance,
+} from './ukLifecyclePerson.js';
+import { PARTNERSHIPS, settleDeath } from './ukEstate.js';
+
+export { LIFECYCLE_CONSTANTS };
+
+export const COUPLE_DEFAULTS = {
+  // Household spending after one partner dies, as a share of the couple's.
+  // Retirement Living Standards 2026 (Pensions UK, formerly the PLSA): a
+  // one-person household's budget is 72% of a two-person one at the Moderate
+  // (£32,700 vs £45,400) and Comfortable (£45,400 vs £62,700) standards, and
+  // 62% at Minimum (£13,900 vs £22,500).
+  survivorSpendingShare: 0.72,
+  // Marriage Allowance: personal allowance a spouse or civil partner can
+  // transfer to a basic-rate partner (2026/27; gov.uk/marriage-allowance).
+  marriageAllowance: 1_260,
+};
+// Width of the basic-rate band (2026/27), for the Marriage Allowance test.
+const BASIC_RATE_BAND = 37_700;
 
 const TAX_YEAR = '2026/27';
-
-// ---------------------------------------------------------------------------
-// Published constants
-// ---------------------------------------------------------------------------
-
-export const LIFECYCLE_CONSTANTS = {
-  statePension: {
-    fullAnnualAmount: 12_547.6, // 2026/27: £241.30/week × 52 (gov.uk/new-state-pension)
-    qualifyingYearsForFull: 35,
-    minimumQualifyingYears: 10,
-    defaultStatePensionAge: 67,
-    // New state pension deferral: +1% per 9 weeks deferred ≈ 5.78%/year (linear,
-    // non-compounding), as a share of the pension at claim. Once paid, that extra
-    // rises each year with CPI (not the triple lock). Up to 52 weeks can instead
-    // be taken as a one-off arrears payment with no interest — not modelled.
-    // Source: gov.uk/deferring-state-pension
-    deferralUpliftPerYear: 0.0578,
-    // Voluntary Class 3 NI: cost of buying one qualifying year (2026/27:
-    // £18.40/week × 52). Today's money — inflated when paid. Each year bought
-    // adds 1/35 of the full state pension. Source: gov.uk/voluntary-national-insurance-contributions
-    class3AnnualCost: 956.8,
-    // Adjusted triple lock (announced 29 September 2026; not yet legislated).
-    // The triple lock applies up to the April 2029 increase. From April 2030
-    // the full state pension rises each year by the highest of CPI, 2.5%, or
-    // the amount needed to keep (or restore) its value relative to earnings at
-    // the 2029/30 level — so earnings growth no longer ratchets it up on top of
-    // earlier inflation-led rises. Sources: gov.uk/government/publications/
-    // state-pension-uprating-analysis-2026/triple-lock-reform-factsheet;
-    // gov.uk/government/news/prime-minister-andy-burnham-sets-out-plans-for-a-
-    // new-national-care-service
-    adjustedTripleLockFromYear: 2030,
-    upratingFloor: 0.025, // the 2.5% minimum, under both rules
-  },
-  pension: {
-    // Normal Minimum Pension Age (NMPA): earliest age a DC pension is accessible.
-    // Currently 55; legislated to rise to 57 from 6 April 2028. Default to 57 as
-    // the forward-looking figure for anyone retiring in the years ahead.
-    defaultAccessAge: 57,
-  },
-};
+const { annualSubscriptionLimit: ISA_LIMIT } = ISA_CONSTANTS;
 
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
-
-function round2(n) {
-  return Math.round(n * 100) / 100;
-}
-
-function assertNonNegativeFinite(value, name) {
-  if (typeof value !== 'number' || !isFinite(value) || value < 0)
-    throw new TypeError(`${name} must be a non-negative finite number`);
-}
-
-function assertFinite(value, name) {
-  if (typeof value !== 'number' || !isFinite(value))
-    throw new TypeError(`${name} must be a finite number`);
-}
-
-function assertPositiveInteger(value, name) {
-  if (!Number.isInteger(value) || value <= 0)
-    throw new TypeError(`${name} must be a positive integer`);
-}
-
-function assertNonNegativeInteger(value, name) {
-  if (!Number.isInteger(value) || value < 0)
-    throw new TypeError(`${name} must be a non-negative integer`);
-}
-
-/** Pro-rate the state pension on qualifying NI years. */
-function computeStatePension(niYears) {
-  const { fullAnnualAmount, qualifyingYearsForFull, minimumQualifyingYears } =
-    LIFECYCLE_CONSTANTS.statePension;
-  if (niYears < minimumQualifyingYears) return 0;
-  const capped = Math.min(niYears, qualifyingYearsForFull);
-  return round2((capped / qualifyingYearsForFull) * fullAnnualAmount);
-}
 
 /**
  * Run 12 monthly interest + payment cycles for a repayment debt.
@@ -154,147 +138,6 @@ function amortiseYear(balance, monthlyRate, monthlyPayment, monthlyOverpayment =
     payment: round2(yearPayment),
     closingBalance: b,
   };
-}
-
-// ── Return-tapering ─────────────────────────────────────────────────────────
-
-/**
- * Returns the interpolated investment return rate for a given age.
- * Linearly tapers from accRate to retRate over the window
- * [retirementAge - taperBeforeYrs, retirementAge + taperAfterYrs].
- * Outside that window the rate is clamped to accRate or retRate respectively.
- *
- * Edge cases:
- *   • taperBeforeYrs = taperAfterYrs = 0 → instant step at retirementAge
- *   • taperBeforeYrs so large that taperStart < currentAge → taper already
- *     in progress; the formula still works (t > 0 at currentAge)
- *   • taperBeforeYrs = 0, taperAfterYrs > 0 → taper starts at retirement
- */
-function getRateForAge(
-  age,
-  retirementAge,
-  accRate,
-  retRate,
-  taperBeforeYrs = 10,
-  taperAfterYrs = 5
-) {
-  if (accRate === retRate) return accRate;
-  const taperStart = retirementAge - taperBeforeYrs;
-  const taperEnd = retirementAge + taperAfterYrs;
-  // Guard against zero-width window (both params = 0): step at retirementAge
-  if (taperEnd === taperStart) return age >= taperStart ? retRate : accRate;
-  const t = Math.max(0, Math.min(1, (age - taperStart) / (taperEnd - taperStart)));
-  return accRate + t * (retRate - accRate);
-}
-
-// ── Retirement-phase helpers ─────────────────────────────────────────────────
-
-// UK income tax personal allowance (2026/27, frozen at £12,570)
-const PERSONAL_ALLOWANCE = 12_570;
-
-/**
- * Binary-search for the gross pension withdrawal that, after marginal income
- * tax on top of otherIncome, yields exactly netTarget net.
- */
-function pensionGrossForNet(netTarget, maxBalance, otherIncome, scaleFactor = 1) {
-  if (netTarget <= 0 || maxBalance <= 0) return 0;
-  // Upper bound: the average income tax rate never reaches 50%, so the gross
-  // needed is always under 2× the net target (plus slack for banding).
-  let lo = 0,
-    hi = Math.min(maxBalance, netTarget * 2 + 100_000);
-  for (let i = 0; i < 64; i++) {
-    const mid = (lo + hi) / 2;
-    const margTax =
-      calculateIncomeTax(otherIncome + mid, scaleFactor).totalTax -
-      calculateIncomeTax(otherIncome, scaleFactor).totalTax;
-    if (mid - margTax < netTarget) lo = mid;
-    else hi = mid;
-  }
-  return Math.min(round2((lo + hi) / 2), maxBalance);
-}
-
-/**
- * Binary-search gross UFPLS withdrawal needed to achieve a target net amount.
- * Under UFPLS each £1 withdrawn is min(25%, lsaRemaining/gross) tax-free + the
- * remainder taxable income.  Pass lsaRemaining = Infinity (default) to ignore the
- * Lump Sum Allowance cap (all withdrawals treated as 25% tax-free).
- */
-function ufplsGrossForNet(
-  netTarget,
-  maxBalance,
-  otherIncome,
-  scaleFactor = 1,
-  lsaRemaining = Infinity
-) {
-  if (netTarget <= 0 || maxBalance <= 0) return 0;
-  // Same headroom logic as pensionGrossForNet: gross < 2 × net + slack.
-  let lo = 0,
-    hi = Math.min(maxBalance, netTarget * 2 + 100_000);
-  for (let i = 0; i < 64; i++) {
-    const mid = (lo + hi) / 2;
-    const taxFree = Math.min(0.25 * mid, lsaRemaining);
-    const taxableIncome = mid - taxFree;
-    const margTax =
-      calculateIncomeTax(otherIncome + taxableIncome, scaleFactor).totalTax -
-      calculateIncomeTax(otherIncome, scaleFactor).totalTax;
-    if (mid - margTax < netTarget) lo = mid;
-    else hi = mid;
-  }
-  return Math.min(round2((lo + hi) / 2), maxBalance);
-}
-
-/**
- * CGT due on a gross GIA withdrawal.
- * annualExempt defaults to the published annual exempt amount; pass a lower
- * value (including 0) when part of the exemption has already been used
- * elsewhere in the same tax year.
- * Gains stack on top of taxable income (gross income minus the personal
- * allowance, including the £100k taper): the unused part of the £37,700
- * basic-rate band is taxed at 18%, the remainder at 24%.
- */
-function computeGIACGT(
-  gross,
-  bal,
-  costBasis,
-  otherIncome,
-  annualExempt = GIA_CGT_CONSTANTS.annualExemptAmount,
-  scaleFactor = 1
-) {
-  if (gross <= 0 || bal <= 0) return 0;
-  const gainFrac = Math.max(0, (bal - costBasis) / bal);
-  const totalGain = gross * gainFrac; // keep unrounded — intermediate value used in subtraction
-  const taxable = Math.max(0, totalGain - annualExempt);
-  const taxableIncome = calculateTaxableIncome(Math.max(0, otherIncome), scaleFactor);
-  const basicRoom = Math.max(0, GIA_CGT_CONSTANTS.basicRateBandWidth * scaleFactor - taxableIncome);
-  const atBasic = Math.min(taxable, basicRoom);
-  const atHigher = taxable - atBasic;
-  return round2(atBasic * GIA_CGT_CONSTANTS.basicRate + atHigher * GIA_CGT_CONSTANTS.higherRate);
-}
-
-/**
- * Binary-search for the gross GIA withdrawal that, after CGT, yields
- * exactly netTarget net.
- */
-function giaGrossForNet(netTarget, bal, costBasis, otherIncome, annualExempt = 0, scaleFactor = 1) {
-  if (netTarget <= 0 || bal <= 0) return 0;
-  // When there are no gains, net equals gross
-  if (costBasis >= bal) return Math.min(netTarget, bal);
-  let lo = 0,
-    hi = bal;
-  for (let i = 0; i < 64; i++) {
-    const mid = (lo + hi) / 2;
-    const cgt = computeGIACGT(mid, bal, costBasis, otherIncome, annualExempt, scaleFactor);
-    if (mid - cgt < netTarget) lo = mid;
-    else hi = mid;
-  }
-  return Math.min(round2((lo + hi) / 2), bal);
-}
-
-/** Reduce GIA balance and cost basis proportionally after a gross withdrawal. */
-function applyGIAWithdrawal(bal, costBasis, gross) {
-  if (gross <= 0 || bal <= 0) return { bal, costBasis };
-  const frac = gross / bal;
-  return { bal: round2(bal - gross), costBasis: round2(costBasis * (1 - frac)) };
 }
 
 // ---------------------------------------------------------------------------
@@ -329,22 +172,20 @@ function applyGIAWithdrawal(bal, costBasis, gross) {
  *                                             statePensionAge (default 0). Each deferred
  *                                             year raises the weekly amount by 1% per
  *                                             9 weeks ≈ 5.8% (new state pension rules).
- *   statePensionUprating?:  string,         - 'triple-lock' (default): each April the
- *                                             state pension rises by the highest of
- *                                             earnings growth, CPI and 2.5%. 'adjusted':
- *                                             the announced reform — triple lock up to
- *                                             April 2029, then from April 2030 the
- *                                             highest of CPI, 2.5%, or the rise needed to
- *                                             hold its 2029/30 value relative to earnings.
- *                                             With constant rates the two coincide; they
- *                                             differ when earnings and inflation vary
- *                                             year to year (Monte Carlo).
  *   topUpStatePension?:     boolean,        - Buy voluntary Class 3 NI years during the
  *                                             retirement→state-pension-age bridge to reach the
  *                                             35 qualifying years for the full state pension.
  *                                             Cost funded from the pots; buys fewer years if
  *                                             unaffordable, never below the 10-year minimum
  *                                             benefit. Default false.
+ *   dbPensions?:            object[],       - Defined benefit schemes (see ukDefinedBenefit.js),
+ *                                             in today's money. Active schemes build up while
+ *                                             working, with member contributions taxed under a
+ *                                             net pay arrangement (income tax relief, no NI
+ *                                             relief) and accrual counted towards the annual
+ *                                             allowance. From its payment age each pays a
+ *                                             guaranteed, taxable income; any lump sum uses the
+ *                                             same Lump Sum Allowance as the DC pension.
  *   pensionAccessAge?:      number,         - Earliest age the DC pension can be accessed
  *                                             (NMPA; default 57). Before it, no PCLS or
  *                                             pension drawdown — spending is bridged from
@@ -372,6 +213,40 @@ function applyGIAWithdrawal(bal, costBasis, gross) {
  *                                             counting toward the state pension. The most recent
  *                                             change at or before an age applies (100% before
  *                                             the first). enabled: false skips it (default true).
+ *
+ *   Couple mode — set `partner` to model a household of two. Each person has
+ *   their own pay, tax, NI, student loan, pots, state and DB pensions and
+ *   retirement age; spending, the mortgage, debts and life events are shared,
+ *   and event/mortgage ages are on the main person's age. The plan runs until
+ *   the younger partner reaches maxAge.
+ *   partner?: object | null              - The partner's own fields, as above (currentAge,
+ *                                             retirementAge, grossIncome, pension rates, NI
+ *                                             record, state pension choices, dbPensions,
+ *                                             studentLoanPlan, employmentChanges), plus `pots`:
+ *                                             { pensionBalance, isaBalance, giaBalance,
+ *                                             giaCostBasis, studentLoan }.
+ *   partnership?:           string,         - 'married' (also civil partners; default) or
+ *                                             'cohabiting'. Sets the inheritance tax and ISA
+ *                                             rules on a death, and Marriage Allowance.
+ *   willsToEachOther?:      boolean,        - Cohabiting only: whether wills leave savings to
+ *                                             each other (default true). Without, the survivor
+ *                                             inherits only pensions.
+ *   survivorSpendingShare?: number,         - Household spending after a death, as a share of
+ *                                             the couple's (default 0.72, Retirement Living
+ *                                             Standards 2026).
+ *   statePensionUprating?:  string,         - 'triple-lock' (default): each April the state
+ *                                             pension rises by the highest of earnings growth,
+ *                                             CPI and 2.5%. 'adjusted': the announced reform —
+ *                                             the triple lock up to April 2029, then from April
+ *                                             2030 the highest of CPI, 2.5%, or the rise needed
+ *                                             to hold its 2029/30 value relative to earnings.
+ *                                             With constant rates the two coincide; they differ
+ *                                             when earnings and inflation vary (Monte Carlo).
+ *                                             National policy, so shared by a couple.
+ *   death?: {                               - "What if one of us dies?": the person ('self' or
+ *     person: string,                         'partner') dies at the start of the year they
+ *     age:    number                          would reach `age`; see ukEstate.js.
+ *   } | null
  * }} profile
  *
  * @param {{
@@ -434,6 +309,8 @@ function applyGIAWithdrawal(bal, costBasis, gross) {
  *                                      0.1). Like flexibleRetirement, only meaningful under Monte
  *                                      Carlo — it is a behavioural decision rule, simulated in full.
  *   annuity?: {                       - Buy a single-life lifetime annuity once, at the first
+ *     owner?:           string,         ('self' default, or 'partner' in couple mode: whose pension
+ *                                       buys it)
  *     purchaseAge:      number,         retirement year ≥ purchaseAge (and the pension access age).
  *     sizing:           string,         'essential': enough gross income that state pension +
  *     amountReal:       number,         annuity, net of tax, cover amountReal of essential net
@@ -462,77 +339,213 @@ export function projectLifecycle(
   retirementOptions = null,
   yearlyRatesOverride = null
 ) {
-  // ── Validate profile ────────────────────────────────────────────────────
+  // ── Household inputs ────────────────────────────────────────────────────
   const {
-    currentAge,
-    retirementAge,
     currentYear = 2025,
-    grossIncome,
     annualLivingExpenses = 0, // non-debt living costs in today's £; inflated each year
-    employeePensionRate,
-    employerPensionRate,
-    // When true, the employer contribution is a MATCH: the employer pays its full
-    // employerPensionRate only if the employee contributes at least
-    // employerMatchThreshold, and nothing otherwise. This models real schemes —
-    // including non-1:1 and tiered offers — collapsed to their top rung: the
-    // minimum employee contribution that unlocks the maximum employer one (e.g.
-    // "put in 6% to get 12%" → threshold 0.06, employerPensionRate 0.12). When
-    // false (default) the employer contribution is unconditional.
-    employerMatch = false,
-    employerMatchThreshold = 0,
-    niContributionYears,
-    statePensionAge = LIFECYCLE_CONSTANTS.statePension.defaultStatePensionAge,
-    statePensionDeferralYears = 0,
-    statePensionUprating = 'triple-lock',
-    // When true, buy voluntary Class 3 NI years during the bridge between
-    // retirement and state pension age to top the state pension up toward the
-    // full 35 qualifying years. Cost is funded from the pots; see the retirement
-    // phase. Default false. Only meaningful with a retirement phase.
-    topUpStatePension = false,
-    // Normal Minimum Pension Age — the earliest age a DC pension can be accessed
-    // (55 today, rising to 57 in April 2028). Before it, no PCLS or drawdown.
-    pensionAccessAge = LIFECYCLE_CONSTANTS.pension.defaultAccessAge,
-    studentLoanPlan = null,
     windfalls = [],
     oneOffExpenses = [],
-    employmentChanges = [],
+    // Couple mode: the partner's own inputs and pots, and the household rules.
+    partner: partnerProfile = null,
+    partnership = 'married',
+    willsToEachOther = true,
+    survivorSpendingShare = COUPLE_DEFAULTS.survivorSpendingShare,
+    death = null,
+    // Couple mode: life insurance policies (see policyInForce).
+    lifePolicies = [],
+    // How the state pension rises each April (see uprateStatePension).
+    statePensionUprating = 'triple-lock',
   } = profile;
 
-  assertPositiveInteger(currentAge, 'currentAge');
-  assertPositiveInteger(retirementAge, 'retirementAge');
-  if (retirementAge <= currentAge)
-    throw new RangeError('retirementAge must be greater than currentAge');
   if (!Number.isInteger(currentYear) || currentYear < 1990)
     throw new RangeError('currentYear must be an integer >= 1990');
-
-  assertNonNegativeFinite(grossIncome, 'grossIncome');
-  assertNonNegativeFinite(employeePensionRate, 'employeePensionRate');
-  assertNonNegativeFinite(employerPensionRate, 'employerPensionRate');
-  if (employeePensionRate > 1) throw new RangeError('employeePensionRate must be <= 1');
-  if (employerPensionRate > 1) throw new RangeError('employerPensionRate must be <= 1');
-  if (typeof employerMatch !== 'boolean') throw new TypeError('employerMatch must be a boolean');
-  assertNonNegativeFinite(employerMatchThreshold, 'employerMatchThreshold');
-  if (employerMatchThreshold > 1) throw new RangeError('employerMatchThreshold must be <= 1');
-
-  // Effective employer rate. With matching, the employer pays its full rate only
-  // when the employee meets the required threshold, and nothing below it (partial
-  // tiers are not modelled — see the profile note). The 1e-4 tolerance absorbs
-  // rounding of a solver-derived employee rate to 4 decimal places.
-  const effectiveEmployerRate =
-    employerMatch && employeePensionRate + 1e-4 < employerMatchThreshold ? 0 : employerPensionRate;
-
-  if (typeof topUpStatePension !== 'boolean')
-    throw new TypeError('topUpStatePension must be a boolean');
-
-  assertNonNegativeInteger(niContributionYears, 'niContributionYears');
-  assertPositiveInteger(statePensionAge, 'statePensionAge');
-  assertNonNegativeInteger(statePensionDeferralYears, 'statePensionDeferralYears');
   if (statePensionUprating !== 'triple-lock' && statePensionUprating !== 'adjusted')
     throw new RangeError("statePensionUprating must be 'triple-lock' or 'adjusted'");
-  assertPositiveInteger(pensionAccessAge, 'pensionAccessAge');
 
-  if (studentLoanPlan !== null && !STUDENT_LOAN_PLANS[studentLoanPlan])
-    throw new TypeError(`studentLoanPlan '${studentLoanPlan}' is not a recognised plan`);
+  // ── The people ──────────────────────────────────────────────────────────
+  // Their pay, pots, pension rights and retirement choices (ukLifecyclePerson.js).
+  // An annuity is bought from one person's pension (`annuity.owner`, default
+  // the main person), so only the owner sees it.
+  const annuityOwner = retirementOptions?.annuity?.owner ?? 'self';
+  if (annuityOwner !== 'self' && annuityOwner !== 'partner')
+    throw new RangeError("retirementOptions.annuity.owner must be 'self' or 'partner'");
+  if (annuityOwner === 'partner' && partnerProfile == null)
+    throw new RangeError('retirementOptions.annuity.owner is the partner, but there is no partner');
+  const optionsWithoutAnnuity =
+    retirementOptions == null ? null : { ...retirementOptions, annuity: null };
+
+  const self = createPerson(
+    profile,
+    pots,
+    annuityOwner === 'self' ? retirementOptions : optionsWithoutAnnuity,
+    currentYear
+  );
+  self.id = 'self';
+  const { currentAge, retirementAge } = self;
+
+  let partner = null;
+  if (partnerProfile != null) {
+    if (typeof partnerProfile !== 'object' || Array.isArray(partnerProfile))
+      throw new TypeError('partner must be an object');
+    partner = createPerson(
+      partnerProfile,
+      partnerProfile.pots ?? {},
+      annuityOwner === 'partner' ? retirementOptions : optionsWithoutAnnuity,
+      currentYear
+    );
+    partner.id = 'partner';
+    if (!PARTNERSHIPS.includes(partnership))
+      throw new RangeError(`partnership must be one of ${PARTNERSHIPS.join(', ')}`);
+    if (typeof willsToEachOther !== 'boolean')
+      throw new TypeError('willsToEachOther must be a boolean');
+    if (
+      typeof survivorSpendingShare !== 'number' ||
+      !(survivorSpendingShare > 0 && survivorSpendingShare <= 1)
+    )
+      throw new RangeError('survivorSpendingShare must be in (0, 1]');
+  }
+  const couple = partner !== null;
+  const people = couple ? [self, partner] : [self];
+  const alivePeople = () => people.filter((P) => P.diedAt === null);
+  // The timeline is the main person's age. A couple's plan runs until the
+  // younger partner reaches "model to age", which is this many years later
+  // on the timeline when the partner is the younger one.
+  const ageGap = couple ? Math.max(0, currentAge - partner.currentAge) : 0;
+
+  // "What if one of us dies?": one death, at the start of the year the person
+  // would reach `death.age`. From then the survivor carries on alone.
+  let deathPlan = null;
+  if (death != null) {
+    if (!couple)
+      throw new RangeError('death needs a partner: in a single-person plan there is no survivor');
+    const D = death.person === 'self' ? self : death.person === 'partner' ? partner : null;
+    if (D === null) throw new RangeError("death.person must be 'self' or 'partner'");
+    if (!Number.isInteger(death.age) || death.age < D.currentAge)
+      throw new RangeError('death.age must be an integer no younger than that person is now');
+    const { extraCover = 0 } = death;
+    assertNonNegativeFinite(extraCover, 'death.extraCover');
+    deathPlan = {
+      D,
+      S: D === self ? partner : self,
+      yearIndex: death.age - D.currentAge,
+      extraCover,
+    };
+  }
+  const estates = [];
+
+  // ── Life insurance (couple mode) ──────────────────────────────────────────
+  // Each policy pays its sum assured if the person it covers dies while it is
+  // in force: 'level' term pays the same throughout, 'decreasing' term falls
+  // in a straight line to nothing at the end of the term (a conservative
+  // stand-in for the repayment-mortgage curve real policies follow), and
+  // 'wholeOfLife' has no end. A 'joint' policy pays on the first death. The
+  // sum assured and premium are fixed in cash, as on a quote. Premiums are a
+  // household cost while the policy runs. On a payout the money goes to the
+  // mortgage or the survivor's savings (`payTo`), straight to the survivor if
+  // written in trust, otherwise through the estate (ukEstate.js).
+  const LIFE_POLICY_TYPES = ['level', 'decreasing', 'wholeOfLife'];
+  if (!Array.isArray(lifePolicies)) throw new TypeError('lifePolicies must be an array');
+  if (lifePolicies.length > 0 && !couple)
+    throw new RangeError('lifePolicies need a partner: only couple mode models a payout');
+  const policies = lifePolicies
+    .map((pol, idx) => {
+      const name = `lifePolicies[${idx}]`;
+      if (pol == null || typeof pol !== 'object') throw new TypeError(`${name} must be an object`);
+      const {
+        label = '',
+        enabled = true,
+        type,
+        lifeOf,
+        sumAssured,
+        termYears = null,
+        monthlyPremium = 0,
+        inTrust = true,
+        payTo = 'savings',
+      } = pol;
+      if (!LIFE_POLICY_TYPES.includes(type))
+        throw new RangeError(`${name}.type must be one of ${LIFE_POLICY_TYPES.join(', ')}`);
+      if (!['self', 'partner', 'joint'].includes(lifeOf))
+        throw new RangeError(`${name}.lifeOf must be 'self', 'partner' or 'joint'`);
+      assertNonNegativeFinite(sumAssured, `${name}.sumAssured`);
+      assertNonNegativeFinite(monthlyPremium, `${name}.monthlyPremium`);
+      if (type !== 'wholeOfLife') assertPositiveInteger(termYears, `${name}.termYears`);
+      if (typeof inTrust !== 'boolean') throw new TypeError(`${name}.inTrust must be a boolean`);
+      if (payTo !== 'savings' && payTo !== 'mortgage')
+        throw new RangeError(`${name}.payTo must be 'savings' or 'mortgage'`);
+      return {
+        label,
+        enabled,
+        type,
+        lifeOf,
+        sumAssured,
+        termYears,
+        monthlyPremium,
+        inTrust,
+        payTo,
+      };
+    })
+    .filter((pol) => pol.enabled !== false);
+
+  /** Whether a policy is still running in projection year i. */
+  function policyInForce(pol, i) {
+    if (pol.paidOut) return false;
+    if (pol.type !== 'wholeOfLife' && i >= pol.termYears) return false;
+    if (pol.lifeOf === 'joint') return estates.length === 0; // ends at the first death
+    return (pol.lifeOf === 'self' ? self : partner).diedAt === null;
+  }
+
+  /** This year's life cover premiums (a household cost). */
+  function lifeCoverPremiums(i) {
+    let total = 0;
+    for (const pol of policies) if (policyInForce(pol, i)) total += pol.monthlyPremium * 12;
+    return round2(total);
+  }
+
+  /** Lump sums paid on D's death in year i: life cover, death-in-service, and
+   *  any extra cover being tested (cover-gap search, today's money). */
+  function coverOnDeath(D, i) {
+    const cover = [];
+    for (const pol of policies) {
+      if (pol.lifeOf !== D.id && pol.lifeOf !== 'joint') continue;
+      if (!policyInForce(pol, i)) continue;
+      const amount =
+        pol.type === 'decreasing'
+          ? round2(pol.sumAssured * Math.max(0, 1 - i / pol.termYears))
+          : pol.sumAssured;
+      pol.paidOut = true;
+      if (amount > 0)
+        cover.push({
+          kind: 'lifeCover',
+          label: pol.label,
+          amount,
+          inTrust: pol.inTrust,
+          payTo: pol.payTo,
+        });
+    }
+    // Death-in-service: paid by the pension scheme, outside the estate, if the
+    // person dies while still working.
+    if (D.retiredAt === null && D.deathInServiceMultiple > 0) {
+      const salary = D.income * D.hoursFractionAtAge(D.currentAge + i);
+      cover.push({
+        kind: 'deathInService',
+        label: 'Death-in-service',
+        amount: round2(D.deathInServiceMultiple * salary),
+        inTrust: true,
+        payTo: 'savings',
+      });
+    }
+    if (deathPlan?.extraCover > 0)
+      cover.push({
+        kind: 'extra',
+        label: 'Extra cover',
+        amount: round2(deathPlan.extraCover * econ.cumulInflation),
+        inTrust: true,
+        payTo: 'savings',
+      });
+    return cover;
+  }
+  // Household spending falls to the survivor's share after a death.
+  const spendingShare = () => (estates.length > 0 ? survivorSpendingShare : 1);
 
   // Windfalls and one-off expenses: discrete life events at a given age.
   // Windfalls (inheritance, asset sale, gift) add money to the GIA; one-off
@@ -541,7 +554,7 @@ export function projectLifecycle(
   // inflated to the event year. Events at ages outside the projected range
   // are simply never reached (harmless). An event with enabled === false is
   // skipped entirely — it can be toggled off for what-if comparisons without
-  // being deleted.
+  // being deleted. Ages are on the timeline (the main person's age).
   function validateEvents(list, name, defaultLabel) {
     if (!Array.isArray(list)) throw new TypeError(`${name} must be an array`);
     for (let i = 0; i < list.length; i++) {
@@ -570,41 +583,6 @@ export function projectLifecycle(
   const windfallsAtAge = validateEvents(windfalls, 'windfalls', 'Windfall');
   const expensesAtAge = validateEvents(oneOffExpenses, 'oneOffExpenses', 'One-off expense');
 
-  // Employment-hours changes: discrete points where employment income steps to a
-  // fraction of the full-time-equivalent salary (part-time work, phased
-  // retirement, a career break). The fraction is applied to the wage-grown
-  // full-time track, so a later return to 100% restores the full salary. The
-  // reduced income flows through to pension contributions, tax, NI, student loan
-  // and savings automatically. fraction is bounded to (0, 1]: 0 is disallowed
-  // because stopping work entirely is modelled via retirementAge, not here.
-  function buildHoursFraction(list) {
-    if (!Array.isArray(list)) throw new TypeError('employmentChanges must be an array');
-    const points = [];
-    for (let i = 0; i < list.length; i++) {
-      const ev = list[i];
-      if (ev == null || typeof ev !== 'object')
-        throw new TypeError(`employmentChanges[${i}] must be an object`);
-      if (!Number.isInteger(ev.age))
-        throw new TypeError(`employmentChanges[${i}].age must be an integer`);
-      assertNonNegativeFinite(ev.fraction, `employmentChanges[${i}].fraction`);
-      if (ev.fraction <= 0 || ev.fraction > 1)
-        throw new RangeError(`employmentChanges[${i}].fraction must be in (0, 1]`);
-      if (ev.enabled === false) continue;
-      points.push({ age: ev.age, fraction: ev.fraction });
-    }
-    // Most recent change at or before an age wins; equal ages keep input order.
-    points.sort((a, b) => a.age - b.age);
-    return function hoursFractionAtAge(age) {
-      let fraction = 1;
-      for (const pt of points) {
-        if (pt.age <= age) fraction = pt.fraction;
-        else break;
-      }
-      return fraction;
-    };
-  }
-  const hoursFractionAtAge = buildHoursFraction(employmentChanges);
-
   // ── Validate rates ───────────────────────────────────────────────────────
   const {
     savingsRate,
@@ -630,25 +608,9 @@ export function projectLifecycle(
   assertFinite(boeRate, 'boeRate');
   assertFinite(fiscalDragRate, 'fiscalDragRate');
 
-  // ── Validate and initialise pots ─────────────────────────────────────────
-  const {
-    pensionBalance: initialPension = 0,
-    isaBalance: initialISA = 0,
-    giaBalance: initialGIA = 0,
-    giaCostBasis: initialGIACostBasis = undefined,
-    mortgage: mortgageConfig = null,
-    unsecuredDebts: unsecuredConfig = [],
-    studentLoan: studentLoanConfig = null,
-  } = pots;
+  // ── Household debts: mortgage and unsecured ──────────────────────────────
+  const { mortgage: mortgageConfig = null, unsecuredDebts: unsecuredConfig = [] } = pots;
 
-  assertNonNegativeFinite(initialPension, 'pensionBalance');
-  assertNonNegativeFinite(initialISA, 'isaBalance');
-  assertNonNegativeFinite(initialGIA, 'giaBalance');
-
-  const initialCostBasis = initialGIACostBasis ?? initialGIA;
-  assertNonNegativeFinite(initialCostBasis, 'giaCostBasis');
-
-  // Mortgage
   let mortgageBalance = 0;
   let mortgageMonthlyPayment = 0;
   let mortgageMonthlyOverpayment = 0;
@@ -701,6 +663,65 @@ export function projectLifecycle(
     }
   }
 
+  /**
+   * One year of mortgage payments, returning the payment and a row. A working
+   * year reports a zero row for a mortgage that hasn't started or is repaid
+   * (`reportRepaid`); a retirement year reports none.
+   */
+  function mortgageYear(reportRepaid) {
+    if (!hasMortgage) return { payment: 0, row: null };
+    const openingMortgage = mortgageBalance;
+    if (mortgageBalance <= 0) {
+      return {
+        payment: 0,
+        row: reportRepaid
+          ? {
+              openingBalance: 0,
+              interestCharged: 0,
+              capitalRepaid: 0,
+              payment: 0,
+              closingBalance: 0,
+              type: mortgageType,
+            }
+          : null,
+      };
+    }
+    if (mortgageType === 'interest-only') {
+      let yearInt = 0;
+      for (let m = 0; m < 12; m++) yearInt += round2(mortgageBalance * mortgageMonthlyRate);
+      yearInt = round2(yearInt);
+      return {
+        payment: yearInt,
+        row: {
+          openingBalance: openingMortgage,
+          interestCharged: yearInt,
+          capitalRepaid: 0,
+          payment: yearInt,
+          closingBalance: mortgageBalance,
+          type: 'interest-only',
+        },
+      };
+    }
+    const amort = amortiseYear(
+      mortgageBalance,
+      mortgageMonthlyRate,
+      mortgageMonthlyPayment,
+      mortgageMonthlyOverpayment
+    );
+    mortgageBalance = amort.closingBalance;
+    return {
+      payment: amort.payment,
+      row: {
+        openingBalance: openingMortgage,
+        interestCharged: amort.interestCharged,
+        capitalRepaid: amort.capitalRepaid,
+        payment: amort.payment,
+        closingBalance: mortgageBalance,
+        type: 'repayment',
+      },
+    };
+  }
+
   // Unsecured debts
   if (!Array.isArray(unsecuredConfig)) throw new TypeError('unsecuredDebts must be an array');
 
@@ -721,57 +742,44 @@ export function projectLifecycle(
     };
   });
 
-  // Student loan
-  let slBalance = 0;
-  let slWriteOffYear = Infinity;
-  let hasStudentLoan = false;
+  const unsecuredOutstanding = () => debts.reduce((s, d) => s + d.balance, 0);
 
-  if (studentLoanPlan !== null && studentLoanConfig != null && studentLoanConfig.balance > 0) {
-    assertNonNegativeFinite(studentLoanConfig.balance, 'studentLoan.balance');
-    slBalance = round2(studentLoanConfig.balance);
-    const repaymentStartYear = studentLoanConfig.repaymentStartYear ?? currentYear;
-    if (!Number.isInteger(repaymentStartYear) || repaymentStartYear < 1990)
-      throw new RangeError('studentLoan.repaymentStartYear must be an integer >= 1990');
-    slWriteOffYear = repaymentStartYear + STUDENT_LOAN_PLANS[studentLoanPlan].writeOffYears;
-    hasStudentLoan = true;
+  /** One year of payments on every unsecured debt, returning the total and rows. */
+  function unsecuredDebtsYear() {
+    let payments = 0;
+    const rows = debts.map((debt) => {
+      const openingDebt = debt.balance;
+      if (openingDebt <= 0) {
+        return {
+          label: debt.label,
+          openingBalance: 0,
+          interestCharged: 0,
+          capitalRepaid: 0,
+          payment: 0,
+          closingBalance: 0,
+        };
+      }
+      const amort = amortiseYear(debt.balance, debtMonthlyRate, debt.monthlyPayment);
+      debt.balance = amort.closingBalance;
+      payments = round2(payments + amort.payment);
+      return {
+        label: debt.label,
+        openingBalance: openingDebt,
+        interestCharged: amort.interestCharged,
+        capitalRepaid: amort.capitalRepaid,
+        payment: amort.payment,
+        closingBalance: amort.closingBalance,
+      };
+    });
+    return { payments, rows };
   }
 
-  // ── Projection state ─────────────────────────────────────────────────────
-  const { annualSubscriptionLimit: ISA_LIMIT } = ISA_CONSTANTS;
-
-  // `retirementAge` is the TARGET (nominal). With flexible retirement the actual
-  // stop-work age can be later; it is resolved by the accumulation loop below
-  // and stored in actualRetirementAge / actualRetirementYear.
-
-  let pensionBal = round2(initialPension);
-  let isaBal = round2(initialISA);
-  let giaBal = round2(initialGIA);
-  let costBasis = round2(initialCostBasis);
-  let income = round2(grossIncome);
-  let niYears = niContributionYears;
-
-  const yearlyBreakdown = [];
-
   // ── Glide path configuration ──────────────────────────────────────────────
-  // Extracted here (before the accumulation loop) so both the accumulation
-  // and retirement phases can share the same values.
+  // Shared by the working and retirement years.
   const { glideStartYears: _glideStart = 10, glideEndYears: _glideEnd = 5 } =
     retirementOptions ?? {};
   const glideBeforeYrs = Math.max(0, _glideStart);
   const glideAfterYrs = Math.max(0, _glideEnd);
-
-  // Share of the pension still payable tax-free while it is uncrystallised: the
-  // planned lump-sum percentage when a PCLS will be taken, otherwise 25% of each
-  // UFPLS withdrawal. Feeds the display-only after-tax estimate on each row.
-  const uncrystallisedTaxFreeShare = retirementOptions?.takePCLS
-    ? Math.max(
-        0,
-        Math.min(
-          PENSION_CONSTANTS.maxPCLSPercentage,
-          retirementOptions.pclsPercentage ?? PENSION_CONSTANTS.maxPCLSPercentage
-        )
-      )
-    : PENSION_CONSTANTS.maxPCLSPercentage;
 
   // ── Flexible (dynamic) retirement date ────────────────────────────────────
   // Optionally keep working past the target retirement age when the plan is not
@@ -780,6 +788,8 @@ export function projectLifecycle(
   // it never looks at future realised returns, so under Monte Carlo a trial only
   // reacts to what has actually happened by that age (no peeking). It is purely a
   // decision rule — the resulting plan is still simulated in full afterwards.
+  // In a couple each partner reaches their own target age and asks whether the
+  // household is on track (conservatively, as if no one earns any more).
   const { flexibleRetirement = false, maxRetirementDelayYears = 0 } = retirementOptions ?? {};
   if (typeof flexibleRetirement !== 'boolean')
     throw new TypeError('retirementOptions.flexibleRetirement must be a boolean');
@@ -797,49 +807,46 @@ export function projectLifecycle(
   // Annuity income sits on top of the state pension, which largely fills the
   // personal allowance, so the check counts it net of basic-rate tax.
   const ANNUITY_NET_FACTOR = 0.8;
-  // Deferring the state pension raises it for life (~5.8% per year deferred);
-  // the check must count that increase, not just the later start age.
-  const statePensionDeferralUplift =
-    1 + LIFECYCLE_CONSTANTS.statePension.deferralUpliftPerYear * statePensionDeferralYears;
 
   /**
-   * Real-terms two-bucket rundown from `atAge`: can the pots fund `spendReal`
-   * (today's money) of net spending every year to the horizon under central
-   * assumptions? Accessible pots (ISA + GIA) are drawn first, then the locked
-   * pension once past its access age (grossed up for tax), with the state
-   * pension switched on at its (deferred) start age and debt cleared from
-   * spendable pots up front. Never peeks at realised future returns — it is a
-   * decision rule, not the model. Deliberately simple and slightly conservative.
+   * Real-terms rundown from projection year `i`: can the household's pots fund
+   * `spendReal` (today's money) of net spending every year to the horizon
+   * under central assumptions? Accessible pots (ISA + GIA, and any inherited
+   * pension) are drawn first, then each person's locked pension once past
+   * their access age (grossed up for tax), with each state pension switched
+   * on at its (deferred) start age and debt cleared from spendable pots up
+   * front. Never peeks at realised future returns — it is a decision rule,
+   * not the model. Deliberately simple and slightly conservative.
    */
-  function rundownSurvives(
-    atAge,
-    pension,
-    isa,
-    gia,
-    mortgage,
-    unsecured,
-    niYearsNow,
-    cumulInflNow,
-    spendReal,
-    annuityGrossNominal = 0,
-    annuityInflationLinked = true
-  ) {
-    const horizon = retirementOptions.maxAge ?? 90;
-    const deflate = cumulInflNow > 0 ? 1 / cumulInflNow : 1;
+  function rundownSurvives(i, spendReal, annuityGrossNominal = 0, annuityInflationLinked = true) {
+    const alive = alivePeople();
+    const horizonIndex = (retirementOptions.maxAge ?? 90) + ageGap - currentAge;
+    const deflate = econ.cumulInflation > 0 ? 1 / econ.cumulInflation : 1;
 
-    // Today's-money buckets: accessible (ISA + GIA) and locked pension (NMPA).
-    let accessible = Math.max(0, (isa + gia) * deflate);
-    let locked = Math.max(0, pension * deflate);
+    // Today's-money buckets: accessible (ISA + GIA) and each locked pension (NMPA).
+    let accessible = Math.max(0, alive.reduce((s, P) => s + P.isa + P.gia, 0) * deflate);
+    const locked = alive.map((P) => ({ P, amount: Math.max(0, P.pension * deflate) }));
+    for (const P of alive) {
+      if (!P.inherited) continue;
+      // An inherited pension can be drawn at any age: tax-free, or taxed like a pension.
+      accessible += Math.max(0, P.inherited.taxFree * deflate);
+      locked.push({ P, amount: Math.max(0, P.inherited.taxable * deflate), anyAge: true });
+    }
     // Clear outstanding debt from spendable pots first (conservative).
-    let debt = Math.max(0, (mortgage + unsecured) * deflate);
+    let debt = Math.max(0, (mortgageBalance + unsecuredOutstanding()) * deflate);
     const payFromAccessible = Math.min(accessible, debt);
     accessible -= payFromAccessible;
     debt -= payFromAccessible;
-    locked = Math.max(0, locked - debt);
+    for (const b of locked) {
+      const before = b.amount;
+      b.amount = Math.max(0, b.amount - debt);
+      debt = Math.max(0, debt - before);
+    }
 
     // Today's money (triple lock ≈ real-constant), including any deferral increase.
-    const stateReal = computeStatePension(niYearsNow) * statePensionDeferralUplift;
-    const spStart = statePensionAge + statePensionDeferralYears;
+    const stateReal = alive.map(
+      (P) => computeStatePension(P.niYears) * P.statePensionDeferralUplift
+    );
     // An annuity already in payment is guaranteed income, like the state pension.
     // Inflation-linked holds its real value; level erodes at the central inflation
     // rate. Counted net of basic-rate tax (it stacks on the state pension, which
@@ -847,106 +854,73 @@ export function projectLifecycle(
     // ignored: converting pot to income at a fair rate is roughly neutral here.
     const annuityReal0 = Math.max(0, annuityGrossNominal * deflate);
 
-    for (let a = atAge; a <= horizon; a++) {
+    for (let k = i; k <= horizonIndex; k++) {
       const annuityReal = annuityInflationLinked
         ? annuityReal0
-        : annuityReal0 / Math.pow(1 + inflationRate, a - atAge);
-      let need = Math.max(
-        0,
-        spendReal - (a >= spStart ? stateReal : 0) - ANNUITY_NET_FACTOR * annuityReal
+        : annuityReal0 / Math.pow(1 + inflationRate, k - i);
+      // DB pensions are guaranteed income too, taxed like the annuity.
+      const spReal = alive.reduce(
+        (s, P, j) => s + (P.currentAge + k >= P.spClaimAge ? stateReal[j] : 0),
+        0
       );
+      const dbReal = alive.reduce(
+        (s, P) => s + dbRealIncomeAt(P, P.currentAge + k, P.currentAge + i, deflate, inflationRate),
+        0
+      );
+      let need = Math.max(0, spendReal - spReal - ANNUITY_NET_FACTOR * (annuityReal + dbReal));
       if (need > 0) {
         const fromAccessible = Math.min(accessible, need);
         accessible -= fromAccessible;
         need -= fromAccessible;
       }
-      if (need > 0 && a >= pensionAccessAge && locked > 0) {
-        const grossDrawn = Math.min(locked, need * TEST_PENSION_GROSSUP);
-        locked -= grossDrawn;
-        need -= grossDrawn / TEST_PENSION_GROSSUP;
+      for (const b of locked) {
+        if (need > 0 && (b.anyAge || b.P.currentAge + k >= b.P.pensionAccessAge) && b.amount > 0) {
+          const grossDrawn = Math.min(b.amount, need * TEST_PENSION_GROSSUP);
+          b.amount -= grossDrawn;
+          need -= grossDrawn / TEST_PENSION_GROSSUP;
+        }
       }
       if (need > 0.5) return false; // can't meet this year's spending under central assumptions
       accessible *= 1 + centralRealReturn;
-      locked *= 1 + centralRealReturn;
+      for (const b of locked) b.amount *= 1 + centralRealReturn;
     }
     return true;
   }
 
   // Flexible-retirement on-track test: can the target spend be funded for life?
-  function onTrackToRetire(
-    atAge,
-    pension,
-    isa,
-    gia,
-    mortgage,
-    unsecured,
-    niYearsNow,
-    cumulInflNow
-  ) {
+  function onTrackToRetire(i) {
     if (retirementOptions == null) return true;
     const targetReal = retirementOptions.targetNetAnnualExpenses ?? 0;
     if (targetReal <= 0) return true;
-    return rundownSurvives(
-      atAge,
-      pension,
-      isa,
-      gia,
-      mortgage,
-      unsecured,
-      niYearsNow,
-      cumulInflNow,
-      targetReal
-    );
+    return rundownSurvives(i, targetReal * spendingShare());
   }
 
-  // Largest real (today's-money) net spend the pots can sustain from `atAge` to
+  // Largest real (today's-money) net spend the pots can sustain from year `i` to
   // the horizon under central assumptions — the spending guardrails steer toward
   // this. Found by bisection on rundownSurvives, which is monotonic in spend
   // (more spending is never easier to sustain). ~30 iterations gives sub-pound
   // resolution on any realistic pot.
-  function sustainableSpendReal(
-    atAge,
-    pension,
-    isa,
-    gia,
-    mortgage,
-    unsecured,
-    niYearsNow,
-    cumulInflNow,
-    annuityGrossNominal = 0,
-    annuityInflationLinked = true
-  ) {
-    const deflate = cumulInflNow > 0 ? 1 / cumulInflNow : 1;
-    const totalReal = Math.max(0, (pension + isa + gia) * deflate);
+  function sustainableSpendReal(i, annuityGrossNominal = 0, annuityInflationLinked = true) {
+    const alive = alivePeople();
+    const deflate = econ.cumulInflation > 0 ? 1 / econ.cumulInflation : 1;
+    const totalReal = Math.max(
+      0,
+      alive.reduce((s, P) => s + P.pension + P.isa + P.gia + inheritedPensionBalance(P), 0) *
+        deflate
+    );
     // Upper bound: drawing the whole (real) pot plus all guaranteed income in a
     // single year cannot be sustained beyond it, so this always fails the rundown.
     let hi =
       totalReal +
-      computeStatePension(niYearsNow) * statePensionDeferralUplift +
+      alive.reduce((s, P) => s + computeStatePension(P.niYears) * P.statePensionDeferralUplift, 0) +
       Math.max(0, annuityGrossNominal * deflate) +
+      alive.reduce((s, P) => s + P.dbStates.reduce((t, st) => t + st.pension * deflate * 2, 0), 0) +
       1;
     let lo = 0;
     for (let iter = 0; iter < 30; iter++) {
       const mid = (lo + hi) / 2;
-      if (
-        rundownSurvives(
-          atAge,
-          pension,
-          isa,
-          gia,
-          mortgage,
-          unsecured,
-          niYearsNow,
-          cumulInflNow,
-          mid,
-          annuityGrossNominal,
-          annuityInflationLinked
-        )
-      ) {
-        lo = mid;
-      } else {
-        hi = mid;
-      }
+      if (rundownSurvives(i, mid, annuityGrossNominal, annuityInflationLinked)) lo = mid;
+      else hi = mid;
     }
     return lo;
   }
@@ -975,515 +949,247 @@ export function projectLifecycle(
     }
   }
 
-  // ── Lifetime annuity (a planned purchase) ──────────────────────────────────
-  // Converts part of the pension into guaranteed, taxable income for life, sized
-  // by an income target in today's money: either enough to cover `amountReal` of
-  // essential net spending on top of the state pension ('essential'), or a fixed
-  // gross income ('fixed'). Bought once, at the first retirement year at or after
-  // `purchaseAge` (and the pension access age). If the pension can't afford the
-  // target, it buys what it can. `rate` is the first year's income per £ of
-  // price; null means "use the illustrative table at the actual purchase age".
-  let annuityCfg = null;
-  {
-    const an = retirementOptions?.annuity ?? null;
-    if (an != null) {
-      const { purchaseAge, inflationLinked = true, rate = null, sizing, amountReal } = an;
-      if (!Number.isInteger(purchaseAge) || purchaseAge < 0)
-        throw new RangeError(
-          'retirementOptions.annuity.purchaseAge must be a non-negative integer'
-        );
-      if (typeof inflationLinked !== 'boolean')
-        throw new TypeError('retirementOptions.annuity.inflationLinked must be a boolean');
-      if (rate != null && (!Number.isFinite(rate) || rate <= 0 || rate > 0.5))
-        throw new RangeError('retirementOptions.annuity.rate must be in (0, 0.5] or null');
-      if (sizing !== 'essential' && sizing !== 'fixed')
-        throw new RangeError("retirementOptions.annuity.sizing must be 'essential' or 'fixed'");
-      assertNonNegativeFinite(amountReal, 'retirementOptions.annuity.amountReal');
-      annuityCfg = { purchaseAge, inflationLinked, rate, sizing, amountReal };
-    }
+  // ── Retirement settings ───────────────────────────────────────────────────
+  // The spending target, horizon, lump sum choice and guardrail state (real,
+  // today's money). The guardrail floor is clamped to the target (a floor
+  // above target would be nonsensical); the current allowed spend starts at the
+  // target and flexes within [floor, ceiling] as the guardrails react.
+  let retirement = null;
+  if (retirementOptions != null) {
+    const {
+      targetNetAnnualExpenses,
+      maxAge = 90,
+      takePCLS = false,
+      pclsPercentage = PENSION_CONSTANTS.maxPCLSPercentage,
+    } = retirementOptions;
+    assertNonNegativeFinite(targetNetAnnualExpenses, 'retirementOptions.targetNetAnnualExpenses');
+    if (!Number.isInteger(maxAge) || maxAge <= retirementAge)
+      throw new RangeError('retirementOptions.maxAge must be an integer > retirementAge');
+    retirement = {
+      targetNetAnnualExpenses,
+      maxAge,
+      takePCLS,
+      pclsPercentage,
+      grFloor: guardrails ? Math.min(guardrails.floor, targetNetAnnualExpenses) : 0,
+      grCeiling: guardrails ? (guardrails.ceilingPct / 100) * targetNetAnnualExpenses : Infinity,
+      grSpendReal: targetNetAnnualExpenses,
+    };
   }
 
-  // Running cumulative factors for year-by-year rate variation.
-  // When yearlyRatesOverride is null these reproduce the same values as Math.pow().
-  let cumulInflation = 1; // product of (1 + inflRate) from year 1..i
-  let thresholdScale = 1; // product of (1 + inflRate - fiscalDragRate) from year 1..i
-  let spIndex = 1; // state pension uprating since today (see uprateStatePension)
-  let earningsIndex = 1; // average earnings since today, product of (1 + wage growth)
-  // Adjusted triple lock: the state pension's value relative to earnings
-  // (spIndex / earningsIndex) after the last triple-lock year, which it must
-  // hold. Fixed at the first adjusted uprating.
+  /**
+   * Flex the guardrail budget toward what the pots can sustain this year
+   * (scaled to the household's spending share), returning the action taken.
+   */
+  function applyGuardrails(i, annuityGross, annuityInflationLinked) {
+    const sustainable = sustainableSpendReal(i, annuityGross, annuityInflationLinked);
+    const share = spendingShare();
+    let action = 'none';
+    if (retirement.grSpendReal * share > sustainable * (1 + guardrails.band)) {
+      retirement.grSpendReal = retirement.grSpendReal * (1 - guardrails.step);
+      action = 'cut';
+    } else if (retirement.grSpendReal * share < sustainable * (1 - guardrails.band)) {
+      retirement.grSpendReal = retirement.grSpendReal * (1 + guardrails.step);
+      action = 'raise';
+    }
+    retirement.grSpendReal = Math.min(
+      retirement.grCeiling,
+      Math.max(retirement.grFloor, retirement.grSpendReal)
+    );
+    return action;
+  }
+
+  // ── The economy ───────────────────────────────────────────────────────────
+  // Running factors since the start year, shared by everyone in the household.
+  // Year-by-year rate variation (Monte Carlo) compounds here; without it they
+  // reproduce Math.pow() of the base rates.
+  const econ = {
+    cumulInflation: 1, // product of (1 + inflRate) from year 1..i
+    thresholdScale: 1, // product of (1 + inflRate - fiscalDragRate) from year 1..i
+    // The state pension's increases since the start year (uprateStatePension).
+    statePensionIndex: 1,
+  };
+
+  // Adjusted lock: average earnings since the start year, and the state
+  // pension's value relative to earnings in 2029/30, which it must then hold —
+  // fixed at the first adjusted increase.
+  let earningsIndex = 1;
   let spEarningsRef = null;
 
   /**
-   * Apply one April uprating to the state pension index, for the given year's
-   * rates and calendar year. Triple lock: the highest of earnings growth, CPI
-   * and 2.5%. Adjusted rule (from April 2030 when selected): the highest of CPI
-   * and 2.5%, or more if needed to keep the pension's value relative to
-   * earnings at its pre-reform level — that level, not each year's earnings
-   * growth, is the floor, so an inflation-led rise isn't topped up again when
-   * earnings later catch up.
+   * One April increase to the state pension index, for the given year's rates
+   * and calendar year. Triple lock: the highest of earnings growth, CPI and
+   * 2.5%. Adjusted lock (from April 2030, when chosen): the highest of CPI and
+   * 2.5%, or more if needed to keep the pension's value relative to earnings at
+   * its 2029/30 level. That level, not each year's earnings growth, is the
+   * floor, so an inflation-led rise isn't topped up again when earnings later
+   * catch up.
    */
   function uprateStatePension(yr, calendarYear) {
-    const priceRise = Math.max(yr.inflationRate, LIFECYCLE_CONSTANTS.statePension.upratingFloor);
+    const { adjustedTripleLockFromYear, upratingFloor } = LIFECYCLE_CONSTANTS.statePension;
+    const priceRise = Math.max(yr.inflationRate, upratingFloor);
     const adjusted =
-      statePensionUprating === 'adjusted' &&
-      calendarYear >= LIFECYCLE_CONSTANTS.statePension.adjustedTripleLockFromYear;
-    if (adjusted) spEarningsRef ??= spIndex / earningsIndex;
+      statePensionUprating === 'adjusted' && calendarYear >= adjustedTripleLockFromYear;
+    if (adjusted) spEarningsRef ??= econ.statePensionIndex / earningsIndex;
     earningsIndex *= 1 + yr.wageGrowthRate;
-    spIndex = adjusted
-      ? Math.max(spIndex * (1 + priceRise), spEarningsRef * earningsIndex)
-      : spIndex * (1 + Math.max(yr.wageGrowthRate, priceRise));
+    econ.statePensionIndex = adjusted
+      ? Math.max(econ.statePensionIndex * (1 + priceRise), spEarningsRef * earningsIndex)
+      : econ.statePensionIndex * (1 + Math.max(yr.wageGrowthRate, priceRise));
   }
 
-  // State pension claim point (state pension age + any deferral). The extra
-  // from deferring is fixed at claim as a share of the pension then payable and
-  // afterwards rises with CPI only; the base pension keeps the triple lock
-  // (GOV.UK, "Defer your State Pension": annual increases). The running factors
-  // are recorded as the projection passes the claim age; a claim before the
-  // projection starts is treated as claimed at the start.
-  const spClaimAge = statePensionAge + statePensionDeferralYears;
-  let spClaimCumInfl = spClaimAge <= currentAge ? 1 : null;
-  let spClaimSpIndex = spClaimAge <= currentAge ? 1 : null;
-  const spDeferralExtraShare =
-    LIFECYCLE_CONSTANTS.statePension.deferralUpliftPerYear * statePensionDeferralYears;
-
-  /**
-   * Nominal state pension payable in the year the projection is at `age`, from
-   * the running inflation / uprating factors: nothing before the claim age
-   * or below the minimum qualifying years; otherwise the uprated base plus
-   * any deferral extra (CPI-uprated since the claim). Used by both the working
-   * and retirement phases — the pension is paid from the claim age whether or
-   * not the person is still working.
-   */
-  function statePensionGrossAt(age, qualifyingYears) {
-    if (age < spClaimAge) return 0;
-    const fullRate = computeStatePension(qualifyingYears); // 0 below the minimum
-    if (fullRate <= 0) return 0;
-    const claimInfl = spClaimCumInfl ?? cumulInflation; // always recorded; defensive
-    const claimSpIndex = spClaimSpIndex ?? spIndex;
-    const deferralExtra =
-      fullRate * claimSpIndex * spDeferralExtraShare * (cumulInflation / claimInfl);
-    return round2(fullRate * spIndex + deferralExtra);
+  /** This year's rates: the base rates, merged with any override for year i. */
+  function ratesForYear(i) {
+    return yearlyRatesOverride?.[i] != null
+      ? {
+          savingsRate,
+          retirementRate,
+          wageGrowthRate,
+          inflationRate,
+          boeRate,
+          ...yearlyRatesOverride[i],
+        }
+      : { savingsRate, retirementRate, wageGrowthRate, inflationRate, boeRate };
   }
 
-  // ── Annual loop ──────────────────────────────────────────────────────────
-  // Open-ended: work until the target retirement age, then (if flexible) keep
-  // going while off track, up to the delay cap or the plan horizon.
-  let accumulationYears; // number of accumulation years actually run (set at loop break)
-  for (let i = 0; ; i++) {
-    const year = currentYear + i;
-    const age = currentAge + i;
+  const yearlyBreakdown = [];
 
-    // Stop working once at/after the target age and either not flexible, on
-    // track, at the delay cap, or at the horizon. The on-track test is only
-    // evaluated when flexible (the cap check short-circuits otherwise).
-    if (age >= retirementAge) {
-      const cap = flexibleRetirement ? maxRetirementDelayYears : 0;
-      const hitCap = age - retirementAge >= cap;
-      const atHorizon = retirementOptions != null && age >= (retirementOptions.maxAge ?? Infinity);
-      const unsecuredNow = debts.reduce((s, d) => s + d.balance, 0);
-      if (
-        hitCap ||
-        atHorizon ||
-        onTrackToRetire(
-          age,
-          pensionBal,
-          isaBal,
-          giaBal,
-          mortgageBalance,
-          unsecuredNow,
-          niYears,
-          cumulInflation
-        )
-      ) {
-        accumulationYears = i;
-        break;
-      }
-    }
-
-    // Per-year rates (merge base + optional override for year i)
-    const yr =
-      yearlyRatesOverride?.[i] != null
-        ? {
-            savingsRate,
-            retirementRate,
-            wageGrowthRate,
-            inflationRate,
-            boeRate,
-            ...yearlyRatesOverride[i],
-          }
-        : { savingsRate, retirementRate, wageGrowthRate, inflationRate, boeRate };
-    // Update running products (i=0 leaves them at 1, matching Math.pow(..., 0)=1)
-    if (i > 0) {
-      cumulInflation *= 1 + yr.inflationRate;
-      thresholdScale *= 1 + yr.inflationRate - fiscalDragRate;
-      uprateStatePension(yr, currentYear + i);
-    }
-    if (age === spClaimAge) {
-      spClaimCumInfl = cumulInflation;
-      spClaimSpIndex = spIndex;
-    }
-
-    // Wage growth applies from year 1 onwards; floor at 0 (salary cannot go negative)
-    if (i > 0) income = Math.max(0, round2(income * (1 + yr.wageGrowthRate)));
-
-    // Employment-hours fraction for this age (part-time / phased retirement).
-    // Applied to the full-time-grown salary; `income` (the full-time track) keeps
-    // growing on its own, so a later return to 100% restores the full amount.
-    const hoursFraction = hoursFractionAtAge(age);
-    const effectiveIncome = round2(income * hoursFraction);
-
-    // ── Pension (salary sacrifice) ──────────────────────────────────────
-    // Employer contribution uses the effective rate: with matching enabled it
-    // is capped at the employee rate (both scale with the same income, so the
-    // per-year min of the amounts equals the min of the rates).
-    const employeeContrib = round2(effectiveIncome * employeePensionRate);
-    const employerContrib = round2(effectiveIncome * effectiveEmployerRate);
-    const totalPensionContrib = round2(employeeContrib + employerContrib);
-
-    // Adjusted gross income after salary sacrifice
-    const adjustedGross = round2(effectiveIncome - employeeContrib);
-
-    // ── Working past state pension age ───────────────────────────────────
-    // The state pension is paid from the claim age (state pension age + any
-    // deferral) even while still working, and is taxed on top of salary. From
-    // state pension age itself, employees stop paying Class 1 NI and further
-    // years no longer add qualifying years (the pension rests on the record up
-    // to state pension age).
-    const pastStatePensionAge = age >= statePensionAge;
-    const workingStatePension = statePensionGrossAt(age, niYears);
-
-    // High earners: annual allowance tapers when threshold income > £200k and
-    // adjusted income (threshold income + all pension contributions) > £260k.
-    // Threshold income counts all taxable income, including any state pension.
-    const annualAllowance = taperedAnnualAllowance(
-      round2(adjustedGross + workingStatePension),
-      round2(adjustedGross + workingStatePension + totalPensionContrib)
+  /** In couple mode, add the partner's age and a per-person breakdown to a
+   *  row produced for a one-person year (after a death). */
+  function decorateSurvivorRow(row, i, P, status) {
+    if (!couple) return row;
+    row.partnerAge = partner.currentAge + i;
+    row.people = people.map((Q) =>
+      Q === P
+        ? personRowFromSingle(Q, row, status, Q.currentAge + i)
+        : { id: Q.id, age: Q.currentAge + i, status: 'died' }
     );
-    const annualAllowanceBreached = totalPensionContrib > annualAllowance;
+    return row;
+  }
 
-    // ── Tax and NI (with fiscal-drag-adjusted thresholds) ─────────────────
-    // thresholdScale > 1 means bands have grown (less drag); < 1 means compressed (more drag).
-    // Income tax covers salary (after sacrifice) plus any state pension; NI is
-    // on earnings only, and the employee pays none from state pension age.
-    const taxResult = calculateIncomeTax(
-      round2(adjustedGross + workingStatePension),
-      thresholdScale
-    );
-    const niResult = calculateNationalInsurance(adjustedGross, thresholdScale);
-    const incomeTax = taxResult.totalTax;
-    const employeeNI = pastStatePensionAge ? 0 : niResult.employeeNI.total;
-    const employerNI = niResult.employerNI.contribution; // informational
-
-    // ── Student loan ────────────────────────────────────────────────────
-    let slRepayment = 0;
-    let slRow = null;
-
-    if (hasStudentLoan) {
-      if (slBalance <= 0) {
-        slRow = {
-          openingBalance: 0,
-          interestRate: 0,
-          interestCharged: 0,
-          repayment: 0,
-          closingBalance: 0,
-          writtenOff: false,
-        };
-      } else if (year >= slWriteOffYear) {
-        slRow = {
-          openingBalance: slBalance,
-          interestRate: 0,
-          interestCharged: 0,
-          repayment: 0,
-          closingBalance: 0,
-          writtenOff: true,
-        };
-        slBalance = 0;
-      } else {
-        const slInterestRate = calculateAnnualInterestRate(
-          studentLoanPlan,
-          adjustedGross,
-          yr.inflationRate,
-          yr.boeRate
-        );
-        const interestCharged = round2(slBalance * slInterestRate);
-        const balanceAfterInt = round2(slBalance + interestCharged);
-        const planRepayment = calculateStudentLoan(adjustedGross, studentLoanPlan).repayment;
-        slRepayment = Math.min(planRepayment, balanceAfterInt);
-        const closingSL = round2(Math.max(0, balanceAfterInt - slRepayment));
-        slRow = {
-          openingBalance: slBalance,
-          interestRate: slInterestRate,
-          interestCharged,
-          repayment: slRepayment,
-          closingBalance: closingSL,
-          writtenOff: false,
-        };
-        slBalance = closingSL;
-      }
-    }
-
-    // ── Net take-home ───────────────────────────────────────────────────
-    const netTakeHome = round2(
-      effectiveIncome + workingStatePension - employeeContrib - incomeTax - employeeNI - slRepayment
-    );
+  // ── A working year (one person) ───────────────────────────────────────────
+  // Pay and deductions, debt payments and living costs; what is left is saved
+  // (ISA first, then GIA) after funding any one-off expense, then bed and ISA
+  // and growth. `age` is the timeline age; the person's own age may differ
+  // (a surviving partner).
+  function workingYear(P, i, year, age, yr) {
+    const personAge = P.currentAge + i;
+    const pay = workingYearPay(P, personAge, year, i, yr, econ);
+    const { db } = pay;
+    const share = spendingShare();
 
     // ── Debt payments ───────────────────────────────────────────────────
     // Mortgage — may begin part-way through the projection (future purchase)
-    maybeStartMortgage(age, cumulInflation);
-    let mortgageRow = null;
-    let mortgagePaymentThisYear = 0;
-
-    if (hasMortgage) {
-      const openingMortgage = mortgageBalance;
-      if (mortgageBalance <= 0) {
-        mortgageRow = {
-          openingBalance: 0,
-          interestCharged: 0,
-          capitalRepaid: 0,
-          payment: 0,
-          closingBalance: 0,
-          type: mortgageType,
-        };
-      } else if (mortgageType === 'interest-only') {
-        let yearInt = 0;
-        for (let m = 0; m < 12; m++) {
-          yearInt += round2(mortgageBalance * mortgageMonthlyRate);
-        }
-        yearInt = round2(yearInt);
-        mortgagePaymentThisYear = yearInt;
-        mortgageRow = {
-          openingBalance: openingMortgage,
-          interestCharged: yearInt,
-          capitalRepaid: 0,
-          payment: yearInt,
-          closingBalance: mortgageBalance,
-          type: 'interest-only',
-        };
-      } else {
-        const amort = amortiseYear(
-          mortgageBalance,
-          mortgageMonthlyRate,
-          mortgageMonthlyPayment,
-          mortgageMonthlyOverpayment
-        );
-        mortgagePaymentThisYear = amort.payment;
-        mortgageBalance = amort.closingBalance;
-        mortgageRow = {
-          openingBalance: openingMortgage,
-          interestCharged: amort.interestCharged,
-          capitalRepaid: amort.capitalRepaid,
-          payment: amort.payment,
-          closingBalance: mortgageBalance,
-          type: 'repayment',
-        };
-      }
-    }
-
-    // Unsecured debts
-    let unsecuredPaymentsThisYear = 0;
-    const debtRows = debts.map((debt) => {
-      const openingDebt = debt.balance;
-      if (openingDebt <= 0) {
-        return {
-          label: debt.label,
-          openingBalance: 0,
-          interestCharged: 0,
-          capitalRepaid: 0,
-          payment: 0,
-          closingBalance: 0,
-        };
-      }
-      const amort = amortiseYear(debt.balance, debtMonthlyRate, debt.monthlyPayment);
-      debt.balance = amort.closingBalance;
-      unsecuredPaymentsThisYear = round2(unsecuredPaymentsThisYear + amort.payment);
-      return {
-        label: debt.label,
-        openingBalance: openingDebt,
-        interestCharged: amort.interestCharged,
-        capitalRepaid: amort.capitalRepaid,
-        payment: amort.payment,
-        closingBalance: amort.closingBalance,
-      };
-    });
+    maybeStartMortgage(age, econ.cumulInflation);
+    const { payment: mortgagePaymentThisYear, row: mortgageRow } = mortgageYear(true);
+    const { payments: unsecuredPaymentsThisYear, rows: debtRows } = unsecuredDebtsYear();
 
     // ── Savings allocation (ISA first, then GIA) ────────────────────────
     const totalDebtPayments = round2(mortgagePaymentThisYear + unsecuredPaymentsThisYear);
     // Living expenses scale with inflation from their today's-money baseline.
-    const livingExpenses = round2(annualLivingExpenses * cumulInflation);
+    const livingExpenses = round2(annualLivingExpenses * share * econ.cumulInflation);
     // Savings = what's left of take-home after debts and living costs.
     // Floored at 0 — overspend is not modelled; the user should adjust inputs.
+    // Life cover premiums (couple mode) are a household cost too.
+    const premiums = lifeCoverPremiums(i);
     const availableForSavings = round2(
-      Math.max(0, netTakeHome - totalDebtPayments - livingExpenses)
+      Math.max(0, pay.netTakeHome - totalDebtPayments - livingExpenses - premiums)
     );
 
     // Start-of-year pot snapshots, before any event or transfer this year.
-    const openingISA = isaBal;
-    const openingGIA = giaBal;
+    const openingISA = P.isa;
+    const openingGIA = P.gia;
 
     // ── Windfalls ───────────────────────────────────────────────────────
     // Land in the GIA before anything else this year — so a same-year
     // one-off expense (e.g. sell business → buy house) can spend them.
     // The full amount is added to the cost basis: net-of-tax money carries
     // no embedded gain. The bed-and-ISA sweep migrates it into ISA headroom.
-    const accWindfall = windfallsAtAge(age, cumulInflation);
+    const accWindfall = windfallsAtAge(age, econ.cumulInflation);
     const accWindfallAmt = accWindfall?.nominal ?? 0;
-    if (accWindfallAmt > 0) {
-      giaBal = round2(giaBal + accWindfallAmt);
-      costBasis = round2(costBasis + accWindfallAmt);
-    }
+    if (accWindfallAmt > 0) investInGIA(P, accWindfallAmt);
+    // Tax-free cash from a DB scheme taken while still working is invested the
+    // same way: into the GIA at cost, moved into the ISA over time by bed and ISA.
+    if (db.lumpTaxFree > 0) investInGIA(P, db.lumpTaxFree);
 
     // ── One-off expenses ────────────────────────────────────────────────
-    // Funded in tax-efficiency order:
-    //   1. this year's unallocated savings (cash not yet invested — no tax)
-    //   2. GIA (CGT-aware, consumes the annual exempt amount first)
-    //   3. ISA (liquid and tax-free)
-    // The pension is never raided — it is inaccessible before retirement.
+    // Funded from this year's savings, then GIA, then ISA — never the pension.
     // Anything unfunded is reported as expenseShortfall, not borrowed.
-    const accExpense = expensesAtAge(age, cumulInflation);
+    const accExpense = expensesAtAge(age, econ.cumulInflation);
     const accExpenseAmt = accExpense?.nominal ?? 0;
-    let savingsForAllocation = availableForSavings;
-    let accExemptRemaining = GIA_CGT_CONSTANTS.annualExemptAmount;
-    let expFromSavings = 0,
-      expFromGIAGross = 0,
-      expGIACGT = 0,
-      expFromISA = 0,
-      expenseShortfall = 0;
-    if (accExpenseAmt > 0) {
-      let expRemaining = accExpenseAmt;
-      expFromSavings = round2(Math.min(savingsForAllocation, expRemaining));
-      savingsForAllocation = round2(savingsForAllocation - expFromSavings);
-      expRemaining = round2(expRemaining - expFromSavings);
+    const funding = fundExpenseWhileWorking(
+      P,
+      accExpenseAmt,
+      availableForSavings,
+      pay.adjustedGross,
+      econ.thresholdScale
+    );
 
-      if (expRemaining > 0 && giaBal > 0) {
-        const gainFracPre = Math.max(0, (giaBal - costBasis) / giaBal);
-        const gross = round2(
-          Math.min(
-            giaBal,
-            giaGrossForNet(
-              expRemaining,
-              giaBal,
-              costBasis,
-              adjustedGross,
-              accExemptRemaining,
-              thresholdScale
-            )
-          )
-        );
-        expGIACGT = computeGIACGT(
-          gross,
-          giaBal,
-          costBasis,
-          adjustedGross,
-          accExemptRemaining,
-          thresholdScale
-        );
-        const net = round2(gross - expGIACGT);
-        const after = applyGIAWithdrawal(giaBal, costBasis, gross);
-        giaBal = after.bal;
-        costBasis = after.costBasis;
-        expFromGIAGross = gross;
-        expRemaining = round2(Math.max(0, expRemaining - net));
-        accExemptRemaining = round2(Math.max(0, accExemptRemaining - gross * gainFracPre));
-      }
-
-      if (expRemaining > 0 && isaBal > 0) {
-        expFromISA = round2(Math.min(isaBal, expRemaining));
-        isaBal = round2(isaBal - expFromISA);
-        expRemaining = round2(expRemaining - expFromISA);
-      }
-
-      expenseShortfall = round2(Math.max(0, expRemaining));
-    }
-
-    const isaContrib = round2(Math.min(Math.max(0, savingsForAllocation), ISA_LIMIT));
-    const giaContrib = round2(Math.max(0, savingsForAllocation - isaContrib));
+    const isaContrib = round2(Math.min(Math.max(0, funding.cashLeft), ISA_LIMIT));
+    const giaContrib = round2(Math.max(0, funding.cashLeft - isaContrib));
 
     // ── Bed and ISA (accumulation) ──────────────────────────────────────
-    // Any remaining annual ISA headroom after new contributions is used to sell
-    // existing GIA and rebuy inside the ISA (sheltering future growth from CGT).
-    // CGT is realised now on any embedded gains; only the exempt amount not
-    // already consumed by expense funding is available.
-    const accIsaHeadroom = round2(ISA_LIMIT - isaContrib);
-    let accBedIsaGross = 0,
-      accBedIsaCGT = 0,
-      accBedIsaNet = 0;
-    if (accIsaHeadroom > 0 && giaBal > 0) {
-      // Gross up so the net amount landing in the ISA equals the full headroom.
-      const accGrossNeeded = giaGrossForNet(
-        accIsaHeadroom,
-        giaBal,
-        costBasis,
-        adjustedGross,
-        accExemptRemaining,
-        thresholdScale
-      );
-      accBedIsaGross = round2(Math.min(giaBal, accGrossNeeded));
-      accBedIsaCGT = computeGIACGT(
-        accBedIsaGross,
-        giaBal,
-        costBasis,
-        adjustedGross,
-        accExemptRemaining,
-        thresholdScale
-      );
-      accBedIsaNet = round2(accBedIsaGross - accBedIsaCGT);
-      const after = applyGIAWithdrawal(giaBal, costBasis, accBedIsaGross);
-      giaBal = after.bal;
-      costBasis = after.costBasis;
-      isaBal = round2(isaBal + accBedIsaNet);
-    }
+    // Any remaining annual ISA headroom after new contributions moves GIA into
+    // the ISA, using only the exempt amount not already consumed by expenses.
+    const bed = bedAndIsa(
+      P,
+      round2(ISA_LIMIT - isaContrib),
+      pay.adjustedGross,
+      funding.exemptRemaining,
+      econ.thresholdScale
+    );
 
     // ── Pot growth ──────────────────────────────────────────────────────
-    // Balances are floored at 0; negative growth (falling markets) cannot produce a negative pot.
     const yearRate = getRateForAge(
-      age,
-      retirementAge,
+      personAge,
+      P.retirementAge,
       yr.savingsRate,
       yr.retirementRate,
       glideBeforeYrs,
       glideAfterYrs
     );
+    const openingPension = P.pension;
+    const openingInherited = inheritedPensionBalance(P);
+    const growth = growPotsWhileWorking(P, yearRate, {
+      employee: pay.employeeContrib,
+      employer: pay.employerContrib,
+      isa: isaContrib,
+      gia: giaContrib,
+    });
+    const inheritedGrowth = growInheritedPension(P, yearRate);
 
-    const openingPension = pensionBal;
-    const penAfterC = round2(pensionBal + employeeContrib + employerContrib);
-    const pensionGrowth = round2(penAfterC * yearRate);
-    pensionBal = Math.max(0, round2(penAfterC + pensionGrowth));
-
-    const isaAfterC = round2(isaBal + isaContrib);
-    const isaGrowth = round2(isaAfterC * yearRate);
-    isaBal = Math.max(0, round2(isaAfterC + isaGrowth));
-
-    const giaAfterC = round2(giaBal + giaContrib);
-    const giaGrowth = round2(giaAfterC * yearRate);
-    giaBal = Math.max(0, round2(giaAfterC + giaGrowth));
-    costBasis = round2(costBasis + giaContrib);
+    // ── The rest of the CGT allowance ───────────────────────────────────
+    // Gains up to the exempt amount not used by this year's sales are
+    // realised and reinvested at the year end, so they're never taxed.
+    const gainsHarvested = harvestGainsWithinExemption(
+      P,
+      round2(Math.max(0, funding.exemptRemaining - bed.gain))
+    );
 
     // ── NI qualifying year ──────────────────────────────────────────────
-    // Use the scaled LEL from the NI result so fiscal drag affects the qualifying threshold too.
-    const niQualifyingYear =
-      !pastStatePensionAge && adjustedGross >= niResult.employeeNI.lowerEarningsLimit;
-    if (niQualifyingYear) niYears++;
+    // Uses the scaled LEL from the NI result so fiscal drag affects the
+    // qualifying threshold too.
+    const niQualifyingYear = recordNiQualifyingYear(P, pay);
 
     // ── Build row ───────────────────────────────────────────────────────
-    yearlyBreakdown.push({
+    const row = {
       year,
       age,
 
-      grossIncome: effectiveIncome,
-      fullTimeGrossIncome: income,
-      hoursFraction,
-      employeeContribution: employeeContrib,
-      employerContribution: employerContrib,
-      adjustedGrossIncome: adjustedGross,
-      annualAllowance,
-      annualAllowanceBreached,
-      incomeTax,
-      employeeNI,
-      employerNI,
-      studentLoanRepayment: slRepayment,
-      statePensionGross: workingStatePension,
-      netTakeHome,
+      grossIncome: pay.effectiveIncome,
+      fullTimeGrossIncome: P.income,
+      hoursFraction: pay.hoursFraction,
+      employeeContribution: pay.employeeContrib,
+      employerContribution: pay.employerContrib,
+      adjustedGrossIncome: pay.adjustedGross,
+      pensionInput: pay.pensionInput,
+      annualAllowance: pay.annualAllowance,
+      annualAllowanceBreached: pay.annualAllowanceBreached,
+      incomeTax: pay.incomeTax,
+      employeeNI: pay.employeeNI,
+      employerNI: pay.employerNI,
+      studentLoanRepayment: pay.slRepayment,
+      statePensionGross: pay.workingStatePension,
+      dbPension: dbRowSummary(P, db),
+      netTakeHome: pay.netTakeHome,
 
       mortgagePayment: mortgagePaymentThisYear,
       unsecuredDebtPayments: unsecuredPaymentsThisYear,
@@ -1501,869 +1207,1246 @@ export function projectLifecycle(
       oneOffExpenseFunding:
         accExpenseAmt > 0
           ? {
-              fromSavings: expFromSavings,
-              fromGIAGross: expFromGIAGross,
-              giaCGT: expGIACGT,
-              fromISA: expFromISA,
-              shortfall: expenseShortfall,
+              fromSavings: funding.fromSavings,
+              fromGIAGross: funding.fromGIAGross,
+              giaCGT: funding.giaCGT,
+              fromISA: funding.fromISA,
+              shortfall: funding.shortfall,
             }
           : null,
-      expenseShortfall,
+      expenseShortfall: funding.shortfall,
 
       investmentRate: round2(yearRate * 10000) / 10000,
 
       pension: {
         openingBalance: openingPension,
-        employeeContribution: employeeContrib,
-        employerContribution: employerContrib,
-        growthAmount: pensionGrowth,
-        closingBalance: pensionBal,
+        employeeContribution: pay.employeeContrib,
+        employerContribution: pay.employerContrib,
+        growthAmount: growth.pensionGrowth,
+        closingBalance: P.pension,
         // Rough tax due when drawn (basic rate on the taxable part), display only.
-        estimatedTaxOnWithdrawal: estimatePensionWithdrawalTax(pensionBal, {
-          taxFreeShare: uncrystallisedTaxFreeShare,
-        }),
+        estimatedTaxOnWithdrawal: estimatePensionWithdrawalTax(
+          P.pension,
+          estimatedPensionTaxShare(P)
+        ),
       },
       isa: {
         openingBalance: openingISA,
         contribution: isaContrib,
-        bedIsaContrib: accBedIsaNet,
-        growthAmount: isaGrowth,
-        closingBalance: isaBal,
+        bedIsaContrib: bed.net,
+        growthAmount: growth.isaGrowth,
+        closingBalance: P.isa,
       },
       gia: {
         openingBalance: openingGIA,
         contribution: giaContrib,
         windfall: accWindfallAmt,
-        bedIsaGross: accBedIsaGross,
-        bedIsaCGT: accBedIsaCGT,
-        growthAmount: giaGrowth,
-        closingBalance: giaBal,
-        closingCostBasis: costBasis,
-        unrealisedGain: round2(giaBal - costBasis),
+        bedIsaGross: bed.gross,
+        bedIsaCGT: bed.cgt,
+        growthAmount: growth.giaGrowth,
+        // Gains realised within the CGT allowance and reinvested (base cost up).
+        gainsRealisedTaxFree: gainsHarvested,
+        closingBalance: P.gia,
+        closingCostBasis: P.costBasis,
+        unrealisedGain: round2(P.gia - P.costBasis),
       },
-      bedIsa: { grossSold: accBedIsaGross, cgt: accBedIsaCGT, netContrib: accBedIsaNet },
+      bedIsa: { grossSold: bed.gross, cgt: bed.cgt, netContrib: bed.net },
       mortgage: mortgageRow,
       unsecuredDebts: debtRows,
-      studentLoan: slRow,
+      studentLoan: pay.slRow,
 
       niQualifyingYear,
-      cumulativeNIYears: niYears,
-    });
+      cumulativeNIYears: P.niYears,
+    };
+    if (P.inherited)
+      row.inheritedPension = inheritedPensionRow(P, openingInherited, 0, 0, inheritedGrowth);
+    if (premiums > 0) row.lifeCoverPremiums = premiums;
+    yearlyBreakdown.push(decorateSurvivorRow(row, i, P, 'working'));
   }
 
-  // Actual (possibly delayed) retirement age/year resolved by the loop above.
-  // Without flexible retirement these equal the target retirementAge.
-  const actualRetirementAge = currentAge + accumulationYears;
-  const actualRetirementYear = currentYear + accumulationYears;
-  const retirementDelayYears = actualRetirementAge - retirementAge;
+  // ── A retirement year (one person) ────────────────────────────────────────
+  // Guaranteed income (state pension, DB pensions, any annuity) is netted
+  // against the year's whole need — living costs, debts, one-offs and any
+  // Class 3 top-up — and the rest is drawn from the pots in tax-efficiency
+  // order; surplus income is saved. Then bed and ISA, and growth.
+  function retiredYear(P, i, year, age, yrRet) {
+    const rAge = P.currentAge + i; // the person's own age
+    const isFirstYear = rAge === P.retiredAt;
+    const share = spendingShare();
 
-  // Retirement-entry snapshots — populated inside the retirement block, used in summary below.
-  // Declared here so they are in scope at summary-build time regardless of whether a
-  // retirement phase exists (null signals "no retirement phase").
-  let retEntryPension = null;
-  let retEntryISA = null;
-  let retEntryGIA = null;
-  let retEntryCostBasis = null;
-  let retEntryMortgage = null;
-  let retEntryUnsecured = null;
+    const openPension = P.pension;
+    const openISA = P.isa;
+    const openGIA = P.gia;
+    const openInherited = inheritedPensionBalance(P);
 
-  // Voluntary Class 3 NI years actually bought during the bridge, and their total
-  // (nominal) cost. Declared here so the summary can read them whether or not a
-  // retirement phase runs (they stay 0 without one).
-  let class3YearsBought = 0;
-  let class3TotalCost = 0;
+    // Defined benefit pensions: no longer building up; deferred schemes grow by
+    // their increases until paid, then pay a guaranteed income.
+    const db = advanceDbSchemes(P, rAge, yrRet, true, false, 0, econ);
 
-  // Annuity purchase outcome, read by the summary (null when no annuity planned).
-  let annuityResult = null;
+    // Annuity income already in payment this year (set at purchase below for
+    // the purchase year itself).
+    let annuityGross = annuityGrossThisYear(P, econ);
 
-  // ── Retirement phase ─────────────────────────────────────────────────────
-  if (retirementOptions != null) {
-    const {
-      targetNetAnnualExpenses,
-      maxAge = 90,
-      takePCLS = false,
-      pclsPercentage = PENSION_CONSTANTS.maxPCLSPercentage,
-    } = retirementOptions;
+    // ── Spending guardrails ──────────────────────────────────────────────
+    // Flex the real spend toward what the opening pot can sustainably support
+    // (central assumptions, no peeking). Trim if we've drifted above the
+    // sustainable rate by more than the band; restore/raise if below it. The
+    // adjustment is a bounded step so spending moves smoothly, then is clamped
+    // to [floor, ceiling]. Reacts only to what has already happened.
+    const guardrailAction = guardrails
+      ? applyGuardrails(i, annuityGross, P.annuityCfg?.inflationLinked ?? true)
+      : 'none';
+    const effectiveTargetReal = guardrails
+      ? retirement.grSpendReal
+      : retirement.targetNetAnnualExpenses;
 
-    assertNonNegativeFinite(targetNetAnnualExpenses, 'retirementOptions.targetNetAnnualExpenses');
-    if (!Number.isInteger(maxAge) || maxAge <= retirementAge)
-      throw new RangeError('retirementOptions.maxAge must be an integer > retirementAge');
-    const pclsPct = Math.max(0, Math.min(PENSION_CONSTANTS.maxPCLSPercentage, pclsPercentage));
+    // Inflation-adjusted target net expenses — inflated from today (currentAge),
+    // not from retirement date, so the input figure represents today's purchasing power.
+    const targetExpenses = round2(effectiveTargetReal * share * econ.cumulInflation);
 
-    // ── PCLS (pension commencement lump sum) ─────────────────────────────────
-    // The pension can only be touched from the Normal Minimum Pension Age. PCLS
-    // is therefore taken at the first accessible age: retirementAge when that is
-    // already ≥ NMPA, otherwise deferred inside the loop to the year NMPA is
-    // reached (an early retiree bridges the gap from ISA/GIA until then).
-    let pclsLumpSum = 0;
-    let pclsCapped = false;
-    // Crystallise the pot and distribute the tax-free lump sum: ISA up to the
-    // annual subscription limit, remainder into the GIA at cost. Returns the
-    // ISA headroom consumed, so the same-year bed-and-ISA step doesn't reuse it.
-    function applyPCLS() {
-      const pclsResult = calculatePCLS(pensionBal, { pclsPercentage: pclsPct });
-      pclsLumpSum = pclsResult.lumpSum;
-      pclsCapped = pclsResult.lumpSumCapped;
-      pensionBal = pclsResult.crystallisedFund;
-      const toISA = Math.min(pclsLumpSum, ISA_LIMIT);
-      const toGIA = round2(pclsLumpSum - toISA);
-      isaBal = round2(isaBal + toISA);
-      giaBal = round2(giaBal + toGIA);
-      costBasis = round2(costBasis + toGIA);
-      return toISA;
+    // Fiscal-drag-adjusted threshold scale for this retirement year.
+    const retThresholdScale = econ.thresholdScale;
+
+    // State pension — nominal amount at this retirement year. The base grows
+    // from the 2026/27 rate by its yearly increases (uprateStatePension).
+    // Deferral delays the start and adds ~5.78% of the pension at claim per
+    // deferred year; that extra then rises with CPI only. Qualifying years
+    // include any Class 3 years bought so far — all buying finishes before
+    // state pension age (≤ the claim age), so by the time the pension turns on
+    // this count is final.
+    const effectiveNiYears = P.niYears + P.class3.yearsBought;
+    const spGross = statePensionGrossAt(P, rAge, effectiveNiYears, econ);
+    const spTax = round2(calculateIncomeTax(spGross, retThresholdScale).totalTax);
+    const spNet = round2(spGross - spTax);
+
+    // ── Debts (if still outstanding at retirement, or a mortgage starting now) ──
+    maybeStartMortgage(age, econ.cumulInflation);
+    const { payment: mortgagePaymentThisRetYear, row: retMortgageRow } = mortgageYear(false);
+    const { payments: retUnsecuredPayments, rows: retDebtRows } = unsecuredDebtsYear();
+
+    // ── Windfalls arriving this retirement year ───────────────────────────
+    // Added to the GIA (full amount to cost basis — net-of-tax money has no
+    // embedded gain) BEFORE the drawdown steps, so an inheritance can fund
+    // the same year's spending and rescue an otherwise-exhausted plan.
+    const retWindfall = windfallsAtAge(age, econ.cumulInflation);
+    const retWindfallAmt = retWindfall?.nominal ?? 0;
+    if (retWindfallAmt > 0) investInGIA(P, retWindfallAmt);
+
+    // One-off expenses this retirement year simply raise the year's funding
+    // need — the normal five-step drawdown below then finds the cash in the
+    // most tax-efficient order, so the expense gets full tax treatment.
+    const retExpense = expensesAtAge(age, econ.cumulInflation);
+    const retExpenseAmt = retExpense?.nominal ?? 0;
+
+    // ── Pension access (Normal Minimum Pension Age) ───────────────────────
+    // The DC pension is untouchable before pensionAccessAge. When the person
+    // retired early, PCLS was deferred — take it in the first accessible year.
+    // `isaUsed` tracks the ISA subscription used by lump sums this year.
+    const pensionAccessible = rAge >= P.pensionAccessAge;
+    let pclsThisYear = isFirstYear && P.pcls.atEntry;
+    let isaUsed = isFirstYear ? P.pcls.toISAAtEntry : 0;
+    if (P.pcls.pending && pensionAccessible && P.pension > 0) {
+      isaUsed = takePensionLumpSum(P);
+      P.pcls.pending = false;
+      pclsThisYear = true;
     }
 
-    const takePclsAtEntry = takePCLS && pensionBal > 0 && actualRetirementAge >= pensionAccessAge;
-    let pclsToISAAtEntry = 0;
-    if (takePclsAtEntry) pclsToISAAtEntry = applyPCLS();
-    // Still-pending PCLS for the early-retirement (deferred) case.
-    let pclsPending = takePCLS && actualRetirementAge < pensionAccessAge;
+    // ── Annuity purchase (once) ───────────────────────────────────────────
+    // Placed after PCLS so the PCLS path buys from an already-crystallised pot.
+    const annuityBuy = maybeBuyAnnuity(P, rAge, econ, spGross, retThresholdScale, isaUsed);
+    isaUsed = annuityBuy.isaUsed;
+    if (annuityBuy.income !== null) annuityGross = annuityBuy.income; // first payment this year
+    const annuityPurchaseThisYear = annuityBuy.purchase;
 
-    // Snapshot balances at the point of retirement entry (after any PCLS, before drawdown).
-    // The year-by-year loop mutates the running state variables, so by maxAge they may be
-    // zero. The summary must reflect "what you have at retirement", not "what's left at maxAge".
-    retEntryPension = pensionBal;
-    retEntryISA = isaBal;
-    retEntryGIA = giaBal;
-    retEntryCostBasis = costBasis;
-    retEntryMortgage = mortgageBalance;
-    retEntryUnsecured = round2(debts.reduce((s, d) => s + d.balance, 0));
+    // ── DB tax-free cash ──────────────────────────────────────────────────
+    // Like a PCLS: into the ISA up to this year's remaining headroom, the rest
+    // into the GIA at cost — before the drawdown, so it can fund this year.
+    if (db.lumpTaxFree > 0) isaUsed = investTaxFreeCash(P, db.lumpTaxFree, isaUsed);
 
-    // Track remaining Lump Sum Allowance across retirement years (UFPLS path only).
-    // Under UFPLS the tax-free component of each withdrawal counts against this £268,275
-    // lifetime cap; once exhausted, every £1 withdrawn becomes fully taxable income.
-    // The PCLS path consumes the LSA upfront via calculatePCLS, so no tracking needed there.
-    let remainingLSA = takePCLS ? 0 : PENSION_CONSTANTS.lumpSumAllowance;
+    // ── Voluntary Class 3 NI purchase (this year) ─────────────────────────
+    // The cost joins the funding need below at LOWEST priority, so essential
+    // spending is always funded first; the year is only "bought" if the whole
+    // need — including this cost — is met (see after the drawdown).
+    const class3Cost = class3CostThisYear(P, rAge, econ);
+    const premiums = lifeCoverPremiums(i);
 
-    // ── Voluntary Class 3 NI top-up target ───────────────────────────────────
-    // Fill the gap toward the 35 qualifying years for the full state pension by
-    // buying years during the bridge between retirement and state pension age —
-    // the years no longer worked, which is when these gaps arise. The number
-    // buyable is capped by that bridge window, and we only start buying if the
-    // topped-up total can clear the 10-year minimum (below which the pension is
-    // £0, so buying would be wasted). Contributions before state pension age
-    // never overlap the pension income, so affordability (below) doesn't depend
-    // on the benefit — no circularity. Past gap years before retirement aren't
-    // modelled here; represent those via the NI Qualifying Years input instead.
-    const { qualifyingYearsForFull, minimumQualifyingYears, class3AnnualCost } =
-      LIFECYCLE_CONSTANTS.statePension;
-    const bridgeYears = Math.max(0, statePensionAge - actualRetirementAge);
-    const maxBuyableYears = Math.min(Math.max(0, qualifyingYearsForFull - niYears), bridgeYears);
-    let class3YearsRemaining =
-      topUpStatePension && niYears + maxBuyableYears >= minimumQualifyingYears
-        ? maxBuyableYears
-        : 0;
+    // ── Drawdown strategy ─────────────────────────────────────────────────
+    // Priority: tax-free pension → CGT-exempt GIA harvest → ISA → taxable GIA → taxable pension
+    // Mortgage, unsecured debt payments, and one-off expenses are added on top of
+    // living expenses so the full drawdown need is accounted for. Any voluntary
+    // Class 3 cost is added last (lowest priority).
+    // Guaranteed income is the state pension, any DB pensions and any annuity,
+    // taxed together (all pension income; DB stacks on the state pension and
+    // the annuity on top of both). It is netted against the whole year's need
+    // — living costs, mortgage, debts, one-offs and Class 3 — and anything left
+    // over is saved (below), not lost.
+    const netOf = (gross) => round2(gross - calculateIncomeTax(gross, retThresholdScale).totalTax);
+    const spDbGross = round2(spGross + db.gross + db.lumpTaxable);
+    const spDbNet = spDbGross > spGross ? netOf(spDbGross) : spNet;
+    const guaranteedGross = round2(spDbGross + annuityGross);
+    const guaranteedNet = annuityGross > 0 ? netOf(guaranteedGross) : spDbNet;
+    const dbNet = round2(spDbNet - spNet);
+    const annuityNet = round2(guaranteedNet - spDbNet);
+    const totalNeed = round2(
+      targetExpenses +
+        mortgagePaymentThisRetYear +
+        retUnsecuredPayments +
+        retExpenseAmt +
+        class3Cost +
+        premiums
+    );
+    let remaining = round2(Math.max(0, totalNeed - guaranteedNet));
+    const incomeSurplus = round2(Math.max(0, guaranteedNet - totalNeed));
 
-    // ── Spending guardrails state (real, today's money) ──────────────────────
-    // Floor is clamped to the target (a floor above target would be nonsensical);
-    // the current allowed spend starts at the target and flexes within [floor,
-    // ceiling] as the guardrails react to the pot each year.
-    const grFloor = guardrails ? Math.min(guardrails.floor, targetNetAnnualExpenses) : 0;
-    const grCeiling = guardrails
-      ? (guardrails.ceilingPct / 100) * targetNetAnnualExpenses
-      : Infinity;
-    let grSpendReal = targetNetAnnualExpenses;
+    // 1. Pension within the personal allowance left after guaranteed income.
+    const step1 = drawPensionWithinAllowance(
+      P,
+      remaining,
+      pensionAccessible,
+      guaranteedGross,
+      retThresholdScale
+    );
+    remaining = step1.remaining;
+    // Only the taxable portion counts as income for CGT band determination.
+    let incomeForCGT = round2(guaranteedGross + round2(step1.draw - step1.taxFree));
+    // 1b. A taxable inherited pension within any allowance still unused.
+    const step1b = drawInheritedWithinAllowance(P, remaining, incomeForCGT, retThresholdScale);
+    remaining = step1b.remaining;
+    if (step1b.draw > 0) incomeForCGT = round2(incomeForCGT + step1b.draw);
 
-    // ── Annuity state ────────────────────────────────────────────────────────
-    // Bought at the first retirement year at or after the chosen age and the
-    // pension access age. `annuityIncome0` is the first-year gross income; an
-    // inflation-linked annuity then grows with each year's inflation.
-    const annuityBuyAge = annuityCfg
-      ? Math.max(annuityCfg.purchaseAge, actualRetirementAge, pensionAccessAge)
-      : Infinity;
-    let annuityIncome0 = 0;
-    let annuityCumInflAtPurchase = 1;
-    if (annuityCfg) {
-      annuityResult = {
-        purchased: false,
-        notNeeded: false,
-        purchaseAge: annuityBuyAge <= maxAge ? annuityBuyAge : null,
-        inflationLinked: annuityCfg.inflationLinked,
-        sizing: annuityCfg.sizing,
-        rate: null,
-        targetIncome: 0,
-        income: 0,
-        incomeReal: 0,
-        price: 0,
-        pensionUsed: 0,
-        taxFreeCash: 0,
-        coverage: 0,
+    // 2. GIA up to the annual CGT exempt amount.
+    const step2 = drawGiaWithinExemption(P, remaining, incomeForCGT, retThresholdScale);
+    remaining = step2.remaining;
+
+    // 3. A tax-free inherited pension, then the ISA.
+    const step3a = drawInheritedTaxFree(P, remaining);
+    remaining = step3a.remaining;
+    const step3 = drawIsa(P, remaining);
+    remaining = step3.remaining;
+
+    // 4. GIA beyond the exemption, then a taxable inherited pension.
+    const step4 = drawGiaTaxable(P, remaining, incomeForCGT, retThresholdScale);
+    remaining = step4.remaining;
+    const step4b = drawInheritedTaxable(P, remaining, incomeForCGT, retThresholdScale);
+    remaining = step4b.remaining;
+    if (step4b.draw > 0) incomeForCGT = round2(incomeForCGT + step4b.draw);
+
+    // 5. Taxable pension.
+    const step5 = drawPensionTaxable(
+      P,
+      remaining,
+      pensionAccessible,
+      incomeForCGT,
+      retThresholdScale
+    );
+    remaining = step5.remaining;
+
+    // ── Totals ─────────────────────────────────────────────────────────────
+    const totalPensionDraw = round2(step1.draw + step5.draw);
+    const totalGIADraw = round2(step2.draw + step4.draw);
+    const totalGIACGT = round2(step2.cgt + step4.cgt);
+    // Taxable pension income = total withdrawn minus the LSA-capped tax-free components.
+    // For PCLS: both tax-free parts are 0, so the full draw is taxable income.
+    // For UFPLS: may be less than 75% of draw once the LSA approaches exhaustion.
+    // Any taxable inherited pension is taxable income too.
+    let pensionTaxableIncome = round2(totalPensionDraw - step1.taxFree - step5.taxFree);
+    const inheritedTaxableDraw = round2(step1b.draw + step4b.draw);
+    if (inheritedTaxableDraw > 0)
+      pensionTaxableIncome = round2(pensionTaxableIncome + inheritedTaxableDraw);
+    const totalIncomeTax = round2(
+      calculateIncomeTax(guaranteedGross + pensionTaxableIncome, retThresholdScale).totalTax
+    );
+    const unmet = round2(Math.max(0, remaining));
+    const class3 = settleClass3(P, class3Cost, unmet);
+    // Essential shortfall excludes the discretionary (and possibly skipped) Class 3.
+    const shortfall = round2(Math.max(0, unmet - class3.unfunded));
+    // A large one-off expense can push the shortfall past the year's target
+    // expenses; net income achieved is floored at 0 rather than reported negative.
+    const netAchieved = round2(Math.max(0, targetExpenses - shortfall));
+
+    // Surplus guaranteed income (beyond this year's whole need) is saved into
+    // the GIA at cost; the bed-and-ISA step then moves it into the ISA as
+    // headroom allows.
+    if (incomeSurplus > 0) investInGIA(P, incomeSurplus);
+
+    // ── Bed and ISA (retirement) ────────────────────────────────────────────
+    // After funding expenses, any remaining GIA is moved into the ISA up to the
+    // annual subscription limit (£20,000). Withdrawals from the ISA do not count
+    // toward the subscription limit, so the full headroom is available each year
+    // minus however much lump sums used it this year. The CGT annual exempt is
+    // partially consumed by drawdown step 2; only what remains is applied.
+    const gainsUsedInStep2 = round2(step2.draw * step2.gainFracPre);
+    const retExemptRemaining = round2(
+      Math.max(0, GIA_CGT_CONSTANTS.annualExemptAmount - gainsUsedInStep2)
+    );
+    const bed = bedAndIsa(
+      P,
+      round2(ISA_LIMIT - isaUsed),
+      round2(guaranteedGross + pensionTaxableIncome),
+      retExemptRemaining,
+      retThresholdScale
+    );
+
+    // ── Growth on remaining balances ───────────────────────────────────────
+    const retYearRate = getRateForAge(
+      rAge,
+      P.retirementAge,
+      yrRet.savingsRate,
+      yrRet.retirementRate,
+      glideBeforeYrs,
+      glideAfterYrs
+    );
+    const growth = growPotsInRetirement(P, retYearRate);
+    const inheritedGrowth = growInheritedPension(P, retYearRate);
+
+    // ── The rest of the CGT allowance ──────────────────────────────────────
+    const gainsHarvested = harvestGainsWithinExemption(
+      P,
+      round2(Math.max(0, retExemptRemaining - bed.gain))
+    );
+
+    // ── Row ────────────────────────────────────────────────────────────────
+    const retRow = {
+      year,
+      age,
+      phase: 'retirement',
+
+      targetNetExpenses: targetExpenses,
+      // Cumulative price index since the start year (1 = today's money), so
+      // consumers can express this row's nominal figures in real terms.
+      inflationIndex: Math.round(econ.cumulInflation * 1e6) / 1e6,
+      // Spending-guardrails telemetry (real, today's money). Null-safe: when
+      // guardrails are off, the budget just equals the target and no action fires.
+      spendingBudgetReal: guardrails ? round2(retirement.grSpendReal) : null,
+      guardrailAction,
+      mortgagePayment: mortgagePaymentThisRetYear,
+      unsecuredDebtPayments: retUnsecuredPayments,
+      statePensionGross: spGross,
+      statePensionNet: spNet,
+      dbPension: dbRowSummary(P, db),
+      dbPensionNet: dbNet,
+      annuityGross,
+      annuityNet,
+      annuityPurchase: annuityPurchaseThisYear,
+      incomeSurplusSaved: incomeSurplus,
+      taxFreePensionDrawdown: step1.draw,
+      taxablePensionDrawdown: step5.draw,
+      pensionDrawdown: totalPensionDraw,
+      isaWithdrawal: step3.draw,
+      giaWithdrawal: totalGIADraw,
+      giaCGT: totalGIACGT,
+      incomeTax: totalIncomeTax,
+      netIncomeAchieved: netAchieved,
+      shortfall,
+      class3Contribution: class3.contribution,
+      class3YearBought: class3.bought,
+
+      windfall: retWindfallAmt,
+      windfallLabels: retWindfall?.labels ?? [],
+
+      oneOffExpense: retExpenseAmt,
+      oneOffExpenseLabels: retExpense?.labels ?? [],
+
+      investmentRate: round2(retYearRate * 10000) / 10000,
+
+      pension: {
+        openingBalance: openPension,
+        drawdown: totalPensionDraw,
+        annuityPurchase: annuityPurchaseThisYear?.pensionUsed ?? 0,
+        growthAmount: growth.pensionGrowth,
+        closingBalance: P.pension,
+        // Rough tax due when drawn, display only (see estimatedPensionTaxShare).
+        estimatedTaxOnWithdrawal: estimatePensionWithdrawalTax(
+          P.pension,
+          estimatedPensionTaxShare(P)
+        ),
+      },
+      isa: {
+        openingBalance: openISA,
+        withdrawal: step3.draw,
+        bedIsaContrib: bed.net,
+        growthAmount: growth.isaGrowth,
+        closingBalance: P.isa,
+      },
+      gia: {
+        openingBalance: openGIA,
+        withdrawal: totalGIADraw,
+        cgt: totalGIACGT,
+        windfall: retWindfallAmt,
+        bedIsaGross: bed.gross,
+        bedIsaCGT: bed.cgt,
+        growthAmount: growth.giaGrowth,
+        // Gains realised within the CGT allowance and reinvested (base cost up).
+        gainsRealisedTaxFree: gainsHarvested,
+        closingBalance: P.gia,
+        closingCostBasis: P.costBasis,
+        unrealisedGain: round2(P.gia - P.costBasis),
+      },
+      bedIsa: { grossSold: bed.gross, cgt: bed.cgt, netContrib: bed.net },
+      mortgage: retMortgageRow,
+      unsecuredDebts: retDebtRows,
+      studentLoan: null,
+    };
+    if (pclsThisYear) {
+      retRow.pclsLumpSum = P.pcls.lumpSum;
+      retRow.pclsCapped = P.pcls.capped;
+    }
+    retRow.pensionAccessible = pensionAccessible;
+    if (premiums > 0) retRow.lifeCoverPremiums = premiums;
+    if (P.inherited)
+      retRow.inheritedPension = inheritedPensionRow(
+        P,
+        openInherited,
+        step3a.draw,
+        inheritedTaxableDraw,
+        inheritedGrowth
+      );
+    yearlyBreakdown.push(decorateSurvivorRow(retRow, i, P, 'retired'));
+  }
+
+  // ── A couple's year (both partners alive) ─────────────────────────────────
+  // Each partner's pay (while working) or guaranteed income (once retired) is
+  // pooled. While both work, savings are what's left after household costs
+  // (never negative, as for one person). Once either has retired, any gap is
+  // drawn from the pots in tax order across both partners — each fills their
+  // own personal allowance, each uses their own CGT exemption, then ISAs, then
+  // taxable GIA, then taxable pension drawn so both incomes rise together
+  // (both basic-rate bands fill before either pays higher rate) — and any
+  // surplus is saved. Savings fill both £20k ISAs before the GIA, and the GIA
+  // goes to whichever partner has the lower income (more basic-rate band left
+  // for capital gains).
+  function coupleYear(i, year, age, yr) {
+    const scale = econ.thresholdScale;
+    const infl = econ.cumulInflation;
+    const allRetired = people.every((P) => P.retiredAt !== null);
+    const allWorking = people.every((P) => P.retiredAt === null);
+    const exempt = GIA_CGT_CONSTANTS.annualExemptAmount;
+
+    // ── Each partner's income ───────────────────────────────────────────
+    const st = people.map((P) => {
+      const pAge = P.currentAge + i;
+      const s = {
+        P,
+        age: pAge,
+        working: P.retiredAt === null,
+        open: { pension: P.pension, isa: P.isa, gia: P.gia },
+        pay: null,
+        db: null,
+        net: 0,
+        incomeForCGT: 0,
+        guaranteedGross: 0,
+        spGross: 0,
+        annuityGross: 0,
+        annuityPurchase: null,
+        pclsThisYear: false,
+        accessible: false,
+        isaUsed: 0,
+        class3Cost: 0,
+        class3: null,
+        pensionDraw: 0,
+        pensionTaxFree: 0,
+        allowanceTopUp: 0,
+        giaDraw: 0,
+        giaCGT: 0,
+        isaDraw: 0,
+        exemptUsed: 0,
+        isaContrib: 0,
+        giaContrib: 0,
       };
+      if (s.working) {
+        s.pay = workingYearPay(P, pAge, year, i, yr, econ);
+        s.db = s.pay.db;
+        s.net = s.pay.netTakeHome;
+        s.incomeForCGT = s.pay.thresholdIncome;
+        // Tax-free cash from a DB scheme taken while working goes to their GIA.
+        if (s.db.lumpTaxFree > 0) investInGIA(P, s.db.lumpTaxFree);
+      } else {
+        s.db = advanceDbSchemes(P, pAge, yr, true, false, 0, econ);
+        s.annuityGross = annuityGrossThisYear(P, econ);
+        s.spGross = statePensionGrossAt(P, pAge, P.niYears + P.class3.yearsBought, econ);
+        s.accessible = pAge >= P.pensionAccessAge;
+        const firstYear = pAge === P.retiredAt;
+        s.pclsThisYear = firstYear && P.pcls.atEntry;
+        s.isaUsed = firstYear ? P.pcls.toISAAtEntry : 0;
+        if (P.pcls.pending && s.accessible && P.pension > 0) {
+          s.isaUsed = takePensionLumpSum(P);
+          P.pcls.pending = false;
+          s.pclsThisYear = true;
+        }
+        s.class3Cost = class3CostThisYear(P, pAge, econ);
+      }
+      return s;
+    });
+
+    // Retirees: annuity purchase (sized around both partners' guaranteed
+    // income), DB tax-free cash, and their guaranteed income after tax.
+    for (const s of st) {
+      if (s.working) continue;
+      const P = s.P;
+      let otherNet = 0;
+      if (P.annuityCfg && s.age === P.annuity.buyAge && P.annuityCfg.sizing === 'essential') {
+        const o = st.find((x) => x !== s);
+        const oGross = plannedGuaranteedGross(
+          o.P,
+          o.age,
+          econ,
+          o.working ? o.pay.workingStatePension : o.spGross
+        );
+        otherNet = round2(oGross - calculateIncomeTax(oGross, scale).totalTax);
+      }
+      const buy = maybeBuyAnnuity(P, s.age, econ, s.spGross, scale, s.isaUsed, otherNet);
+      s.isaUsed = buy.isaUsed;
+      if (buy.income !== null) s.annuityGross = buy.income;
+      s.annuityPurchase = buy.purchase;
+      if (s.db.lumpTaxFree > 0) s.isaUsed = investTaxFreeCash(P, s.db.lumpTaxFree, s.isaUsed);
+      s.guaranteedGross = round2(s.spGross + s.db.gross + s.db.lumpTaxable + s.annuityGross);
+      s.net = round2(s.guaranteedGross - calculateIncomeTax(s.guaranteedGross, scale).totalTax);
+      s.incomeForCGT = s.guaranteedGross;
+    }
+    // The partner with the lower income has more basic-rate band for gains.
+    const byIncome = [...st].sort((a, b) => a.incomeForCGT - b.incomeForCGT);
+    const lower = byIncome[0];
+
+    // ── Household costs ─────────────────────────────────────────────────
+    maybeStartMortgage(age, infl);
+    const mort = mortgageYear(!allRetired);
+    const unsec = unsecuredDebtsYear();
+    const debtPayments = round2(mort.payment + unsec.payments);
+    // Living costs while either partner works; the retirement target once both
+    // have stopped (flexed by any guardrails).
+    let guardrailAction = 'none';
+    let spending;
+    if (allRetired) {
+      if (guardrails)
+        guardrailAction = applyGuardrails(
+          i,
+          round2(st[0].annuityGross + st[1].annuityGross),
+          (self.annuityCfg ?? partner.annuityCfg)?.inflationLinked ?? true
+        );
+      const targetReal = guardrails ? retirement.grSpendReal : retirement.targetNetAnnualExpenses;
+      spending = round2(targetReal * infl);
+    } else {
+      spending = round2(annualLivingExpenses * infl);
     }
 
-    // ── Year-by-year loop ───────────────────────────────────────────────────
-    for (let rAge = actualRetirementAge; rAge <= maxAge; rAge++) {
-      const rYear = actualRetirementYear + (rAge - actualRetirementAge);
-      const yearsRetired = rAge - actualRetirementAge;
-      const isFirstYear = yearsRetired === 0;
+    // Windfalls land in the GIA of the partner with the lower income.
+    const windfall = windfallsAtAge(age, infl);
+    const windfallAmt = windfall?.nominal ?? 0;
+    if (windfallAmt > 0) investInGIA(lower.P, windfallAmt);
+    const expense = expensesAtAge(age, infl);
+    const expenseAmt = expense?.nominal ?? 0;
+    const income = round2(st[0].net + st[1].net);
+    const class3Total = round2(st[0].class3Cost + st[1].class3Cost);
+    const premiums = lifeCoverPremiums(i);
 
-      const openPension = pensionBal;
-      const openISA = isaBal;
-      const openGIA = giaBal;
+    let savings = 0;
+    let availableForSavings = null;
+    let expenseFunding = null;
+    let expenseShortfall = 0;
+    let remaining = 0;
 
-      // Per-year rates for this retirement year (absolute offset from currentAge)
-      const retYearIdx = rAge - currentAge;
-      const yrRet =
-        yearlyRatesOverride?.[retYearIdx] != null
-          ? {
-              savingsRate,
-              retirementRate,
-              wageGrowthRate,
-              inflationRate,
-              boeRate,
-              ...yearlyRatesOverride[retYearIdx],
-            }
-          : { savingsRate, retirementRate, wageGrowthRate, inflationRate, boeRate };
-      // Update running products for this retirement year
-      cumulInflation *= 1 + yrRet.inflationRate;
-      thresholdScale *= 1 + yrRet.inflationRate - fiscalDragRate;
-      uprateStatePension(yrRet, rYear);
-      if (rAge === spClaimAge) {
-        spClaimCumInfl = cumulInflation;
-        spClaimSpIndex = spIndex;
-      }
-
-      // Annuity income already in payment this year (set at purchase below for
-      // the purchase year itself). Inflation-linked follows this year's
-      // (realised, under Monte Carlo) inflation; level stays fixed in cash terms.
-      let annuityGross =
-        annuityIncome0 > 0
-          ? round2(
-              annuityCfg.inflationLinked
-                ? (annuityIncome0 * cumulInflation) / annuityCumInflAtPurchase
-                : annuityIncome0
-            )
-          : 0;
-
-      // ── Spending guardrails ──────────────────────────────────────────────
-      // Flex the real spend toward what the opening pot can sustainably support
-      // (central assumptions, no peeking). Trim if we've drifted above the
-      // sustainable rate by more than the band; restore/raise if below it. The
-      // adjustment is a bounded step so spending moves smoothly, then is clamped
-      // to [floor, ceiling]. Reacts only to what has already happened.
-      let guardrailAction = 'none';
-      if (guardrails) {
-        const sustainable = sustainableSpendReal(
-          rAge,
-          pensionBal,
-          isaBal,
-          giaBal,
-          mortgageBalance,
-          debts.reduce((s, d) => s + d.balance, 0),
-          niYears,
-          cumulInflation,
-          annuityGross,
-          annuityCfg?.inflationLinked ?? true
-        );
-        if (grSpendReal > sustainable * (1 + guardrails.band)) {
-          grSpendReal = grSpendReal * (1 - guardrails.step);
-          guardrailAction = 'cut';
-        } else if (grSpendReal < sustainable * (1 - guardrails.band)) {
-          grSpendReal = grSpendReal * (1 + guardrails.step);
-          guardrailAction = 'raise';
-        }
-        grSpendReal = Math.min(grCeiling, Math.max(grFloor, grSpendReal));
-      }
-      const effectiveTargetReal = guardrails ? grSpendReal : targetNetAnnualExpenses;
-
-      // Inflation-adjusted target net expenses — inflated from today (currentAge),
-      // not from retirement date, so the input figure represents today's purchasing power.
-      const targetExpenses = round2(effectiveTargetReal * cumulInflation);
-
-      // Fiscal-drag-adjusted threshold scale for this retirement year.
-      const retThresholdScale = thresholdScale;
-
-      // State pension — nominal amount at this retirement year. The base grows
-      // from the 2026/27 rate by the triple lock, max(wageGrowth, CPI, 2.5%).
-      // Deferral delays the start and adds ~5.78% of the pension at claim per
-      // deferred year; that extra then rises with CPI only (see spClaimAge).
-      const spStartAge = statePensionAge + statePensionDeferralYears;
-      const spDeferralUplift =
-        1 + LIFECYCLE_CONSTANTS.statePension.deferralUpliftPerYear * statePensionDeferralYears;
-      // Qualifying years including any Class 3 years bought so far. All buying
-      // finishes before statePensionAge (≤ spStartAge), so by the time the
-      // pension turns on this count is final.
-      const effectiveNiYears = niYears + class3YearsBought;
-      const spGross = statePensionGrossAt(rAge, effectiveNiYears);
-      const spTax = round2(calculateIncomeTax(spGross, retThresholdScale).totalTax);
-      const spNet = round2(spGross - spTax);
-
-      // ── Mortgage (if still outstanding at retirement, or starting now) ─────
-      maybeStartMortgage(rAge, cumulInflation);
-      let retMortgageRow = null;
-      let mortgagePaymentThisRetYear = 0;
-      if (hasMortgage && mortgageBalance > 0) {
-        const openingMortgage = mortgageBalance;
-        if (mortgageType === 'interest-only') {
-          let yearInt = 0;
-          for (let m = 0; m < 12; m++) yearInt += round2(mortgageBalance * mortgageMonthlyRate);
-          yearInt = round2(yearInt);
-          mortgagePaymentThisRetYear = yearInt;
-          retMortgageRow = {
-            openingBalance: openingMortgage,
-            interestCharged: yearInt,
-            capitalRepaid: 0,
-            payment: yearInt,
-            closingBalance: mortgageBalance,
-            type: 'interest-only',
-          };
-        } else {
-          const amort = amortiseYear(
-            mortgageBalance,
-            mortgageMonthlyRate,
-            mortgageMonthlyPayment,
-            mortgageMonthlyOverpayment
-          );
-          mortgagePaymentThisRetYear = amort.payment;
-          mortgageBalance = amort.closingBalance;
-          retMortgageRow = {
-            openingBalance: openingMortgage,
-            interestCharged: amort.interestCharged,
-            capitalRepaid: amort.capitalRepaid,
-            payment: amort.payment,
-            closingBalance: mortgageBalance,
-            type: 'repayment',
-          };
-        }
-      }
-
-      // ── Unsecured debts (if still outstanding at retirement) ──────────────
-      let retUnsecuredPayments = 0;
-      const retDebtRows = debts.map((debt) => {
-        if (debt.balance <= 0) {
-          return {
-            label: debt.label,
-            openingBalance: 0,
-            interestCharged: 0,
-            capitalRepaid: 0,
-            payment: 0,
-            closingBalance: 0,
-          };
-        }
-        const openingDebt = debt.balance;
-        const amort = amortiseYear(debt.balance, debtMonthlyRate, debt.monthlyPayment);
-        debt.balance = amort.closingBalance;
-        retUnsecuredPayments = round2(retUnsecuredPayments + amort.payment);
-        return {
-          label: debt.label,
-          openingBalance: openingDebt,
-          interestCharged: amort.interestCharged,
-          capitalRepaid: amort.capitalRepaid,
-          payment: amort.payment,
-          closingBalance: amort.closingBalance,
-        };
-      });
-
-      // ── Windfalls arriving this retirement year ───────────────────────────
-      // Added to the GIA (full amount to cost basis — net-of-tax money has no
-      // embedded gain) BEFORE the drawdown steps, so an inheritance can fund
-      // the same year's spending and rescue an otherwise-exhausted plan.
-      const retWindfall = windfallsAtAge(rAge, cumulInflation);
-      const retWindfallAmt = retWindfall?.nominal ?? 0;
-      if (retWindfallAmt > 0) {
-        giaBal = round2(giaBal + retWindfallAmt);
-        costBasis = round2(costBasis + retWindfallAmt);
-      }
-
-      // One-off expenses this retirement year simply raise the year's funding
-      // need — the normal five-step drawdown below then finds the cash in the
-      // most tax-efficient order, so the expense gets full tax treatment.
-      const retExpense = expensesAtAge(rAge, cumulInflation);
-      const retExpenseAmt = retExpense?.nominal ?? 0;
-
-      // ── Pension access (Normal Minimum Pension Age) ───────────────────────
-      // The DC pension is untouchable before pensionAccessAge. When the person
-      // retired early, PCLS was deferred — take it in the first accessible year.
-      const pensionAccessible = rAge >= pensionAccessAge;
-      let pclsThisYear = isFirstYear && takePclsAtEntry;
-      let pclsToISAThisYear = isFirstYear ? pclsToISAAtEntry : 0;
-      if (pclsPending && pensionAccessible && pensionBal > 0) {
-        pclsToISAThisYear = applyPCLS();
-        pclsPending = false;
-        pclsThisYear = true;
-      }
-
-      // ── Annuity purchase (once) ───────────────────────────────────────────
-      // Placed after PCLS so the PCLS path buys from an already-crystallised pot.
-      let annuityPurchaseThisYear = null;
-      if (annuityCfg && rAge === annuityBuyAge) {
-        // First-year gross income target, in this year's money.
-        let targetIncome;
-        if (annuityCfg.sizing === 'fixed') {
-          targetIncome = round2(annuityCfg.amountReal * cumulInflation);
-        } else {
-          // Cover essential net spending on top of the state pension, sized to the
-          // permanent gap once the state pension is paid. If it hasn't started
-          // yet, use what it will pay (this year's rates, counting any Class 3
-          // years still planned); the years before it starts come from the pots.
-          const finalNiYears = niYears + class3YearsBought + class3YearsRemaining;
-          const spPlanned =
-            rAge >= spStartAge
-              ? spGross
-              : finalNiYears >= minimumQualifyingYears
-                ? round2(computeStatePension(finalNiYears) * spIndex * spDeferralUplift)
-                : 0;
-          const spPlannedNet = round2(
-            spPlanned - calculateIncomeTax(spPlanned, retThresholdScale).totalTax
-          );
-          const needNet = round2(
-            Math.max(0, annuityCfg.amountReal * cumulInflation - spPlannedNet)
-          );
-          // Gross up for income tax, stacked on top of the state pension.
-          targetIncome =
-            needNet > 0 ? pensionGrossForNet(needNet, Infinity, spPlanned, retThresholdScale) : 0;
-        }
-        const rate = annuityCfg.rate ?? illustrativeAnnuityRate(rAge, annuityCfg.inflationLinked);
-        annuityResult.rate = rate;
-        annuityResult.targetIncome = targetIncome;
-        if (targetIncome <= 0) {
-          annuityResult.notNeeded = true; // the state pension already covers it
-          annuityResult.coverage = 1;
-        } else if (pensionBal > 0) {
-          const wantedPrice = targetIncome / rate;
-          // On the UFPLS path the pot is uncrystallised: crystallising a slice pays
-          // 25% of it tax-free first (within the remaining LSA), so a bigger slice
-          // is needed to leave the wanted price. The PCLS path is already
-          // crystallised, so the slice is the price. Capped at what the pension holds.
-          let slice = wantedPrice;
-          if (!takePCLS) {
-            const grossedUp = wantedPrice / 0.75;
-            slice = 0.25 * grossedUp <= remainingLSA ? grossedUp : wantedPrice + remainingLSA;
-          }
-          slice = round2(Math.min(slice, pensionBal));
-          const taxFreeCash = takePCLS ? 0 : round2(Math.min(0.25 * slice, remainingLSA));
-          const price = round2(slice - taxFreeCash);
-          pensionBal = round2(pensionBal - slice);
-          if (taxFreeCash > 0) {
-            // Same destination as a PCLS: ISA up to this year's remaining headroom,
-            // the rest into the GIA at cost.
-            remainingLSA = round2(remainingLSA - taxFreeCash);
-            const toISA = round2(Math.min(taxFreeCash, Math.max(0, ISA_LIMIT - pclsToISAThisYear)));
-            isaBal = round2(isaBal + toISA);
-            giaBal = round2(giaBal + taxFreeCash - toISA);
-            costBasis = round2(costBasis + taxFreeCash - toISA);
-            pclsToISAThisYear = round2(pclsToISAThisYear + toISA);
-          }
-          annuityIncome0 = round2(price * rate);
-          annuityCumInflAtPurchase = cumulInflation;
-          annuityGross = annuityIncome0; // first payment this year
-          Object.assign(annuityResult, {
-            purchased: true,
-            income: annuityIncome0,
-            incomeReal: round2(annuityIncome0 / cumulInflation),
-            price,
-            pensionUsed: slice,
-            taxFreeCash,
-            coverage: Math.min(1, annuityIncome0 / targetIncome),
+    if (allWorking) {
+      // Savings are what's left; a one-off expense is funded from them, then
+      // from both GIAs (lower income first), then both ISAs.
+      availableForSavings = round2(Math.max(0, income - debtPayments - spending - premiums));
+      let cash = availableForSavings;
+      let owed = expenseAmt;
+      expenseFunding = { fromSavings: 0, fromGIAGross: 0, giaCGT: 0, fromISA: 0, shortfall: 0 };
+      if (owed > 0) {
+        for (const [k, s] of byIncome.entries()) {
+          const f = fundExpenseWhileWorking(s.P, owed, k === 0 ? cash : 0, s.incomeForCGT, scale, {
+            useIsa: false,
           });
-          annuityPurchaseThisYear = { price, pensionUsed: slice, taxFreeCash, rate };
+          if (k === 0) {
+            expenseFunding.fromSavings = f.fromSavings;
+            cash = f.cashLeft;
+          }
+          expenseFunding.fromGIAGross = round2(expenseFunding.fromGIAGross + f.fromGIAGross);
+          expenseFunding.giaCGT = round2(expenseFunding.giaCGT + f.giaCGT);
+          s.giaDraw = f.fromGIAGross;
+          s.giaCGT = f.giaCGT;
+          s.exemptUsed = round2(exempt - f.exemptRemaining);
+          owed = f.shortfall;
         }
-        // Otherwise the pension is already empty: nothing bought, coverage stays 0.
+        for (const s of st) {
+          const f = fundExpenseWhileWorking(s.P, owed, 0, s.incomeForCGT, scale, { useGia: false });
+          expenseFunding.fromISA = round2(expenseFunding.fromISA + f.fromISA);
+          s.isaDraw = f.fromISA;
+          owed = f.shortfall;
+        }
+        expenseShortfall = owed;
+        expenseFunding.shortfall = owed;
       }
-
-      // ── Voluntary Class 3 NI purchase (this year) ─────────────────────────
-      // A bridge year (before state pension age) buys one qualifying year while
-      // any remain to buy. The cost joins the funding need below at LOWEST
-      // priority, so essential spending is always funded first; the year is only
-      // "bought" if the whole need — including this cost — is met (see after the
-      // drawdown). Cost is today's money inflated to this year, like expenses.
-      const class3BuyYear = class3YearsRemaining > 0 && rAge < statePensionAge;
-      const class3CostThisYear = class3BuyYear ? round2(class3AnnualCost * cumulInflation) : 0;
-
-      // ── Drawdown strategy ─────────────────────────────────────────────────
-      // Priority: tax-free pension → CGT-exempt GIA harvest → ISA → taxable GIA → taxable pension
-      // Mortgage, unsecured debt payments, and one-off expenses are added on top of
-      // living expenses so the full drawdown need is accounted for. Any voluntary
-      // Class 3 cost is added last (lowest priority).
-      // Guaranteed income is the state pension plus any annuity, taxed together
-      // (both are pension income; the annuity stacks on top). It is netted
-      // against the whole year's need — living costs, mortgage, debts, one-offs
-      // and Class 3 — and anything left over is saved (below), not lost.
-      const guaranteedGross = round2(spGross + annuityGross);
-      const guaranteedNet =
-        annuityGross > 0
-          ? round2(
-              guaranteedGross - calculateIncomeTax(guaranteedGross, retThresholdScale).totalTax
-            )
-          : spNet;
-      const annuityNet = round2(guaranteedNet - spNet);
-      const totalNeed = round2(
-        targetExpenses +
-          mortgagePaymentThisRetYear +
-          retUnsecuredPayments +
-          retExpenseAmt +
-          class3CostThisYear
+      savings = cash;
+    } else {
+      // Pooled income against the whole year's need, including any Class 3 top-up.
+      const cashFlow = round2(
+        income - debtPayments - spending - premiums - expenseAmt - class3Total
       );
-      let remaining = round2(Math.max(0, totalNeed - guaranteedNet));
-      const incomeSurplus = round2(Math.max(0, guaranteedNet - totalNeed));
+      if (cashFlow >= 0) savings = cashFlow;
+      else remaining = round2(-cashFlow);
+    }
 
-      // 1. Pension: fill remaining personal allowance after guaranteed income (no tax)
-      // PCLS mode: the fund is fully crystallised — every £1 withdrawn is taxable income.
-      // UFPLS mode: each £1 is [min(25%, LSA remaining / gross)] tax-free + rest taxable.
-      // The step-1 limit is the gross needed so the taxable portion exactly fills the PA.
-      //   • LSA exhausted (remainingLSA = 0): 100% taxable → gross = taxFreeRoom
-      //   • LSA ≥ taxFreeRoom/3: normal 25%/75% split → gross = taxFreeRoom / 0.75
-      //   • LSA < taxFreeRoom/3: use all remaining LSA, rest taxable
-      //       taxable = gross − remainingLSA = taxFreeRoom → gross = taxFreeRoom + remainingLSA
-      // Skipped entirely before the pension is accessible (NMPA) — the pot is
-      // left to grow and spending is met from GIA/ISA below.
-      let tfPension = 0;
-      let step1TaxFree = 0;
-      if (pensionAccessible && remaining > 0 && pensionBal > 0) {
-        const scaledPA = round2(PERSONAL_ALLOWANCE * retThresholdScale);
-        const taxFreeRoom = round2(Math.max(0, scaledPA - guaranteedGross));
-        let step1Limit;
-        if (takePCLS || taxFreeRoom <= 0) {
-          step1Limit = taxFreeRoom;
-        } else if (remainingLSA <= 0) {
-          step1Limit = taxFreeRoom; // fully taxable
-        } else if (remainingLSA >= taxFreeRoom / 3) {
-          step1Limit = round2(taxFreeRoom / 0.75); // normal UFPLS split
-        } else {
-          step1Limit = round2(taxFreeRoom + remainingLSA); // exhaust remaining LSA
-        }
-        tfPension = round2(Math.min(remaining, Math.min(step1Limit, pensionBal)));
-        pensionBal = round2(pensionBal - tfPension);
-        remaining = round2(remaining - tfPension);
-
-        // Compute the tax-free component and consume from the LSA.
-        step1TaxFree = takePCLS ? 0 : round2(Math.min(0.25 * tfPension, remainingLSA));
-        if (!takePCLS) remainingLSA = round2(Math.max(0, remainingLSA - step1TaxFree));
-      }
-      // Only the taxable portion counts as income for CGT band determination.
-      const tfPensionIncome = round2(tfPension - step1TaxFree);
-      const incomeForCGT = round2(guaranteedGross + tfPensionIncome);
-
-      // 2. GIA: harvest up to the annual CGT exempt amount (gains realised tax-free)
-      // Track the pre-step-2 gain fraction so we can compute how much of the annual
-      // exempt was consumed — the remainder is available for the bed-and-ISA step later.
-      const gainFracPreStep2 = giaBal > 0 ? Math.max(0, (giaBal - costBasis) / giaBal) : 0;
-      let giaExemptDraw = 0;
-      let giaExemptCGT = 0;
-      if (remaining > 0 && giaBal > 0) {
-        const gainFrac = gainFracPreStep2;
-        const grossForExempt =
-          gainFrac > 0 ? GIA_CGT_CONSTANTS.annualExemptAmount / gainFrac : giaBal; // unrounded — used only in Math.min
-        const draw = round2(Math.min(remaining, Math.min(grossForExempt, giaBal)));
-        giaExemptCGT = computeGIACGT(
-          draw,
-          giaBal,
-          costBasis,
-          incomeForCGT,
-          GIA_CGT_CONSTANTS.annualExemptAmount,
-          retThresholdScale
-        );
-        const net = round2(draw - giaExemptCGT);
-        const after = applyGIAWithdrawal(giaBal, costBasis, draw);
-        giaBal = after.bal;
-        costBasis = after.costBasis;
-        giaExemptDraw = draw;
-        remaining = round2(remaining - net);
-      }
-
-      // 3. ISA: completely tax-free
-      const isaDraw = round2(Math.min(remaining, isaBal));
-      isaBal = round2(isaBal - isaDraw);
-      remaining = round2(remaining - isaDraw);
-
-      // 4. GIA: taxable drawdown (CGT beyond exempt amount; exempt already used in step 2)
-      let giaTaxableDraw = 0;
-      let giaTaxableCGT = 0;
-      if (remaining > 0 && giaBal > 0) {
-        // annualExemptAmount already consumed in step 2; pass 0 so gains are fully taxed
-        const gross = giaGrossForNet(
+    // ── Drawdown across both partners ───────────────────────────────────
+    if (remaining > 0) {
+      const retirees = st.filter((s) => !s.working);
+      // 1. Each retiree's pension within their own personal allowance.
+      for (const s of retirees) {
+        const r = drawPensionWithinAllowance(
+          s.P,
           remaining,
-          giaBal,
-          costBasis,
-          incomeForCGT,
-          0,
-          retThresholdScale
+          s.accessible,
+          s.guaranteedGross,
+          scale
         );
-        giaTaxableCGT = computeGIACGT(gross, giaBal, costBasis, incomeForCGT, 0, retThresholdScale);
-        const net = round2(gross - giaTaxableCGT);
-        const after = applyGIAWithdrawal(giaBal, costBasis, gross);
-        giaBal = after.bal;
-        costBasis = after.costBasis;
-        giaTaxableDraw = gross;
-        remaining = round2(remaining - net);
+        remaining = r.remaining;
+        s.pensionDraw = r.draw;
+        s.pensionTaxFree = r.taxFree;
+        s.incomeForCGT = round2(s.guaranteedGross + round2(r.draw - r.taxFree));
       }
-
-      // 5. Pension: taxable drawdown (income tax on the portion above the personal allowance)
-      // UFPLS: only the non-tax-free portion counts as taxable income; the tax-free component
-      // is limited by the remaining Lump Sum Allowance (may be less than 25% if near exhaustion).
-      let taxablePension = 0;
-      let step5TaxFree = 0;
-      if (pensionAccessible && remaining > 0 && pensionBal > 0) {
-        const gross = takePCLS
-          ? pensionGrossForNet(remaining, pensionBal, incomeForCGT, retThresholdScale)
-          : ufplsGrossForNet(remaining, pensionBal, incomeForCGT, retThresholdScale, remainingLSA);
-        step5TaxFree = takePCLS ? 0 : round2(Math.min(0.25 * gross, remainingLSA));
-        if (!takePCLS) remainingLSA = round2(Math.max(0, remainingLSA - step5TaxFree));
-        const taxableIncome = round2(gross - step5TaxFree);
-        const taxablePensionTax = round2(
-          calculateIncomeTax(incomeForCGT + taxableIncome, retThresholdScale).totalTax -
-            calculateIncomeTax(incomeForCGT, retThresholdScale).totalTax
-        );
-        const net = round2(gross - taxablePensionTax);
-        pensionBal = round2(pensionBal - gross);
-        taxablePension = gross;
-        remaining = round2(remaining - net);
+      // 2. Each partner's GIA up to their own CGT exemption.
+      for (const s of st) {
+        const r = drawGiaWithinExemption(s.P, remaining, s.incomeForCGT, scale);
+        remaining = r.remaining;
+        s.giaDraw = round2(s.giaDraw + r.draw);
+        s.giaCGT = round2(s.giaCGT + r.cgt);
+        s.exemptUsed = round2(s.exemptUsed + r.draw * r.gainFracPre);
       }
-
-      // ── Totals ─────────────────────────────────────────────────────────────
-      const totalPensionDraw = round2(tfPension + taxablePension);
-      const totalGIADraw = round2(giaExemptDraw + giaTaxableDraw);
-      const totalGIACGT = round2(giaExemptCGT + giaTaxableCGT);
-      // Taxable pension income = total withdrawn minus the LSA-capped tax-free components.
-      // For PCLS: step1TaxFree = 0 and step5TaxFree = 0, so the full draw is taxable income.
-      // For UFPLS: may be less than 75% of draw once the LSA approaches exhaustion.
-      const pensionTaxableIncome = round2(totalPensionDraw - step1TaxFree - step5TaxFree);
-      const totalIncomeTax = round2(
-        calculateIncomeTax(guaranteedGross + pensionTaxableIncome, retThresholdScale).totalTax
+      // 3. ISAs, in proportion to their balances.
+      const isaTotal = st[0].P.isa + st[1].P.isa;
+      if (remaining > 0 && isaTotal > 0) {
+        const first = drawIsa(st[0].P, round2((remaining * st[0].P.isa) / isaTotal));
+        remaining = round2(remaining - first.draw);
+        const second = drawIsa(st[1].P, remaining);
+        remaining = second.remaining;
+        const topUp = drawIsa(st[0].P, remaining);
+        remaining = topUp.remaining;
+        st[0].isaDraw = round2(st[0].isaDraw + first.draw + topUp.draw);
+        st[1].isaDraw = round2(st[1].isaDraw + second.draw);
+      }
+      // 4. Taxable GIA, lower income first.
+      for (const s of byIncome) {
+        const r = drawGiaTaxable(s.P, remaining, s.incomeForCGT, scale);
+        remaining = r.remaining;
+        s.giaDraw = round2(s.giaDraw + r.draw);
+        s.giaCGT = round2(s.giaCGT + r.cgt);
+      }
+      // 5. Taxable pension, keeping the retirees' taxable incomes level.
+      remaining = drawPensionAcross(
+        retirees.filter((s) => s.accessible && s.P.pension > 0),
+        remaining,
+        scale
       );
-      const unmet = round2(Math.max(0, remaining));
-      // The Class 3 cost sat at the bottom of the need, so any unmet amount eats
-      // it first: the year is bought only if the whole need (including the cost)
-      // was funded. If pots run dry partway through the cost, the year isn't
-      // bought — any partial draw (< one year's cost, only in a near-exhausted
-      // year) is absorbed, keeping the essential-spending shortfall below honest.
-      const class3Unfunded = round2(Math.min(class3CostThisYear, unmet));
-      const class3YearBought = class3CostThisYear > 0 && class3Unfunded <= 0.005; // whole cost funded
-      const class3ContributionThisYear = class3YearBought ? class3CostThisYear : 0;
-      if (class3YearBought) {
-        class3YearsBought += 1;
-        class3YearsRemaining -= 1;
-        class3TotalCost = round2(class3TotalCost + class3ContributionThisYear);
-      }
-      // Essential shortfall excludes the discretionary (and possibly skipped) Class 3.
-      const shortfall = round2(Math.max(0, unmet - class3Unfunded));
-      // A large one-off expense can push the shortfall past the year's target
-      // expenses; net income achieved is floored at 0 rather than reported negative.
-      const netAchieved = round2(Math.max(0, targetExpenses - shortfall));
+    }
 
-      // Surplus guaranteed income (beyond this year's whole need) is saved into
-      // the GIA at cost; the bed-and-ISA step then moves it into the ISA as
-      // headroom allows.
-      if (incomeSurplus > 0) {
-        giaBal = round2(giaBal + incomeSurplus);
-        costBasis = round2(costBasis + incomeSurplus);
-      }
+    // ── Class 3 and shortfall ───────────────────────────────────────────
+    // Any unmet need eats the (lowest-priority) Class 3 costs first.
+    const unmet = round2(Math.max(0, remaining));
+    let unmetLeft = unmet;
+    let class3Unfunded = 0;
+    for (const s of st) {
+      if (s.working) continue;
+      s.class3 = settleClass3(s.P, s.class3Cost, unmetLeft);
+      unmetLeft = round2(Math.max(0, unmetLeft - s.class3.unfunded));
+      class3Unfunded = round2(class3Unfunded + s.class3.unfunded);
+    }
+    const shortfall = round2(Math.max(0, unmet - class3Unfunded));
 
-      // ── Bed and ISA (retirement) ────────────────────────────────────────────
-      // After funding expenses, any remaining GIA is moved into the ISA up to the
-      // annual subscription limit (£20,000). Withdrawals from the ISA do not count
-      // toward the subscription limit, so the full headroom is available each year
-      // minus however much PCLS used it in retirement year 1.
-      // The CGT annual exempt is partially consumed by drawdown step 2; we apply only
-      // what remains so we don't double-count it.
-      const gainsUsedInStep2 = round2(giaExemptDraw * gainFracPreStep2);
-      const retExemptRemaining = round2(
-        Math.max(0, GIA_CGT_CONSTANTS.annualExemptAmount - gainsUsedInStep2)
+    // ── Use each retiree's personal allowance in full ───────────────────
+    // Pension drawn within the personal allowance is tax-free, and moved into
+    // an ISA it grows tax-free just as it would in the pension — but later
+    // withdrawals from the pension would be taxed. So a retiree whose
+    // allowance isn't used up by the year's spending (their partner still
+    // works, or the household's other income covers it) draws pension up to
+    // the allowance anyway and the money joins the year's savings. If their
+    // partner can use the Marriage Allowance, £1,260 of it is left free for
+    // that instead.
+    const pa = round2(PERSONAL_ALLOWANCE * scale);
+    const transferable = round2(COUPLE_DEFAULTS.marriageAllowance * scale);
+    const basicRateTop = round2((PERSONAL_ALLOWANCE + BASIC_RATE_BAND) * scale);
+    const taxableSoFar = (s) =>
+      s.working
+        ? s.pay.thresholdIncome
+        : round2(s.guaranteedGross + round2(s.pensionDraw - s.pensionTaxFree));
+    const taxableBefore = st.map(taxableSoFar);
+    for (const [k, s] of st.entries()) {
+      if (s.working) continue;
+      const own = taxableBefore[k];
+      const other = taxableBefore[1 - k];
+      const leaveForMarriageAllowance =
+        partnership === 'married' &&
+        own <= pa - transferable &&
+        other > pa &&
+        other <= basicRateTop;
+      const r = drawPensionWithinAllowance(
+        s.P,
+        s.P.pension,
+        s.accessible,
+        own,
+        scale,
+        leaveForMarriageAllowance ? round2(pa - transferable) : pa
       );
-      const retBedIsaHeadroom = round2(ISA_LIMIT - pclsToISAThisYear);
-      let retBedIsaGross = 0,
-        retBedIsaCGT = 0,
-        retBedIsaNet = 0;
-      if (retBedIsaHeadroom > 0 && giaBal > 0) {
-        const retIncomeForCGT = round2(guaranteedGross + pensionTaxableIncome);
-        // Gross up so the net amount landing in the ISA equals the full headroom.
-        const retGrossNeeded = giaGrossForNet(
-          retBedIsaHeadroom,
-          giaBal,
-          costBasis,
-          retIncomeForCGT,
-          retExemptRemaining,
-          retThresholdScale
-        );
-        retBedIsaGross = round2(Math.min(giaBal, retGrossNeeded));
-        retBedIsaCGT = computeGIACGT(
-          retBedIsaGross,
-          giaBal,
-          costBasis,
-          retIncomeForCGT,
-          retExemptRemaining,
-          retThresholdScale
-        );
-        retBedIsaNet = round2(retBedIsaGross - retBedIsaCGT);
-        const after = applyGIAWithdrawal(giaBal, costBasis, retBedIsaGross);
-        giaBal = after.bal;
-        costBasis = after.costBasis;
-        isaBal = round2(isaBal + retBedIsaNet);
-      }
+      if (r.draw <= 0) continue;
+      s.allowanceTopUp = r.draw;
+      s.pensionDraw = round2(s.pensionDraw + r.draw);
+      s.pensionTaxFree = round2(s.pensionTaxFree + r.taxFree);
+      savings = round2(savings + r.draw);
+    }
 
-      // ── Growth on remaining balances ───────────────────────────────────────
-      const retYearRate = getRateForAge(
-        rAge,
-        retirementAge,
-        yrRet.savingsRate,
-        yrRet.retirementRate,
+    // Each retiree's income tax on guaranteed income plus taxable pension drawn.
+    for (const s of st) {
+      if (s.working) {
+        s.incomeTax = s.pay.incomeTax;
+        s.taxableIncome = s.pay.thresholdIncome;
+      } else {
+        s.taxableIncome = round2(s.guaranteedGross + round2(s.pensionDraw - s.pensionTaxFree));
+        s.incomeTax = round2(calculateIncomeTax(s.taxableIncome, scale).totalTax);
+      }
+    }
+
+    // ── Marriage Allowance ──────────────────────────────────────────────
+    // A spouse or civil partner who doesn't use £1,260 of their personal
+    // allowance can transfer it to a basic-rate partner, cutting their tax by
+    // up to £252 a year (more as thresholds rise). Claimed when it costs the
+    // transferor nothing; the saving is added to savings.
+    let marriageAllowance = 0;
+    if (partnership === 'married') {
+      const [a, b] = byIncome;
+      if (
+        // (a penny's grace for rounding in the allowance top-up)
+        a.taxableIncome <= pa - transferable + 0.01 &&
+        b.taxableIncome > pa &&
+        b.taxableIncome <= basicRateTop
+      ) {
+        marriageAllowance = round2(Math.min(b.incomeTax, 0.2 * transferable));
+        b.incomeTax = round2(b.incomeTax - marriageAllowance);
+        savings = round2(savings + marriageAllowance);
+      }
+    }
+
+    // ── Savings: both ISAs first, then the lower earner's GIA ───────────
+    if (savings > 0) {
+      const room = st.map((s) => Math.max(0, ISA_LIMIT - s.isaUsed));
+      let a0 = round2(Math.min(savings / 2, room[0]));
+      const a1 = round2(Math.min(savings - a0, room[1]));
+      a0 = round2(a0 + Math.min(savings - a0 - a1, room[0] - a0));
+      st[0].isaContrib = a0;
+      st[1].isaContrib = a1;
+      for (const s of st) s.P.isa = round2(s.P.isa + s.isaContrib);
+      const toGia = round2(Math.max(0, savings - a0 - a1));
+      if (toGia > 0) {
+        lower.giaContrib = toGia;
+        investInGIA(lower.P, toGia);
+      }
+    }
+
+    // ── Bed and ISA, growth and NI, per partner ─────────────────────────
+    for (const s of st) {
+      s.bed = bedAndIsa(
+        s.P,
+        round2(ISA_LIMIT - s.isaUsed - s.isaContrib),
+        s.taxableIncome,
+        round2(Math.max(0, exempt - s.exemptUsed)),
+        scale
+      );
+      s.rate = getRateForAge(
+        s.age,
+        s.P.retirementAge,
+        yr.savingsRate,
+        yr.retirementRate,
         glideBeforeYrs,
         glideAfterYrs
       );
-      const pensionGrow = round2(pensionBal * retYearRate);
-      pensionBal = Math.max(0, round2(pensionBal + pensionGrow));
-      const isaGrow = round2(isaBal * retYearRate);
-      isaBal = Math.max(0, round2(isaBal + isaGrow));
-      const giaGrow = round2(giaBal * retYearRate);
-      giaBal = Math.max(0, round2(giaBal + giaGrow));
-      // cost basis unchanged by growth (unrealised gains accumulate)
+      s.growth = s.working
+        ? growPotsWhileWorking(s.P, s.rate, {
+            employee: s.pay.employeeContrib,
+            employer: s.pay.employerContrib,
+            isa: 0,
+            gia: 0,
+          })
+        : growPotsInRetirement(s.P, s.rate);
+      // The rest of each partner's own CGT allowance, used at the year end.
+      s.gainsHarvested = harvestGainsWithinExemption(
+        s.P,
+        round2(Math.max(0, exempt - s.exemptUsed - s.bed.gain))
+      );
+      s.niQualifyingYear = s.working ? recordNiQualifyingYear(s.P, s.pay) : false;
+    }
 
-      // ── Row ────────────────────────────────────────────────────────────────
-      const retRow = {
-        year: rYear,
-        age: rAge,
-        phase: 'retirement',
+    // ── Row ─────────────────────────────────────────────────────────────
+    const sum = (f) => round2(st.reduce((t, s) => t + f(s), 0));
+    const studentLoans = st.map((s) => s.pay?.slRow).filter(Boolean);
+    const netIncomeAchieved = round2(Math.max(0, spending - shortfall));
+    const row = {
+      year,
+      age,
+      partnerAge: partner.currentAge + i,
+      phase: allRetired ? 'retirement' : allWorking ? 'accumulation' : 'transition',
+      inflationIndex: Math.round(infl * 1e6) / 1e6,
 
-        targetNetExpenses: targetExpenses,
-        // Cumulative price index since the start year (1 = today's money), so
-        // consumers can express this row's nominal figures in real terms.
-        inflationIndex: Math.round(cumulInflation * 1e6) / 1e6,
-        // Spending-guardrails telemetry (real, today's money). Null-safe: when
-        // guardrails are off, the budget just equals the target and no action fires.
-        spendingBudgetReal: guardrails ? round2(grSpendReal) : null,
-        guardrailAction,
-        mortgagePayment: mortgagePaymentThisRetYear,
-        unsecuredDebtPayments: retUnsecuredPayments,
-        statePensionGross: spGross,
-        statePensionNet: spNet,
-        annuityGross,
-        annuityNet,
-        annuityPurchase: annuityPurchaseThisYear,
-        incomeSurplusSaved: incomeSurplus,
-        taxFreePensionDrawdown: tfPension,
-        taxablePensionDrawdown: taxablePension,
-        pensionDrawdown: totalPensionDraw,
-        isaWithdrawal: isaDraw,
-        giaWithdrawal: totalGIADraw,
-        giaCGT: totalGIACGT,
-        incomeTax: totalIncomeTax,
-        netIncomeAchieved: netAchieved,
-        shortfall,
-        class3Contribution: class3ContributionThisYear,
-        class3YearBought,
+      // Household spending and cash flow
+      livingExpenses: allRetired ? null : spending,
+      targetNetExpenses: allRetired ? spending : null,
+      spendingBudgetReal: allRetired && guardrails ? round2(retirement.grSpendReal) : null,
+      guardrailAction,
+      mortgagePayment: mort.payment,
+      unsecuredDebtPayments: unsec.payments,
+      lifeCoverPremiums: premiums,
+      netIncome: income,
+      availableForSavings,
+      saved: savings,
+      shortfall,
+      netIncomeAchieved,
+      marriageAllowance,
+      pensionSavedWithinAllowance: sum((s) => s.allowanceTopUp),
+      windfall: windfallAmt,
+      windfallLabels: windfall?.labels ?? [],
+      oneOffExpense: expenseAmt,
+      oneOffExpenseLabels: expense?.labels ?? [],
+      oneOffExpenseFunding: allWorking && expenseAmt > 0 ? expenseFunding : null,
+      expenseShortfall,
 
-        windfall: retWindfallAmt,
-        windfallLabels: retWindfall?.labels ?? [],
+      // Totals across both partners
+      grossIncome: sum((s) => s.pay?.effectiveIncome ?? 0),
+      incomeTax: sum((s) => s.incomeTax),
+      employeeNI: sum((s) => s.pay?.employeeNI ?? 0),
+      studentLoanRepayment: sum((s) => s.pay?.slRepayment ?? 0),
+      statePensionGross: sum((s) => (s.working ? s.pay.workingStatePension : s.spGross)),
+      annuityGross: sum((s) => s.annuityGross),
+      pensionDrawdown: sum((s) => s.pensionDraw),
+      isaWithdrawal: sum((s) => s.isaDraw),
+      giaWithdrawal: sum((s) => s.giaDraw),
+      giaCGT: sum((s) => s.giaCGT),
+      isaContribution: sum((s) => s.isaContrib),
+      giaContribution: sum((s) => s.giaContrib),
+      class3Contribution: sum((s) => s.class3?.contribution ?? 0),
+      investmentRate: round2(st[0].rate * 10000) / 10000,
 
-        oneOffExpense: retExpenseAmt,
-        oneOffExpenseLabels: retExpense?.labels ?? [],
+      pension: {
+        openingBalance: sum((s) => s.open.pension),
+        growthAmount: sum((s) => s.growth.pensionGrowth),
+        closingBalance: sum((s) => s.P.pension),
+        estimatedTaxOnWithdrawal: sum((s) =>
+          estimatePensionWithdrawalTax(s.P.pension, estimatedPensionTaxShare(s.P))
+        ),
+      },
+      isa: {
+        openingBalance: sum((s) => s.open.isa),
+        growthAmount: sum((s) => s.growth.isaGrowth),
+        closingBalance: sum((s) => s.P.isa),
+      },
+      gia: {
+        openingBalance: sum((s) => s.open.gia),
+        growthAmount: sum((s) => s.growth.giaGrowth),
+        gainsRealisedTaxFree: sum((s) => s.gainsHarvested),
+        closingBalance: sum((s) => s.P.gia),
+        closingCostBasis: sum((s) => s.P.costBasis),
+        unrealisedGain: sum((s) => s.P.gia - s.P.costBasis),
+      },
+      mortgage: mort.row,
+      unsecuredDebts: unsec.rows,
+      studentLoan:
+        studentLoans.length > 0
+          ? {
+              openingBalance: round2(studentLoans.reduce((t, r) => t + r.openingBalance, 0)),
+              repayment: round2(studentLoans.reduce((t, r) => t + r.repayment, 0)),
+              closingBalance: round2(studentLoans.reduce((t, r) => t + r.closingBalance, 0)),
+            }
+          : null,
 
-        investmentRate: round2(retYearRate * 10000) / 10000,
+      people: st.map((s) => personRowFromCouple(s)),
+    };
+    yearlyBreakdown.push(row);
+  }
 
-        pension: {
-          openingBalance: openPension,
-          drawdown: totalPensionDraw,
-          annuityPurchase: annuityPurchaseThisYear?.pensionUsed ?? 0,
-          growthAmount: pensionGrow,
-          closingBalance: pensionBal,
-          // Rough tax due when drawn, display only. Once the lump sum has been
-          // taken the whole pot is taxable; before that (or on the UFPLS path)
-          // its tax-free share still applies, within the allowance left.
-          estimatedTaxOnWithdrawal:
-            takePCLS && !pclsPending
-              ? estimatePensionWithdrawalTax(pensionBal, { taxFreeShare: 0 })
-              : estimatePensionWithdrawalTax(pensionBal, {
-                  taxFreeShare: uncrystallisedTaxFreeShare,
-                  remainingLSA: takePCLS ? PENSION_CONSTANTS.lumpSumAllowance : remainingLSA,
-                }),
-        },
-        isa: {
-          openingBalance: openISA,
-          withdrawal: isaDraw,
-          bedIsaContrib: retBedIsaNet,
-          growthAmount: isaGrow,
-          closingBalance: isaBal,
-        },
-        gia: {
-          openingBalance: openGIA,
-          withdrawal: totalGIADraw,
-          cgt: totalGIACGT,
-          windfall: retWindfallAmt,
-          bedIsaGross: retBedIsaGross,
-          bedIsaCGT: retBedIsaCGT,
-          growthAmount: giaGrow,
-          closingBalance: giaBal,
-          closingCostBasis: costBasis,
-          unrealisedGain: round2(giaBal - costBasis),
-        },
-        bedIsa: { grossSold: retBedIsaGross, cgt: retBedIsaCGT, netContrib: retBedIsaNet },
-        mortgage: retMortgageRow,
-        unsecuredDebts: retDebtRows,
-        studentLoan: null,
-      };
-      if (pclsThisYear) {
-        retRow.pclsLumpSum = pclsLumpSum;
-        retRow.pclsCapped = pclsCapped;
+  /**
+   * Step 5 across a couple: draw `remaining` (net) from the eligible
+   * retirees' pensions so their taxable incomes end level — both basic-rate
+   * bands fill before either pays higher rate. Finds the common taxable
+   * income level by bisection. Returns what is still needed.
+   */
+  function drawPensionAcross(list, remaining, scale) {
+    if (remaining <= 0 || list.length === 0) return remaining;
+    if (list.length === 1) {
+      const s = list[0];
+      const r = drawPensionTaxable(s.P, remaining, true, s.incomeForCGT, scale);
+      s.pensionDraw = round2(s.pensionDraw + r.draw);
+      s.pensionTaxFree = round2(s.pensionTaxFree + r.taxFree);
+      return r.remaining;
+    }
+    const grossAt = (s, level) => pensionGrossForTaxable(s.P, Math.max(0, level - s.incomeForCGT));
+    const netAt = (level) =>
+      list.reduce((t, s) => {
+        const g = grossAt(s, level);
+        const taxFree = s.P.takePCLS ? 0 : Math.min(0.25 * g, s.P.lsaRemaining);
+        const tax =
+          calculateIncomeTax(s.incomeForCGT + g - taxFree, scale).totalTax -
+          calculateIncomeTax(s.incomeForCGT, scale).totalTax;
+        return t + g - tax;
+      }, 0);
+    let lo = Math.min(...list.map((s) => s.incomeForCGT));
+    let hi = Math.max(...list.map((s) => s.incomeForCGT)) + remaining * 3 + 200_000;
+    if (netAt(hi) > remaining) {
+      for (let iter = 0; iter < 60; iter++) {
+        const mid = (lo + hi) / 2;
+        if (netAt(mid) < remaining) lo = mid;
+        else hi = mid;
       }
-      retRow.pensionAccessible = pensionAccessible;
-      yearlyBreakdown.push(retRow);
+    }
+    for (const s of list) {
+      const r = drawPensionGross(s.P, grossAt(s, hi), s.incomeForCGT, scale);
+      s.pensionDraw = round2(s.pensionDraw + r.draw);
+      s.pensionTaxFree = round2(s.pensionTaxFree + r.taxFree);
+      remaining = round2(remaining - r.net);
+    }
+    return round2(Math.max(0, remaining));
+  }
+
+  /** One partner's part of a couple row. */
+  function personRowFromCouple(s) {
+    const P = s.P;
+    return {
+      id: P.id,
+      age: s.age,
+      status: s.working ? 'working' : 'retired',
+      grossIncome: s.pay?.effectiveIncome ?? 0,
+      hoursFraction: s.pay?.hoursFraction ?? null,
+      employeeContribution: s.pay?.employeeContrib ?? 0,
+      employerContribution: s.pay?.employerContrib ?? 0,
+      pensionInput: s.pay?.pensionInput ?? 0,
+      annualAllowance: s.pay?.annualAllowance ?? null,
+      annualAllowanceBreached: s.pay?.annualAllowanceBreached ?? false,
+      incomeTax: s.incomeTax,
+      employeeNI: s.pay?.employeeNI ?? 0,
+      studentLoanRepayment: s.pay?.slRepayment ?? 0,
+      statePensionGross: s.working ? s.pay.workingStatePension : s.spGross,
+      dbPension: dbRowSummary(P, s.db),
+      annuityGross: s.annuityGross,
+      annuityPurchase: s.annuityPurchase,
+      pclsLumpSum: s.pclsThisYear ? P.pcls.lumpSum : 0,
+      pclsCapped: s.pclsThisYear ? P.pcls.capped : false,
+      netIncome: s.net,
+      taxableIncome: s.taxableIncome,
+      pensionDrawdown: s.pensionDraw,
+      pensionTaxFreeDrawn: s.pensionTaxFree,
+      // Of the pension drawn, how much was moved to savings to use the
+      // personal allowance (not needed for spending).
+      pensionSavedWithinAllowance: s.allowanceTopUp,
+      isaWithdrawal: s.isaDraw,
+      giaWithdrawal: s.giaDraw,
+      giaCGT: s.giaCGT,
+      isaContribution: s.isaContrib,
+      giaContribution: s.giaContrib,
+      bedIsa: { grossSold: s.bed.gross, cgt: s.bed.cgt, netContrib: s.bed.net },
+      class3Contribution: s.class3?.contribution ?? 0,
+      class3YearBought: s.class3?.bought ?? false,
+      pensionAccessible: s.age >= P.pensionAccessAge,
+      investmentRate: round2(s.rate * 10000) / 10000,
+      pension: {
+        openingBalance: s.open.pension,
+        growthAmount: s.growth.pensionGrowth,
+        closingBalance: P.pension,
+        estimatedTaxOnWithdrawal: estimatePensionWithdrawalTax(
+          P.pension,
+          estimatedPensionTaxShare(P)
+        ),
+      },
+      isa: {
+        openingBalance: s.open.isa,
+        growthAmount: s.growth.isaGrowth,
+        closingBalance: P.isa,
+      },
+      gia: {
+        openingBalance: s.open.gia,
+        growthAmount: s.growth.giaGrowth,
+        gainsRealisedTaxFree: s.gainsHarvested,
+        closingBalance: P.gia,
+        closingCostBasis: P.costBasis,
+      },
+      studentLoan: s.pay?.slRow ?? null,
+      niQualifyingYear: s.niQualifyingYear,
+      cumulativeNIYears: P.niYears,
+    };
+  }
+
+  /** The survivor's part of a row produced for a one-person year. */
+  function personRowFromSingle(P, row, status, personAge) {
+    return {
+      id: P.id,
+      age: personAge,
+      status,
+      grossIncome: row.grossIncome ?? 0,
+      hoursFraction: row.hoursFraction ?? null,
+      employeeContribution: row.employeeContribution ?? 0,
+      employerContribution: row.employerContribution ?? 0,
+      pensionInput: row.pensionInput ?? 0,
+      annualAllowance: row.annualAllowance ?? null,
+      annualAllowanceBreached: row.annualAllowanceBreached ?? false,
+      incomeTax: row.incomeTax,
+      employeeNI: row.employeeNI ?? 0,
+      studentLoanRepayment: row.studentLoanRepayment ?? 0,
+      statePensionGross: row.statePensionGross,
+      dbPension: row.dbPension,
+      annuityGross: row.annuityGross ?? 0,
+      annuityPurchase: row.annuityPurchase ?? null,
+      pclsLumpSum: row.pclsLumpSum ?? 0,
+      pclsCapped: row.pclsCapped ?? false,
+      netIncome: status === 'working' ? row.netTakeHome : null,
+      pensionDrawdown: row.pensionDrawdown ?? 0,
+      pensionSavedWithinAllowance: 0,
+      isaWithdrawal: row.isaWithdrawal ?? 0,
+      giaWithdrawal: row.giaWithdrawal ?? 0,
+      giaCGT: row.giaCGT ?? 0,
+      isaContribution: row.isaContribution ?? 0,
+      giaContribution: row.giaContribution ?? 0,
+      bedIsa: row.bedIsa,
+      class3Contribution: row.class3Contribution ?? 0,
+      class3YearBought: row.class3YearBought ?? false,
+      pensionAccessible: row.pensionAccessible ?? personAge >= P.pensionAccessAge,
+      investmentRate: row.investmentRate,
+      pension: row.pension,
+      isa: row.isa,
+      gia: row.gia,
+      inheritedPension: row.inheritedPension ?? null,
+      studentLoan: row.studentLoan,
+      niQualifyingYear: row.niQualifyingYear ?? false,
+      cumulativeNIYears: P.niYears,
+    };
+  }
+
+  /** Inherited pension figures for a row. */
+  function inheritedPensionRow(P, opening, taxFreeDrawn, taxableDrawn, growth) {
+    return {
+      openingBalance: opening,
+      taxFreeDrawdown: taxFreeDrawn,
+      taxableDrawdown: taxableDrawn,
+      growthAmount: growth,
+      closingBalance: inheritedPensionBalance(P),
+      taxFree: P.inherited.taxable === 0 && P.inherited.taxFree > 0,
+      // Display-only tax estimate: tax-free, or basic rate on the taxable pot.
+      estimatedTaxOnWithdrawal: estimatePensionWithdrawalTax(P.inherited.taxable, {
+        taxFreeShare: 0,
+      }),
+    };
+  }
+
+  // ── Year loop ─────────────────────────────────────────────────────────────
+  // Work until the target retirement age, then (if flexible) keep going while
+  // off track, up to the delay cap or the plan horizon. Without a retirement
+  // phase the projection ends when everyone has stopped work; with one, it
+  // runs to the horizon.
+  let accumulationYears; // the main person's working years (set when they stop)
+  let retEntry = null; // pots and debts on the day everyone has retired
+  for (let i = 0; ; i++) {
+    const year = currentYear + i;
+    const age = currentAge + i;
+
+    // ── A death ("what if one of us dies?") ─────────────────────────────
+    if (deathPlan && i === deathPlan.yearIndex && deathPlan.D.diedAt === null) {
+      const { D, S } = deathPlan;
+      const estate = settleDeath(D, S, {
+        age: D.currentAge + i,
+        survivorAge: S.currentAge + i,
+        year,
+        partnership,
+        willsToEachOther,
+        econ,
+        cover: coverOnDeath(D, i),
+      });
+      // Cover reaching the survivor: towards the mortgage where the policy
+      // says so (if it has started), the rest into their savings.
+      for (const c of estate.coverPaid) {
+        let amount = c.amount;
+        if (c.payTo === 'mortgage' && mortgageStarted && mortgageBalance > 0) {
+          const repaid = round2(Math.min(amount, mortgageBalance));
+          mortgageBalance = round2(mortgageBalance - repaid);
+          estate.lifeCover.toMortgage = round2(estate.lifeCover.toMortgage + repaid);
+          amount = round2(amount - repaid);
+        }
+        if (amount > 0) {
+          investInGIA(S, amount);
+          estate.lifeCover.toSavings = round2(estate.lifeCover.toSavings + amount);
+        }
+      }
+      estates.push(estate);
+    }
+    const alive = alivePeople();
+
+    // Stop working once at/after the target age and either not flexible, on
+    // track, at the delay cap, or at the horizon. The on-track test is only
+    // evaluated when flexible (the cap check short-circuits otherwise).
+    const stopping = [];
+    for (const P of alive) {
+      if (P.retiredAt !== null) continue;
+      const personAge = P.currentAge + i;
+      if (personAge < P.retirementAge) continue;
+      const cap = flexibleRetirement ? maxRetirementDelayYears : 0;
+      const hitCap = personAge - P.retirementAge >= cap;
+      const atHorizon =
+        retirementOptions != null && age >= (retirementOptions.maxAge ?? Infinity) + ageGap;
+      if (hitCap || atHorizon || onTrackToRetire(i)) stopping.push(P);
+    }
+    if (stopping.includes(self)) accumulationYears = i;
+    if (
+      retirementOptions == null &&
+      stopping.length > 0 &&
+      alive.every((P) => P.retiredAt !== null || stopping.includes(P))
+    )
+      break;
+    for (const P of stopping)
+      enterRetirement(P, P.currentAge + i, retirement?.maxAge ?? Infinity, {
+        takePCLS: retirement?.takePCLS ?? false,
+        pclsPercentage: retirement?.pclsPercentage ?? PENSION_CONSTANTS.maxPCLSPercentage,
+      });
+
+    const allRetired = alive.every((P) => P.retiredAt !== null);
+    if (allRetired && retEntry === null && retirementOptions != null) {
+      // Pots and debts at retirement entry (after any lump sum, before drawdown).
+      retEntry = {
+        age,
+        year,
+        pension: alive.reduce((s, P) => s + P.pension, 0),
+        isa: alive.reduce((s, P) => s + P.isa, 0),
+        gia: alive.reduce((s, P) => s + P.gia, 0),
+        costBasis: alive.reduce((s, P) => s + P.costBasis, 0),
+        mortgage: mortgageBalance,
+        unsecured: round2(unsecuredOutstanding()),
+        people: people.map((P) => ({ pension: P.pension, isa: P.isa, gia: P.gia })),
+      };
+    }
+    if (allRetired && retirement !== null && age > retirement.maxAge + ageGap) break;
+
+    // This year's rates and running products (i=0 leaves them at 1, matching
+    // Math.pow(..., 0)=1).
+    const yr = ratesForYear(i);
+    if (i > 0) {
+      econ.cumulInflation *= 1 + yr.inflationRate;
+      econ.thresholdScale *= 1 + yr.inflationRate - fiscalDragRate;
+      uprateStatePension(yr, year);
+    }
+    for (const P of alive) recordStatePensionClaim(P, P.currentAge + i, econ);
+
+    if (alive.length === 1) {
+      const P = alive[0];
+      if (P.retiredAt === null) workingYear(P, i, year, age, yr);
+      else retiredYear(P, i, year, age, yr);
+    } else {
+      coupleYear(i, year, age, yr);
     }
   }
 
+  // Actual (possibly delayed) retirement age/year resolved by the loop above.
+  // Without flexible retirement these equal the target retirementAge. (In a
+  // couple, null if the main person died before retiring.)
+  const actualRetirementAge =
+    accumulationYears === undefined ? null : currentAge + accumulationYears;
+  const actualRetirementYear =
+    accumulationYears === undefined ? null : currentYear + accumulationYears;
+  const retirementDelayYears =
+    actualRetirementAge === null ? 0 : actualRetirementAge - retirementAge;
+
   // ── Summary ──────────────────────────────────────────────────────────────
-  // When there is a retirement phase, report balances at retirement entry (after PCLS, before
-  // drawdown) so headline figures reflect "what you have on day one of retirement". Using the
-  // post-loop state would give zero whenever pots are fully depleted by maxAge.
-  // Use retirement-entry snapshots when available; fall back to end-of-accumulation values
-  // when there is no retirement phase.
-  const sumPension = retEntryPension !== null ? retEntryPension : pensionBal;
-  const sumISA = retEntryISA !== null ? retEntryISA : isaBal;
-  const sumGIA = retEntryGIA !== null ? retEntryGIA : giaBal;
-  const sumCostBasis = retEntryCostBasis !== null ? retEntryCostBasis : costBasis;
-  const sumMortgage = retEntryMortgage !== null ? retEntryMortgage : mortgageBalance;
-  const sumUnsecured =
-    retEntryUnsecured !== null
-      ? retEntryUnsecured
-      : round2(debts.reduce((s, d) => s + d.balance, 0));
+  // With a retirement phase, report balances at retirement entry (after PCLS,
+  // before drawdown) so headline figures reflect "what you have on day one of
+  // retirement" — the end of the projection would give zero whenever pots are
+  // depleted by maxAge. Without one, report the end of the working years.
+  const sumNow = (f) => people.reduce((s, P) => s + f(P), 0);
+  const sumPension = retEntry !== null ? retEntry.pension : sumNow((P) => P.pension);
+  const sumISA = retEntry !== null ? retEntry.isa : sumNow((P) => P.isa);
+  const sumGIA = retEntry !== null ? retEntry.gia : sumNow((P) => P.gia);
+  const sumCostBasis = retEntry !== null ? retEntry.costBasis : sumNow((P) => P.costBasis);
+  const sumMortgage = retEntry !== null ? retEntry.mortgage : mortgageBalance;
+  const sumUnsecured = retEntry !== null ? retEntry.unsecured : round2(unsecuredOutstanding());
+  const studentLoanOutstanding = sumNow((P) => P.studentLoan?.balance ?? 0);
   // Nominal state pension at the age it first becomes payable, triple-lock grown from today.
   // Uses the base-rate triplelock for the summary figure (independent of yearlyRatesOverride).
-  // With constant rates the adjusted rule gives the same path, so this holds for both.
+  // With constant rates the adjusted lock gives the same path, so this holds for both.
   const baseTriplelockForSummary = Math.max(wageGrowthRate, inflationRate, 0.025);
-  const summaryStartAge = statePensionAge + statePensionDeferralYears;
-  const summaryDeferralUplift =
-    1 + LIFECYCLE_CONSTANTS.statePension.deferralUpliftPerYear * statePensionDeferralYears;
+  const projectedStatePensionOf = (P) =>
+    round2(
+      computeStatePension(P.niYears + P.class3.yearsBought) *
+        Math.pow(1 + baseTriplelockForSummary, Math.max(0, P.spClaimAge - P.currentAge)) *
+        P.statePensionDeferralUplift
+    );
   // Qualifying years including any Class 3 years bought in the retirement phase.
-  const niYearsWithTopUp = niYears + class3YearsBought;
-  const projectedStatePension = round2(
-    computeStatePension(niYearsWithTopUp) *
-      Math.pow(1 + baseTriplelockForSummary, Math.max(0, summaryStartAge - currentAge)) *
-      summaryDeferralUplift
-  );
+  const niYearsWithTopUp = self.niYears + self.class3.yearsBought;
+  const projectedStatePension = projectedStatePensionOf(self);
   const totalSavings = round2(sumPension + sumISA + sumGIA);
-  const totalDebt = round2(sumMortgage + sumUnsecured + slBalance);
+  const totalDebt = round2(sumMortgage + sumUnsecured + studentLoanOutstanding);
+
+  const summary = {
+    retirementYear: actualRetirementYear,
+    retirementAge: actualRetirementAge,
+    nominalRetirementAge: retirementAge,
+    retirementDelayYears,
+    flexibleRetirement,
+    pensionPot: sumPension,
+    isaBalance: sumISA,
+    giaBalance: sumGIA,
+    giaCostBasis: sumCostBasis,
+    giaUnrealisedGain: round2(sumGIA - sumCostBasis),
+    mortgageOutstanding: sumMortgage,
+    unsecuredDebtOutstanding: sumUnsecured,
+    studentLoanOutstanding,
+    totalSavings,
+    totalDebt,
+    netWorth: round2(totalSavings - totalDebt),
+    niYearsAccrued: self.niYears,
+    class3YearsBought: self.class3.yearsBought,
+    class3TotalCost: self.class3.totalCost,
+    niYearsWithTopUp,
+    projectedStatePension,
+    statePensionAge: self.statePensionAge,
+    statePensionStartAge: self.spClaimAge,
+    statePensionEligibleAtRetirement:
+      actualRetirementAge !== null && actualRetirementAge >= self.statePensionAge,
+    annuity: (annuityOwner === 'partner' ? partner : self).annuity?.result ?? null,
+    // Each DB scheme: when it was (or will be) paid, the yearly pension then
+    // and any lump sum, in cash and today's money. startAge is null if the
+    // scheme is not paid within the projection.
+    dbPensions: dbSchemeSummaries(self),
+  };
+  if (couple) {
+    Object.assign(summary, {
+      couple: true,
+      partnership,
+      willsToEachOther,
+      survivorSpendingShare,
+      // The timeline age at which both had retired (the summary's balances date).
+      householdRetirementAge: retEntry?.age ?? null,
+      householdRetirementYear: retEntry?.year ?? null,
+      // What each person held and was due, for the per-person results.
+      people: people.map((P, j) => ({
+        id: P.id,
+        currentAge: P.currentAge,
+        retirementAge: P.retiredAt,
+        nominalRetirementAge: P.retirementAge,
+        diedAt: P.diedAt,
+        pensionPotAtRetirement: retEntry?.people[j].pension ?? P.pension,
+        isaAtRetirement: retEntry?.people[j].isa ?? P.isa,
+        giaAtRetirement: retEntry?.people[j].gia ?? P.gia,
+        niYearsAccrued: P.niYears,
+        class3YearsBought: P.class3.yearsBought,
+        class3TotalCost: P.class3.totalCost,
+        niYearsWithTopUp: P.niYears + P.class3.yearsBought,
+        projectedStatePension: projectedStatePensionOf(P),
+        statePensionAge: P.statePensionAge,
+        statePensionStartAge: P.spClaimAge,
+        annuity: P.annuity?.result ?? null,
+        dbPensions: dbSchemeSummaries(P),
+      })),
+      // At each death: what the person held, the inheritance tax, and where
+      // it went (ukEstate.js). Empty unless a death is modelled.
+      estates,
+    });
+  }
 
   return {
     startYear: currentYear,
     retirementYear: actualRetirementYear,
     hasRetirementPhase: retirementOptions != null,
     yearlyBreakdown,
-    summary: {
-      retirementYear: actualRetirementYear,
-      retirementAge: actualRetirementAge,
-      nominalRetirementAge: retirementAge,
-      retirementDelayYears,
-      flexibleRetirement,
-      pensionPot: sumPension,
-      isaBalance: sumISA,
-      giaBalance: sumGIA,
-      giaCostBasis: sumCostBasis,
-      giaUnrealisedGain: round2(sumGIA - sumCostBasis),
-      mortgageOutstanding: sumMortgage,
-      unsecuredDebtOutstanding: sumUnsecured,
-      studentLoanOutstanding: slBalance,
-      totalSavings,
-      totalDebt,
-      netWorth: round2(totalSavings - totalDebt),
-      niYearsAccrued: niYears,
-      class3YearsBought,
-      class3TotalCost,
-      niYearsWithTopUp,
-      projectedStatePension,
-      statePensionAge,
-      statePensionStartAge: summaryStartAge,
-      statePensionEligibleAtRetirement: actualRetirementAge >= statePensionAge,
-      annuity: annuityResult,
-    },
+    summary,
     taxYear: TAX_YEAR,
   };
 }

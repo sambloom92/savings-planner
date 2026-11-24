@@ -1047,6 +1047,49 @@ describe('optimalEmployeePensionContribution — employer matching', () => {
   });
 });
 
+describe('optimalEmployeePensionContribution — other pension schemes', () => {
+  it('net-pay contributions already lower taxable pay, so less sacrifice is needed', () => {
+    // £120k pay with £10k paid to a DB scheme: £10k more reaches £100k.
+    const r = optimalEmployeePensionContribution(120_000, 0, { netPayContributions: 10_000 });
+    assert.equal(r.employeeContribution, 10_000);
+    assert.equal(optimalEmployeePensionContribution(120_000, 0).employeeContribution, 20_000);
+  });
+
+  it('other pension input uses up annual allowance', () => {
+    // £200k pay wants £100k of sacrifice, but £50k of DB input leaves £10k.
+    const r = optimalEmployeePensionContribution(200_000, 0, { otherPensionInput: 50_000 });
+    assert.equal(r.annualAllowance, 60_000);
+    assert.equal(r.employeeContribution, 10_000);
+    assert.equal(r.cappedByAllowance, true);
+    assert.equal(r.annualAllowanceBreached, false);
+  });
+
+  it('other pension input counts towards adjusted income for the taper', () => {
+    // Adjusted income £250k + £30k = £280k → allowance £60k − £10k = £50k;
+    // threshold income stays above £200k. Room: £50k − £30k = £20k.
+    const r = optimalEmployeePensionContribution(250_000, 0, { otherPensionInput: 30_000 });
+    assert.equal(r.annualAllowance, 50_000);
+    assert.equal(r.employeeContribution, 20_000);
+  });
+
+  it('flags a breach when other input alone exceeds the allowance', () => {
+    const r = optimalEmployeePensionContribution(60_000, 0, { otherPensionInput: 70_000 });
+    assert.equal(r.employeeContribution, 0);
+    assert.equal(r.annualAllowanceBreached, true);
+  });
+
+  it('rejects negative amounts', () => {
+    assert.throws(
+      () => optimalEmployeePensionContribution(60_000, 0, { netPayContributions: -1 }),
+      TypeError
+    );
+    assert.throws(
+      () => optimalEmployeePensionContribution(60_000, 0, { otherPensionInput: -1 }),
+      TypeError
+    );
+  });
+});
+
 describe('optimalEmployeePensionContribution — result shape', () => {
   it('returns all documented fields and the tax year', () => {
     const r = optimalEmployeePensionContribution(70_000, 0.03);

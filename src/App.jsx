@@ -7,9 +7,11 @@ import {
   useCallback,
   createContext,
   useContext,
+  Fragment,
 } from 'react';
 import { createPortal } from 'react-dom';
 import { projectLifecycle, LIFECYCLE_CONSTANTS } from './ukLifecycle.js';
+import { solveCoverGap } from './ukProtection.js';
 import { NI_THRESHOLDS } from './ukNationalInsurance.js';
 import {
   optimalEmployeePensionContribution,
@@ -20,6 +22,12 @@ import { runMonteCarlo } from './ukMonteCarlo.js';
 import { FanChart } from './FanChart.jsx';
 import { fmtGBPLarge } from './formatters.js';
 import { illustrativeAnnuityRate } from './ukAnnuity.js';
+import { DB_CONSTANTS, dbPaymentFactor } from './ukDefinedBenefit.js';
+import { lifeExpectancy, survivalToAge } from './ukMortality.js';
+import { parseChangelog, parseRoadmap, inlineTokens } from './changelog.js';
+import changelogMarkdown from '../CHANGELOG.md?raw';
+import roadmapMarkdown from '../ROADMAP.md?raw';
+import packageJson from '../package.json';
 
 // ── Formatters ────────────────────────────────────────────────────────────────
 const fmtGBP = (n) => `£${Math.round(Math.abs(n)).toLocaleString('en-GB')}`;
@@ -51,7 +59,79 @@ const TAB_HELP = {
   Rates: 'Investment returns, wage growth, inflation, glide path and fiscal drag',
   Retire: 'Retirement spending target, model horizon and tax-free lump sum',
   Simulation: 'Monte Carlo settings (trials, volatility, downturns) and mortality basis',
+  Household: 'Couple mode: partnership type, wills and spending after a death',
+  Protection: 'Couple mode: life cover policies and what the survivor would need',
 };
+
+// ── Couple mode ───────────────────────────────────────────────────────────────
+// The inputs that belong to one person. In couple mode the partner has their
+// own copy (p.partner); everything else is shared by the household.
+const PERSON_KEYS = new Set([
+  'currentAge',
+  'retirementAge',
+  'grossIncome',
+  'niContributionYears',
+  'statePensionAge',
+  'statePensionDeferralYears',
+  'topUpStatePension',
+  'pensionAccessAge',
+  'sex',
+  'employmentChanges',
+  'employeePensionPct',
+  'employeePensionAuto',
+  'employerPensionPct',
+  'employerMatch',
+  'employerMatchThreshold',
+  'pensionBalance',
+  'dbPensions',
+  'isaBalance',
+  'giaBalance',
+  'giaCostBasis',
+  'studentLoanPlan',
+  'studentLoanBalance',
+  'studentLoanYears',
+  'deathInServiceMultiple',
+]);
+
+const PARTNER_DEFAULTS = {
+  currentAge: 28,
+  retirementAge: 65,
+  grossIncome: 35_000,
+  niContributionYears: 3,
+  statePensionAge: 67,
+  statePensionDeferralYears: 0,
+  topUpStatePension: false,
+  pensionAccessAge: 57,
+  sex: 'neutral',
+  employmentChanges: [],
+  employeePensionPct: 5,
+  employeePensionAuto: false,
+  employerPensionPct: 3,
+  employerMatch: false,
+  employerMatchThreshold: 5,
+  pensionBalance: 10_000,
+  dbPensions: [],
+  isaBalance: 5_000,
+  giaBalance: 0,
+  giaCostBasis: 0,
+  studentLoanPlan: '',
+  studentLoanBalance: 0,
+  studentLoanYears: 0,
+  deathInServiceMultiple: 0,
+};
+
+// The partner's inputs laid over the shared ones, so editors and helpers
+// written for one person work unchanged for the partner.
+const partnerView = (p) => ({ ...p, ...p.partner });
+
+// Settings tabs shown: a Household tab in couple mode, and only the per-person
+// tabs while editing the partner.
+const PARTNER_TABS = ['Personal', 'Pension', 'Savings', 'Events', 'Debts', 'Simulation'];
+function tabsFor(couple, scope) {
+  if (!couple) return TABS;
+  if (scope === 'partner') return PARTNER_TABS;
+  return [TABS[0], 'Household', 'Protection', ...TABS.slice(1)];
+}
 
 const PLAN_OPTIONS = [
   { value: '', label: 'None' },
@@ -95,9 +175,9 @@ const DEFAULTS = {
   niContributionYears: 3,
   statePensionAge: 67,
   statePensionDeferralYears: 0,
-  // How the state pension rises each April: 'adjusted' = the government's
-  // announced reform from April 2030 (triple lock until then); 'triple-lock' =
-  // the current rule. They differ only when earnings and inflation vary.
+  // How the state pension rises each April (household-wide): 'adjusted' = the
+  // reform from April 2030 (triple lock until then); 'triple-lock' = the
+  // current rule. They differ only when earnings and inflation vary.
   statePensionUprating: 'adjusted',
   topUpStatePension: false, // auto-buy voluntary Class 3 NI years to reach the full 35
   pensionAccessAge: 57, // NMPA — earliest age the DC pension can be accessed
@@ -111,6 +191,8 @@ const DEFAULTS = {
   employerMatch: false, // when true, employer pays its rate only if employee ≥ threshold
   employerMatchThreshold: 5, // employee % required to earn the full employer contribution
   pensionBalance: 10_000,
+  // Defined benefit schemes (see DB_NEW_SCHEME for the fields of each).
+  dbPensions: [],
   equityReturnPct: 7,
   bondReturnPct: 3,
   preRetirementEquityPct: 80,
@@ -171,7 +253,61 @@ const DEFAULTS = {
   spendingGuardrails: false,
   spendingCeilingPct: 100,
   guardrailSensitivity: 'standard', // 'gentle' | 'standard' | 'responsive'
+  // Couple mode: plan for two. The partner's own inputs live in `partner`.
+  householdMode: 'single', // 'single' | 'couple'
+  partner: PARTNER_DEFAULTS,
+  partnership: 'married', // 'married' (also civil partners) | 'cohabiting'
+  willsToEachOther: true, // cohabiting only
+  // Household spending after a death, % of the couple's (Retirement Living
+  // Standards 2026: a one-person budget is 72% of a two-person one).
+  survivorSpendingPct: 72,
+  annuityOwner: 'self', // whose pension buys the annuity
+  // "What if one of us dies?" on the deterministic chart.
+  deathScenario: { enabled: false, person: 'partner', age: 80 },
+  // Protection (couple mode): death-in-service (× salary, per person) and
+  // life cover policies (see LIFE_POLICY_NEW).
+  deathInServiceMultiple: 0,
+  lifePolicies: [],
 };
+
+// A new life cover policy in the Protection tab.
+const LIFE_POLICY_NEW = {
+  label: '',
+  enabled: true,
+  type: 'level', // 'level' | 'decreasing' | 'wholeOfLife'
+  lifeOf: 'self', // 'self' | 'partner' | 'joint' (pays on the first death)
+  sumAssured: 250_000,
+  termYears: 25,
+  monthlyPremium: 25,
+  inTrust: true,
+  payTo: 'savings', // 'savings' | 'mortgage'
+};
+const LIFE_POLICY_TYPES = [
+  { value: 'level', label: 'Level term' },
+  { value: 'decreasing', label: 'Decreasing term' },
+  { value: 'wholeOfLife', label: 'Whole of life' },
+];
+const LIFE_POLICY_LIVES = [
+  { value: 'self', label: 'Your life' },
+  { value: 'partner', label: "Your partner's life" },
+  { value: 'joint', label: 'Joint (pays on the first death)' },
+];
+
+// Life cover policies for the engine (enabled ones, clamped).
+function buildLifePolicies(p) {
+  return (p.lifePolicies ?? [])
+    .filter((pol) => pol.enabled !== false)
+    .map((pol) => ({
+      label: pol.label ?? '',
+      type: pol.type,
+      lifeOf: pol.lifeOf,
+      sumAssured: Math.max(0, pol.sumAssured),
+      termYears: clampInt(pol.termYears, 1, 60),
+      monthlyPremium: Math.max(0, pol.monthlyPremium),
+      inTrust: pol.inTrust !== false,
+      payTo: pol.payTo === 'mortgage' ? 'mortgage' : 'savings',
+    }));
+}
 
 // Guardrail sensitivity presets → (band, step) for the engine. Band is how far
 // spending may drift from the sustainable rate before acting; step is the size
@@ -190,6 +326,9 @@ function migrateInputs(saved) {
     next.essentialExpenses = next.spendingFloor;
   }
   delete next.spendingFloor;
+  // Couple mode: fill in any partner fields added since the inputs were saved.
+  next.partner = { ...PARTNER_DEFAULTS, ...(next.partner ?? {}) };
+  next.deathScenario = { ...DEFAULTS.deathScenario, ...(next.deathScenario ?? {}) };
   return next;
 }
 
@@ -208,6 +347,71 @@ function buildAnnuity(p) {
         : p.annuityIncome,
     inflationLinked: p.annuityInflationLinked,
     rate: p.annuityRatePct == null ? null : p.annuityRatePct / 100,
+    // Couple mode: whose pension buys it.
+    owner: p.householdMode === 'couple' ? p.annuityOwner : 'self',
+  };
+}
+
+// Engine inputs for one person, from their settings (p, or partnerView(p)).
+function personProfile(v) {
+  return {
+    currentAge: v.currentAge,
+    retirementAge: v.retirementAge,
+    grossIncome: v.grossIncome,
+    employeePensionRate: effectiveEmployeePensionRate(v),
+    employerPensionRate: v.employerPensionPct / 100,
+    employerMatch: v.employerMatch,
+    employerMatchThreshold: v.employerMatchThreshold / 100,
+    niContributionYears: v.niContributionYears,
+    statePensionAge: v.statePensionAge,
+    statePensionDeferralYears: v.statePensionDeferralYears,
+    topUpStatePension: v.topUpStatePension,
+    pensionAccessAge: v.pensionAccessAge,
+    dbPensions: buildDbPensions(v),
+    studentLoanPlan: v.studentLoanPlan || null,
+    employmentChanges: v.employmentChanges,
+    deathInServiceMultiple: v.deathInServiceMultiple ?? 0,
+  };
+}
+
+// One person's own pots: pension, ISA, GIA and any student loan.
+function personPots(v) {
+  const pots = {
+    pensionBalance: v.pensionBalance,
+    isaBalance: v.isaBalance,
+    giaBalance: v.giaBalance,
+    giaCostBasis: Math.min(v.giaCostBasis, v.giaBalance),
+  };
+  if (v.studentLoanPlan && v.studentLoanBalance > 0) {
+    pots.studentLoan = {
+      balance: v.studentLoanBalance,
+      repaymentStartYear: CURRENT_YEAR - v.studentLoanYears,
+    };
+  }
+  return pots;
+}
+
+// The projection's profile: you, plus — in couple mode — your partner and the
+// household rules. `death` adds a "what if one of us dies?" scenario.
+function buildProfile(p, death = null) {
+  const profile = {
+    ...personProfile(p),
+    currentYear: CURRENT_YEAR,
+    annualLivingExpenses: p.annualLivingExpenses,
+    windfalls: p.windfalls,
+    oneOffExpenses: p.oneOffExpenses,
+    statePensionUprating: p.statePensionUprating,
+  };
+  if (p.householdMode !== 'couple') return profile;
+  const pv = partnerView(p);
+  return {
+    ...profile,
+    partner: { ...personProfile(pv), pots: personPots(pv) },
+    partnership: p.partnership,
+    willsToEachOther: p.willsToEachOther,
+    survivorSpendingShare: p.survivorSpendingPct / 100,
+    death,
+    lifePolicies: buildLifePolicies(p),
   };
 }
 
@@ -225,12 +429,112 @@ function manualEmployeePensionPct(p) {
 // from the current salary and employer contribution.
 function effectiveEmployeePensionRate(p) {
   if (p.employeePensionAuto) {
+    const db = dbFirstYear(p);
     return optimalEmployeePensionContribution(p.grossIncome, p.employerPensionPct / 100, {
       employerMatch: p.employerMatch,
       employerMatchThreshold: p.employerMatchThreshold / 100,
+      netPayContributions: db.memberContribution,
+      otherPensionInput: db.pensionInput,
     }).employeeRate;
   }
   return manualEmployeePensionPct(p) / 100;
+}
+
+// ── Defined benefit schemes ──────────────────────────────────────────────────
+// A new scheme card's starting values (UI form; buildDbPensions converts).
+const DB_NEW_SCHEME = {
+  label: '',
+  enabled: true,
+  status: 'active',
+  pension: 5_000,
+  accrualDenominator: 54,
+  memberContributionPct: 8,
+  inServiceRevaluation: 'cpi+1.5',
+  normalPensionAge: 67,
+  paymentAge: 67,
+  earlyReductionPct: 5,
+  lateIncreasePct: 5,
+  deferredIncreases: 'cpi',
+  paymentIncreases: 'cpi',
+  lumpSum: 'none',
+  commutationFactor: 12,
+  automaticLumpSum: 0,
+  // Couple mode: survivor's pension on the member's death.
+  survivorPensionPct: 50,
+  survivorUnmarried: 'yes',
+};
+
+const DB_STATUS_OPTIONS = [
+  { value: 'active', label: 'Still building it up' },
+  { value: 'deferred', label: 'Left the scheme' },
+  { value: 'inPayment', label: 'Already being paid' },
+];
+
+const DB_REVALUATION_OPTIONS = [
+  { value: 'cpi+1.5', label: 'CPI + 1.5% (e.g. NHS 2015)' },
+  { value: 'cpi+1.6', label: 'CPI + 1.6% (e.g. Teachers 2015)' },
+  { value: 'cpi', label: 'CPI (e.g. LGPS)' },
+  { value: 'earnings', label: 'With your pay (final salary)' },
+];
+const DB_REVALUATION = {
+  'cpi+1.5': { basis: 'cpi', margin: 0.015 },
+  'cpi+1.6': { basis: 'cpi', margin: 0.016 },
+  cpi: { basis: 'cpi', margin: 0 },
+  earnings: { basis: 'earnings' },
+};
+
+const DB_INCREASE_OPTIONS = [
+  { value: 'cpi', label: 'In line with CPI' },
+  { value: 'cpi-5', label: 'CPI, capped at 5%' },
+  { value: 'cpi-2.5', label: 'CPI, capped at 2.5%' },
+  { value: 'none', label: 'None (level)' },
+];
+const DB_INCREASE_CAP = { cpi: null, 'cpi-5': 0.05, 'cpi-2.5': 0.025, none: 0 };
+
+const clampInt = (v, lo, hi) => Math.min(hi, Math.max(lo, Math.round(v)));
+
+// Enabled scheme cards → the engine's dbPensions (see ukDefinedBenefit.js).
+function buildDbPensions(p) {
+  return (p.dbPensions ?? [])
+    .filter((s) => s.enabled !== false)
+    .map((s) => ({
+      label: s.label ?? '',
+      status: s.status,
+      pension: Math.max(0, s.pension),
+      accrualRate: 1 / Math.max(10, s.accrualDenominator),
+      memberContributionRate: Math.min(0.5, Math.max(0, s.memberContributionPct) / 100),
+      inServiceRevaluation: DB_REVALUATION[s.inServiceRevaluation] ?? DB_REVALUATION.cpi,
+      normalPensionAge: clampInt(s.normalPensionAge, 50, 75),
+      ...(s.status === 'inPayment'
+        ? {}
+        : { paymentAge: clampInt(s.paymentAge, Math.max(50, p.currentAge), 80) }),
+      earlyReductionPerYear: Math.min(0.2, Math.max(0, s.earlyReductionPct) / 100),
+      lateIncreasePerYear: Math.min(0.2, Math.max(0, s.lateIncreasePct) / 100),
+      deferredIncreaseCap: DB_INCREASE_CAP[s.deferredIncreases] ?? null,
+      paymentIncreaseCap: DB_INCREASE_CAP[s.paymentIncreases] ?? null,
+      lumpSum: s.lumpSum === 'max' ? 'max' : 'none',
+      commutationFactor: Math.min(40, Math.max(1, s.commutationFactor)),
+      automaticLumpSum: Math.max(0, s.automaticLumpSum ?? 0),
+      survivorPensionShare: Math.min(1, Math.max(0, s.survivorPensionPct ?? 50) / 100),
+      survivorPensionForUnmarriedPartner: (s.survivorUnmarried ?? 'yes') === 'yes',
+    }));
+}
+
+// First-year DB figures at today's salary, for the DC contribution helpers:
+// member contributions (net pay, so they lower taxable pay) and the pension
+// input amount (16 × the year's build-up), which uses annual allowance.
+function dbFirstYear(p) {
+  let memberContribution = 0;
+  let pensionInput = 0;
+  for (const s of buildDbPensions(p)) {
+    if (s.status !== 'active' || s.paymentAge <= p.currentAge) continue;
+    memberContribution += s.memberContributionRate * p.grossIncome;
+    pensionInput += DB_CONSTANTS.pensionInputFactor * s.accrualRate * p.grossIncome;
+  }
+  return {
+    memberContribution: Math.round(memberContribution * 100) / 100,
+    pensionInput: Math.round(pensionInput * 100) / 100,
+  };
 }
 
 // First-year annual-allowance check for the MANUAL employee contribution: does
@@ -243,10 +547,13 @@ function manualAllowanceStatus(p) {
     // Manual mode floors the employee at the match threshold, so a matched
     // employer is always paid in full; a fixed employer is always paid.
     const employer = Math.round(p.grossIncome * (p.employerPensionPct / 100) * 100) / 100;
-    const total = Math.round((employee + employer) * 100) / 100;
-    const thresholdIncome = Math.max(0, p.grossIncome - employee);
-    const allowance = taperedAnnualAllowance(thresholdIncome, p.grossIncome + employer);
-    return { breached: total > allowance + 0.005, total, allowance };
+    // Any DB scheme's build-up uses the same allowance, and its member
+    // contributions (net pay) lower threshold income.
+    const db = dbFirstYear(p);
+    const total = Math.round((employee + employer + db.pensionInput) * 100) / 100;
+    const thresholdIncome = Math.max(0, p.grossIncome - employee - db.memberContribution);
+    const allowance = taperedAnnualAllowance(thresholdIncome, thresholdIncome + total);
+    return { breached: total > allowance + 0.005, total, allowance, db: db.pensionInput > 0 };
   } catch {
     return { breached: false, total: 0, allowance: 0 };
   }
@@ -481,10 +788,379 @@ function CompactSummary({ items, onOpen }) {
   );
 }
 
+// ── Version and changelog ─────────────────────────────────────────────────────
+const APP_VERSION = packageJson.version;
+const CHANGELOG = parseChangelog(changelogMarkdown);
+const ROADMAP = parseRoadmap(roadmapMarkdown);
+const REPO_URL = 'https://github.com/sambloom92/savings-planner';
+
+// A line of changelog text: bold, code, links and pull request references.
+function InlineText({ text }) {
+  return inlineTokens(text).map((t, i) => {
+    if (t.type === 'bold') return <strong key={i}>{t.text}</strong>;
+    if (t.type === 'code')
+      return (
+        <code key={i} style={{ fontFamily: 'var(--font-mono)', fontSize: '0.92em' }}>
+          {t.text}
+        </code>
+      );
+    if (t.type === 'link' || t.type === 'pr')
+      return (
+        <a
+          key={i}
+          href={t.type === 'pr' ? `${REPO_URL}/pull/${t.number}` : t.href}
+          target="_blank"
+          rel="noopener noreferrer"
+          style={{ color: 'var(--accent-gold)' }}
+        >
+          {t.text}
+        </a>
+      );
+    return <Fragment key={i}>{t.text}</Fragment>;
+  });
+}
+
+// Every release, newest first, from CHANGELOG.md.
+function ReleaseNotes() {
+  return (
+    <div style={{ fontFamily: 'var(--font-body)', fontSize: 13, lineHeight: 1.55 }}>
+      <p style={{ color: 'var(--text-muted)', fontSize: 12, margin: '0 0 16px' }}>
+        Every change, newest first. A major version means saved scenarios from before it won't load;
+        minor versions add features or change results; patches fix things.
+      </p>
+      {CHANGELOG.map((release) => (
+        <section key={release.version} style={{ marginBottom: 18 }}>
+          <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, marginBottom: 4 }}>
+            <a
+              href={`${REPO_URL}/releases/tag/v${release.version}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              style={{
+                fontFamily: 'var(--font-mono)',
+                fontWeight: 700,
+                color: 'var(--accent-gold)',
+                textDecoration: 'none',
+              }}
+            >
+              v{release.version}
+            </a>
+            {release.date && (
+              <span style={{ color: 'var(--text-muted)', fontSize: 11 }}>{release.date}</span>
+            )}
+            {release.version === APP_VERSION && (
+              <span style={{ color: '#34d399', fontSize: 11 }}>this version</span>
+            )}
+          </div>
+          {release.sections.map((section) => (
+            <div key={section.title} style={{ marginBottom: 6 }}>
+              <div
+                style={{
+                  color: 'var(--text-muted)',
+                  fontSize: 10,
+                  letterSpacing: '0.08em',
+                  textTransform: 'uppercase',
+                  margin: '6px 0 2px',
+                }}
+              >
+                {section.title}
+              </div>
+              <ul style={{ margin: 0, paddingLeft: 18, color: 'var(--text-secondary)' }}>
+                {section.items.map((item, i) => (
+                  <li key={i} style={{ marginBottom: 3 }}>
+                    <InlineText text={item.text} />
+                    {item.children.length > 0 && (
+                      <ul style={{ margin: '2px 0 0', paddingLeft: 16 }}>
+                        {item.children.map((child, j) => (
+                          <li key={j}>
+                            <InlineText text={child} />
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ))}
+        </section>
+      ))}
+    </div>
+  );
+}
+
+// What might come next, from ROADMAP.md.
+function RoadmapNotes() {
+  return (
+    <div style={{ fontFamily: 'var(--font-body)', fontSize: 13, lineHeight: 1.55 }}>
+      <p style={{ color: 'var(--text-muted)', fontSize: 12, margin: '0 0 16px' }}>
+        Ideas for what comes next. Have one? It&apos;s a single file to edit:{' '}
+        <a
+          href={`${REPO_URL}/blob/main/ROADMAP.md`}
+          target="_blank"
+          rel="noopener noreferrer"
+          style={{ color: 'var(--accent-gold)' }}
+        >
+          ROADMAP.md
+        </a>
+        .
+      </p>
+      {ROADMAP.map((section) => (
+        <section key={section.title} style={{ marginBottom: 16 }}>
+          <div
+            style={{
+              color: 'var(--accent-gold)',
+              fontSize: 11,
+              letterSpacing: '0.08em',
+              textTransform: 'uppercase',
+              fontWeight: 600,
+              marginBottom: 4,
+            }}
+          >
+            {section.title}
+          </div>
+          <ul style={{ margin: 0, paddingLeft: 18, color: 'var(--text-secondary)' }}>
+            {section.items.map((item, i) => (
+              <li key={i} style={{ marginBottom: 5 }}>
+                <InlineText text={item.text} />
+                {item.children.length > 0 && (
+                  <ul style={{ margin: '2px 0 0', paddingLeft: 16 }}>
+                    {item.children.map((child, j) => (
+                      <li key={j}>
+                        <InlineText text={child} />
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </li>
+            ))}
+          </ul>
+        </section>
+      ))}
+    </div>
+  );
+}
+
+// The footer panel: What's new (the changelog) and the Roadmap, as two tabs.
+function InfoPanelContent({ tab, onTab }) {
+  return (
+    <>
+      <div role="tablist" aria-label="About" style={{ display: 'flex', gap: 6, marginBottom: 14 }}>
+        {[
+          { value: 'changelog', label: "What's new" },
+          { value: 'roadmap', label: 'Roadmap' },
+        ].map(({ value, label }) => {
+          const active = tab === value;
+          return (
+            <button
+              key={value}
+              role="tab"
+              aria-selected={active}
+              onClick={() => onTab(value)}
+              style={{
+                padding: '4px 12px',
+                background: active ? 'var(--accent-gold)' : 'var(--bg-input)',
+                color: active ? 'var(--accent-gold-text)' : 'var(--text-secondary)',
+                border: '1px solid var(--border-bright)',
+                borderRadius: 5,
+                cursor: 'pointer',
+                fontFamily: 'var(--font-body)',
+                fontSize: 12,
+                fontWeight: 600,
+              }}
+            >
+              {label}
+            </button>
+          );
+        })}
+      </div>
+      {tab === 'roadmap' ? <RoadmapNotes /> : <ReleaseNotes />}
+    </>
+  );
+}
+
+// Footer link to the roadmap.
+function RoadmapButton({ onClick }) {
+  return (
+    <button
+      onClick={onClick}
+      title="Roadmap: ideas for what comes next"
+      style={{
+        background: 'transparent',
+        border: 'none',
+        padding: 0,
+        cursor: 'pointer',
+        color: 'var(--text-muted)',
+        fontFamily: 'var(--font-mono)',
+        fontSize: 11,
+        letterSpacing: '0.06em',
+      }}
+    >
+      Roadmap
+    </button>
+  );
+}
+
+// A centred dialog over the desktop layout (phones use Sheet).
+function Dialog({ title, onClose, children }) {
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+  return createPortal(
+    <div
+      onClick={onClose}
+      style={{
+        position: 'fixed',
+        inset: 0,
+        zIndex: 1000,
+        background: 'rgba(0,0,0,0.55)',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        padding: 24,
+      }}
+    >
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label={title}
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          width: 'min(680px, 100%)',
+          maxHeight: '82vh',
+          display: 'flex',
+          flexDirection: 'column',
+          background: 'var(--bg-panel)',
+          border: '1px solid var(--border-bright)',
+          borderRadius: 12,
+          boxShadow: '0 20px 60px rgba(0,0,0,0.45)',
+        }}
+      >
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            padding: '14px 20px',
+            borderBottom: '1px solid var(--border)',
+          }}
+        >
+          <span
+            style={{
+              fontFamily: 'var(--font-display)',
+              fontSize: 18,
+              color: 'var(--text-primary)',
+            }}
+          >
+            {title}
+          </span>
+          <button
+            onClick={onClose}
+            aria-label="Close"
+            style={{
+              background: 'transparent',
+              border: 'none',
+              color: 'var(--text-muted)',
+              fontSize: 20,
+              cursor: 'pointer',
+              lineHeight: 1,
+            }}
+          >
+            ×
+          </button>
+        </div>
+        <div style={{ overflowY: 'auto', padding: '16px 20px' }}>{children}</div>
+      </div>
+    </div>,
+    document.body
+  );
+}
+
+// Footer button: the version, opening the changelog. A dot marks a version
+// newer than the one last seen on this device.
+function VersionButton({ onClick, unseen }) {
+  return (
+    <button
+      onClick={onClick}
+      title="What's new: the changelog"
+      style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 6,
+        background: 'transparent',
+        border: 'none',
+        padding: 0,
+        cursor: 'pointer',
+        color: 'var(--text-muted)',
+        fontFamily: 'var(--font-mono)',
+        fontSize: 11,
+        letterSpacing: '0.06em',
+      }}
+    >
+      v{APP_VERSION} · What&apos;s new
+      {unseen && (
+        <span
+          aria-label="new"
+          style={{ width: 6, height: 6, borderRadius: 3, background: 'var(--accent-gold)' }}
+        />
+      )}
+    </button>
+  );
+}
+
+// Couple mode: whose settings the sidebar is editing.
+function ScopeSwitch({ scope, onChange }) {
+  return (
+    <div
+      role="tablist"
+      aria-label="Whose settings"
+      style={{
+        display: 'flex',
+        gap: 4,
+        padding: '6px 10px',
+        borderBottom: '1px solid var(--border)',
+        flexShrink: 0,
+      }}
+    >
+      {[
+        { value: 'self', label: 'You' },
+        { value: 'partner', label: 'Partner' },
+      ].map(({ value, label }) => {
+        const active = scope === value;
+        return (
+          <button
+            key={value}
+            role="tab"
+            aria-selected={active}
+            onClick={() => onChange(value)}
+            style={{
+              flex: 1,
+              padding: '5px 0',
+              background: active ? 'var(--accent-gold)' : 'var(--bg-input)',
+              color: active ? 'var(--accent-gold-text)' : 'var(--text-secondary)',
+              border: '1px solid var(--border-bright)',
+              borderRadius: 5,
+              cursor: 'pointer',
+              fontFamily: 'var(--font-body)',
+              fontSize: 12,
+              fontWeight: 600,
+            }}
+          >
+            {label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 // Section picker for the compact inputs pane: previous / dropdown / next.
-function SectionPicker({ value, onChange }) {
-  const i = TABS.indexOf(value);
-  const step = (d) => onChange(TABS[(i + d + TABS.length) % TABS.length]);
+function SectionPicker({ value, onChange, tabs = TABS }) {
+  const i = tabs.indexOf(value);
+  const step = (d) => onChange(tabs[(i + d + tabs.length) % tabs.length]);
   return (
     <div
       style={{
@@ -517,7 +1193,7 @@ function SectionPicker({ value, onChange }) {
           fontWeight: 600,
         }}
       >
-        {TABS.map((tab) => (
+        {tabs.map((tab) => (
           <option key={tab} value={tab}>
             {tab}
           </option>
@@ -1567,31 +2243,38 @@ function WorkingHoursSection({ p, events, onChange, accent }) {
   );
 }
 
-function EventsEditor({ p, set }) {
+function EventsEditor({ p, set, scope = null }) {
+  // Windfalls and one-off expenses belong to the household; working-hours
+  // changes to whoever's settings are being edited.
+  const household = scope !== 'partner';
   return (
     <>
-      <EventSection
-        p={p}
-        events={p.windfalls ?? []}
-        onChange={set('windfalls')}
-        title="Windfalls"
-        accent="var(--accent-gold)"
-        intro="One-off amounts added to your GIA at a given age — an inheritance, asset sale, or gift. Enter amounts in today's money, net of any fees and taxes; they are inflated to the event year."
-        help="The full amount counts as cost basis (no phantom gains), and the yearly bed-and-ISA sweep migrates it into ISA headroom over time. Windfalls are marked ▲ on the chart. In Monte Carlo mode each trial inflates the amount along its own inflation path. Use the ON/OFF toggle to include or exclude an event without deleting it — handy for before/after comparisons. To model downsizing, enter the expected net proceeds here — see the README for why property itself is not tracked."
-        placeholder="Label (e.g. Inheritance)"
-        addLabel="+ Add Windfall"
-      />
-      <EventSection
-        p={p}
-        events={p.oneOffExpenses ?? []}
-        onChange={set('oneOffExpenses')}
-        title="One-off Expenses"
-        accent="#f43f5e"
-        intro="One-off costs paid from your pots at a given age — a house deposit, wedding, or helping children. Enter amounts in today's money; they are inflated to the event year."
-        help="Funded in tax-efficiency order: first from that year's unallocated savings (no tax event), then the GIA (CGT-aware, using the annual exempt amount), then the ISA. The pension is never touched — it is inaccessible before retirement. In retirement the expense joins that year's drawdown need. If your pots can't cover it, the gap is reported as a shortfall rather than borrowed. Expenses are marked ▼ on the chart. Use the ON/OFF toggle to include or exclude an event without deleting it. Pair a deposit here with a mortgage start age (Mortgage tab) to model a future property purchase."
-        placeholder="Label (e.g. House deposit)"
-        addLabel="+ Add Expense"
-      />
+      {household && (
+        <>
+          <EventSection
+            p={p}
+            events={p.windfalls ?? []}
+            onChange={set('windfalls')}
+            title="Windfalls"
+            accent="var(--accent-gold)"
+            intro="One-off amounts added to your GIA at a given age — an inheritance, asset sale, or gift. Enter amounts in today's money, net of any fees and taxes; they are inflated to the event year."
+            help="The full amount counts as cost basis (no phantom gains), and the yearly bed-and-ISA sweep migrates it into ISA headroom over time. Windfalls are marked ▲ on the chart. In Monte Carlo mode each trial inflates the amount along its own inflation path. Use the ON/OFF toggle to include or exclude an event without deleting it — handy for before/after comparisons. To model downsizing, enter the expected net proceeds here — see the README for why property itself is not tracked."
+            placeholder="Label (e.g. Inheritance)"
+            addLabel="+ Add Windfall"
+          />
+          <EventSection
+            p={p}
+            events={p.oneOffExpenses ?? []}
+            onChange={set('oneOffExpenses')}
+            title="One-off Expenses"
+            accent="#f43f5e"
+            intro="One-off costs paid from your pots at a given age — a house deposit, wedding, or helping children. Enter amounts in today's money; they are inflated to the event year."
+            help="Funded in tax-efficiency order: first from that year's unallocated savings (no tax event), then the GIA (CGT-aware, using the annual exempt amount), then the ISA. The pension is never touched — it is inaccessible before retirement. In retirement the expense joins that year's drawdown need. If your pots can't cover it, the gap is reported as a shortfall rather than borrowed. Expenses are marked ▼ on the chart. Use the ON/OFF toggle to include or exclude an event without deleting it. Pair a deposit here with a mortgage start age (Mortgage tab) to model a future property purchase."
+            placeholder="Label (e.g. House deposit)"
+            addLabel="+ Add Expense"
+          />
+        </>
+      )}
       <WorkingHoursSection
         p={p}
         events={p.employmentChanges ?? []}
@@ -1602,16 +2285,471 @@ function EventsEditor({ p, set }) {
   );
 }
 
+// ── Life cover policies (Protection tab, couple mode) ───────────────────────
+function LifePolicyCard({ policy: pol, onChange, onRemove }) {
+  const enabled = pol.enabled !== false;
+  return (
+    <EventCard
+      accent="#f472b6"
+      enabled={enabled}
+      label={pol.label}
+      placeholder="Policy name"
+      onLabel={(v) => onChange({ label: v })}
+      onToggle={() => onChange({ enabled: !enabled })}
+      onRemove={onRemove}
+    >
+      <Select
+        label="Type"
+        value={pol.type}
+        options={LIFE_POLICY_TYPES}
+        onChange={(v) => onChange({ type: v })}
+        help="Level term pays the same sum throughout the term. Decreasing term falls over the term, usually to match a repayment mortgage — modelled here as a straight line to nothing, slightly less than a real policy pays early on. Whole of life pays whenever the death happens, so it's dearer; it's often used to cover an inheritance tax bill."
+      />
+      <Select
+        label="Covers"
+        value={pol.lifeOf}
+        options={LIFE_POLICY_LIVES}
+        onChange={(v) => onChange({ lifeOf: v })}
+        help="Whose death it pays out on. A joint policy pays once, on the first death, and then ends; two single policies cost a little more but leave the survivor still insured."
+      />
+      <Slider
+        label="Sum assured"
+        value={pol.sumAssured}
+        min={0}
+        max={2_000_000}
+        step={5_000}
+        format={fmtGBP}
+        onChange={(v) => onChange({ sumAssured: Math.max(0, v) })}
+        color="#f472b6"
+        allowInput
+        help="The payout, as on your policy schedule. It's fixed in cash, so inflation erodes its value over the term."
+      />
+      {pol.type !== 'wholeOfLife' && (
+        <Slider
+          label="Term remaining"
+          value={pol.termYears}
+          min={1}
+          max={40}
+          step={1}
+          format={fmtYrs}
+          onChange={(v) => onChange({ termYears: Math.round(v) })}
+          color="#f472b6"
+          allowInput
+          help="Years left on the policy, from now. It pays nothing after the term ends."
+        />
+      )}
+      <Slider
+        label="Premium"
+        value={pol.monthlyPremium}
+        min={0}
+        max={500}
+        step={1}
+        format={(v) => `${fmtGBP(v)}/mo`}
+        onChange={(v) => onChange({ monthlyPremium: Math.max(0, v) })}
+        color="#f472b6"
+        allowInput
+        help="What the policy costs each month, from your policy or a quote — the app doesn't price cover, as that depends on your health, smoking and the insurer. Paid by the household while the policy runs."
+      />
+      <Toggle
+        label="Written in trust"
+        value={pol.inTrust ? 'yes' : 'no'}
+        optA={{ value: 'yes', label: 'Yes' }}
+        optB={{ value: 'no', label: 'No' }}
+        onChange={(v) => onChange({ inTrust: v === 'yes' })}
+        help="In trust, the payout goes straight to your chosen beneficiaries, quickly and outside your estate. Not in trust, it's paid into your estate: for a couple living together it counts towards inheritance tax, and without a will it goes to relatives. Insurers set up a trust for free."
+      />
+      <Toggle
+        label="Pays towards"
+        value={pol.payTo}
+        optA={{ value: 'savings', label: 'Savings' }}
+        optB={{ value: 'mortgage', label: 'Mortgage' }}
+        onChange={(v) => onChange({ payTo: v })}
+        help="Mortgage: the payout clears what's left of the mortgage (if it has started) and the rest goes into the survivor's savings. Savings: all of it is invested for the survivor."
+      />
+    </EventCard>
+  );
+}
+
+function LifePoliciesEditor({ p, set }) {
+  const policies = p.lifePolicies ?? [];
+  const update = (i, patch) =>
+    set('lifePolicies')(policies.map((pol, j) => (j === i ? { ...pol, ...patch } : pol)));
+  const premiums = policies
+    .filter((pol) => pol.enabled !== false)
+    .reduce((sum, pol) => sum + pol.monthlyPremium, 0);
+  return (
+    <>
+      <InfoBox>
+        What would the survivor have if one of you died? Add any life cover you hold;
+        death-in-service is set per person on the Pension tab. Then switch on What if one of us
+        dies? under the chart to see the payouts and the cover gap — how much more cover the
+        survivor would need.
+      </InfoBox>
+      {policies.map((pol, i) => (
+        <LifePolicyCard
+          key={i}
+          policy={pol}
+          onChange={(patch) => update(i, patch)}
+          onRemove={() => set('lifePolicies')(policies.filter((_, j) => j !== i))}
+        />
+      ))}
+      <AddEventButton
+        onClick={() => set('lifePolicies')([...policies, { ...LIFE_POLICY_NEW }])}
+        label="+ Add a life cover policy"
+      />
+      {premiums > 0 && (
+        <div
+          style={{
+            color: 'var(--text-muted)',
+            fontSize: 11,
+            fontFamily: 'var(--font-body)',
+            marginTop: 10,
+          }}
+        >
+          Premiums: {fmtGBP(premiums)} a month ({fmtGBP(premiums * 12)} a year), paid while each
+          policy runs.
+        </div>
+      )}
+    </>
+  );
+}
+
+// ── Defined benefit scheme editor (Pension tab) ─────────────────────────────
+// Last number in a typed value, so "1/54" reads as 54.
+const parseLastNumber = (str) => {
+  const m = String(str).match(/(\d+(?:\.\d+)?)\s*$/);
+  return m ? parseFloat(m[1]) : NaN;
+};
+
+function DbSchemeCard({ p, scheme: s, result, onChange, onRemove }) {
+  const [showDetails, setShowDetails] = useState(false);
+  const enabled = s.enabled !== false;
+  const inPayment = s.status === 'inPayment';
+  const active = s.status === 'active';
+  const factor = dbPaymentFactor(
+    s.normalPensionAge,
+    s.paymentAge,
+    s.earlyReductionPct / 100,
+    s.lateIncreasePct / 100
+  );
+  const yearsOff = Math.abs(s.paymentAge - s.normalPensionAge);
+  return (
+    <EventCard
+      accent="#2dd4bf"
+      enabled={enabled}
+      label={s.label}
+      placeholder="Scheme name"
+      onLabel={(v) => onChange({ label: v })}
+      onToggle={() => onChange({ enabled: !enabled })}
+      onRemove={onRemove}
+    >
+      <Select
+        label="Status"
+        value={s.status}
+        options={DB_STATUS_OPTIONS}
+        onChange={(v) => onChange({ status: v })}
+        help="Still building it up: you're an active member, earning more pension each year you work. Left the scheme: a deferred pension that grows until you take it. Already being paid: a pension in payment now."
+      />
+      <Slider
+        label={inPayment ? 'Pension being paid' : 'Pension built up so far'}
+        value={s.pension}
+        min={0}
+        max={60_000}
+        step={100}
+        format={(v) => `${fmtGBP(v)}/yr`}
+        onChange={(v) => onChange({ pension: Math.max(0, v) })}
+        color="#2dd4bf"
+        allowInput
+        help={
+          inPayment
+            ? 'The yearly pension you are paid now, before tax.'
+            : "The yearly pension you have built up so far, from your latest benefit statement (in today's money, before any lump sum or early/late adjustment). Not the projected figure at retirement — the app projects that itself."
+        }
+      />
+      {active && (
+        <>
+          <Slider
+            label="Build-up rate"
+            value={s.accrualDenominator}
+            min={30}
+            max={100}
+            step={1}
+            format={(v) => `1/${v}`}
+            parse={parseLastNumber}
+            onChange={(v) => onChange({ accrualDenominator: Math.max(10, v) })}
+            color="#2dd4bf"
+            allowInput
+            help="The share of each year's pensionable pay you earn as pension: 1/54 means £1,000 a year of pension for every £54,000 of pay. Career average examples: NHS 2015 1/54, Teachers 2015 1/57, LGPS 1/49. Pensionable pay is taken as your salary (after any working-hours change)."
+          />
+          <Slider
+            label="Your contribution"
+            value={s.memberContributionPct}
+            min={0}
+            max={15}
+            step={0.1}
+            format={fmtPct}
+            onChange={(v) => onChange({ memberContributionPct: Math.max(0, v) })}
+            color="#2dd4bf"
+            allowInput
+            help="Your own contribution, as a % of pay. Paid through payroll by a net pay arrangement: it gets income tax relief but, unlike salary sacrifice, no National Insurance relief."
+          />
+          <Select
+            label="Growth while building up"
+            value={s.inServiceRevaluation}
+            options={DB_REVALUATION_OPTIONS}
+            onChange={(v) => onChange({ inServiceRevaluation: v })}
+            help="How pension you have already built up grows each year while you're still in the scheme. Career average schemes add a set rate (CPI or CPI plus a margin); in a final salary scheme it effectively follows your pay."
+          />
+        </>
+      )}
+      {!inPayment && (
+        <>
+          <Slider
+            label="Normal pension age"
+            value={s.normalPensionAge}
+            min={55}
+            max={70}
+            step={1}
+            format={fmtAge}
+            onChange={(v) => onChange({ normalPensionAge: Math.round(v) })}
+            color="#2dd4bf"
+            allowInput
+            help="The age the scheme pays your full pension without reduction. In most current public-sector schemes it's your state pension age; older sections often use 60 or 65."
+          />
+          <Slider
+            label="Take it from"
+            value={s.paymentAge}
+            min={Math.max(55, p.currentAge)}
+            max={75}
+            step={1}
+            format={fmtAge}
+            onChange={(v) => onChange({ paymentAge: Math.round(v) })}
+            color="#2dd4bf"
+            allowInput
+            annotation={() =>
+              factor === 1
+                ? 'Full pension — taken at normal pension age.'
+                : `${factor < 1 ? 'Reduced' : 'Increased'} to ${Math.round(factor * 100)}% for taking it ${yearsOff} year${yearsOff === 1 ? '' : 's'} ${factor < 1 ? 'early' : 'late'}.`
+            }
+            help="When the pension starts. Taking it before normal pension age reduces it for life; taking it later increases it (rates in Scheme details). An active scheme stops building up when you retire or start taking it."
+          />
+          <Toggle
+            label="Tax-free cash"
+            value={s.lumpSum}
+            optA={{ value: 'none', label: 'Full pension' }}
+            optB={{ value: 'max', label: 'Maximum cash' }}
+            onChange={(v) => onChange({ lumpSum: v })}
+            help="Most schemes let you give up some pension for a tax-free lump sum when it starts. Maximum takes as much as HMRC allows (about 4.3× the pension at 12:1), within the Lump Sum Allowance you share with your other pensions. The cash goes into your ISA, then GIA. At 12:1, each £12 of cash costs £1 a year of pension for life — about 15 years of it after basic-rate tax — so it's usually poor value if you expect a long retirement, though the cash is flexible."
+          />
+          {s.lumpSum === 'max' && (
+            <Slider
+              label="Commutation factor"
+              value={s.commutationFactor}
+              min={8}
+              max={25}
+              step={0.5}
+              format={(v) => `${v}:1`}
+              parse={parseLastNumber}
+              onChange={(v) => onChange({ commutationFactor: Math.max(1, v) })}
+              color="#2dd4bf"
+              allowInput
+              help="Pounds of tax-free cash you get for each £1 a year of pension you give up. 12:1 is standard in public-sector schemes; private schemes often offer more at older ages."
+            />
+          )}
+        </>
+      )}
+      <button
+        onClick={() => setShowDetails((v) => !v)}
+        style={{
+          background: 'none',
+          border: 'none',
+          padding: '0 0 10px',
+          color: 'var(--text-secondary)',
+          fontFamily: 'var(--font-body)',
+          fontSize: 11,
+          cursor: 'pointer',
+        }}
+      >
+        {showDetails ? 'Scheme details ▾' : 'Scheme details ▸'}
+      </button>
+      {showDetails && (
+        <>
+          {!inPayment && (
+            <>
+              <Slider
+                label="Reduction per year early"
+                value={s.earlyReductionPct}
+                min={0}
+                max={10}
+                step={0.1}
+                format={fmtPct}
+                onChange={(v) => onChange({ earlyReductionPct: Math.max(0, v) })}
+                color="#2dd4bf"
+                allowInput
+                help="How much the pension is cut for each year it starts before normal pension age. Schemes use actuarial tables; around 4–6% a year is typical."
+              />
+              <Slider
+                label="Increase per year late"
+                value={s.lateIncreasePct}
+                min={0}
+                max={10}
+                step={0.1}
+                format={fmtPct}
+                onChange={(v) => onChange({ lateIncreasePct: Math.max(0, v) })}
+                color="#2dd4bf"
+                allowInput
+                help="How much the pension rises for each year it starts after normal pension age, if the scheme allows it."
+              />
+              <Select
+                label="Increases before it's paid"
+                value={s.deferredIncreases}
+                options={DB_INCREASE_OPTIONS.filter((o) => o.value !== 'none')}
+                onChange={(v) => onChange({ deferredIncreases: v })}
+                help="How a deferred pension grows between leaving the scheme and taking it. Public-sector schemes increase it in line with CPI; private schemes usually cap the increase."
+              />
+              <Slider
+                label="Automatic lump sum"
+                value={s.automaticLumpSum}
+                min={0}
+                max={200_000}
+                step={500}
+                format={fmtGBP}
+                onChange={(v) => onChange({ automaticLumpSum: Math.max(0, v) })}
+                color="#2dd4bf"
+                allowInput
+                help="Tax-free cash some older sections pay on top of the pension (e.g. 3× pension in the NHS 1995 section), from your statement in today's money. It grows like the pension and uses your Lump Sum Allowance."
+              />
+            </>
+          )}
+          <Select
+            label="Increases once paid"
+            value={s.paymentIncreases}
+            options={DB_INCREASE_OPTIONS}
+            onChange={(v) => onChange({ paymentIncreases: v })}
+            help="How the pension rises each year once it's being paid. Public-sector pensions rise with CPI; private schemes often cap increases at 5% or 2.5%, and some pay none."
+          />
+          {p.householdMode === 'couple' && (
+            <>
+              <Slider
+                label="Survivor's pension"
+                value={s.survivorPensionPct ?? 50}
+                min={0}
+                max={100}
+                step={1}
+                format={(v) => `${v}%`}
+                onChange={(v) => onChange({ survivorPensionPct: Math.min(100, Math.max(0, v)) })}
+                color="#2dd4bf"
+                allowInput
+                help="If this member dies, the share of their pension paid for life to their surviving partner — commonly 50% (e.g. 37.5% in the NHS 2015 scheme, 50% in many private schemes). Based on the pension built up, or being paid, at the death."
+              />
+              <Toggle
+                label="Paid to an unmarried partner"
+                value={s.survivorUnmarried ?? 'yes'}
+                optA={{ value: 'yes', label: 'Yes' }}
+                optB={{ value: 'no', label: 'No' }}
+                onChange={(v) => onChange({ survivorUnmarried: v })}
+                help="Most public-sector schemes pay a survivor's pension to a partner you weren't married to if you've nominated them; many private schemes pay only spouses and civil partners. Check your scheme rules."
+              />
+            </>
+          )}
+        </>
+      )}
+      {enabled && result && (
+        <div
+          style={{
+            color: 'var(--text-muted)',
+            fontSize: 11,
+            fontFamily: 'var(--font-body)',
+            lineHeight: 1.5,
+          }}
+        >
+          {result.startAge === null
+            ? `Not paid before age ${p.maxAge}, the end of the projection.`
+            : inPayment
+              ? `Paying ${fmtGBP(result.pensionAtStartReal)}/yr, rising each year as set.`
+              : `Paid from ${result.startAge}: ${fmtGBP(result.pensionAtStartReal)}/yr in today's money` +
+                (result.lumpSumReal > 0 ? ` + ${fmtGBP(result.lumpSumReal)} tax-free cash.` : '.')}
+        </div>
+      )}
+    </EventCard>
+  );
+}
+
+function DbPensionsEditor({ p, set, dbSummary }) {
+  const schemes = p.dbPensions ?? [];
+  const update = (i, patch) =>
+    set('dbPensions')(schemes.map((s, j) => (j === i ? { ...s, ...patch } : s)));
+  // The projection only includes enabled schemes, in order.
+  const resultIndex = [];
+  let k = 0;
+  for (const s of schemes) resultIndex.push(s.enabled !== false ? k++ : -1);
+  return (
+    <div style={{ marginBottom: 20 }}>
+      <p style={eventIntroStyle}>
+        A defined benefit (final salary or career average) pension pays a guaranteed income for life
+        from your scheme, worked out from your pay and service rather than an invested pot. Add each
+        scheme from its latest benefit statement.
+      </p>
+      {schemes.map((s, i) => (
+        <DbSchemeCard
+          key={i}
+          p={p}
+          scheme={s}
+          result={resultIndex[i] >= 0 ? dbSummary?.[resultIndex[i]] : null}
+          onChange={(patch) => update(i, patch)}
+          onRemove={() => set('dbPensions')(schemes.filter((_, j) => j !== i))}
+        />
+      ))}
+      <AddEventButton
+        onClick={() =>
+          set('dbPensions')([
+            ...schemes,
+            { ...DB_NEW_SCHEME, paymentAge: Math.max(DB_NEW_SCHEME.paymentAge, p.currentAge) },
+          ])
+        }
+        label="+ Add a defined benefit scheme"
+      />
+    </div>
+  );
+}
+
+// How long the ONS life tables expect someone of this sex and year of birth to
+// live — context for the lifetime-solvency figure and the model horizon.
+function LifeExpectancyReadout({ p }) {
+  const birthYear = CURRENT_YEAR - p.currentAge;
+  const averageAge = Math.round(p.currentAge + lifeExpectancy(p.currentAge, p.sex, birthYear));
+  // Oldest age that at least one in four people of this cohort reach.
+  let quarterAge = p.currentAge;
+  while (survivalToAge(p.currentAge, quarterAge + 1, p.sex, birthYear) >= 0.25) quarterAge++;
+  const who = p.sex === 'neutral' ? 'Someone' : p.sex === 'female' ? 'A woman' : 'A man';
+  return (
+    <div
+      style={{
+        color: 'var(--text-muted)',
+        fontSize: 11,
+        fontFamily: 'var(--font-body)',
+        lineHeight: 1.5,
+      }}
+    >
+      {who} born in {birthYear} lives to {averageAge} on average; 1 in 4 reach {quarterAge} (ONS
+      life tables).
+    </div>
+  );
+}
+
 // Read-only display of the tax-optimal employee contribution (Auto mode).
 // Solves the optimal salary-sacrifice rate from the current salary and employer
 // rate, then explains what it did — the value used by the projection comes from
 // the same solver via effectiveEmployeePensionRate.
 function AutoContributionReadout({ p }) {
   let auto;
+  const db = dbFirstYear(p);
   try {
     auto = optimalEmployeePensionContribution(p.grossIncome, p.employerPensionPct / 100, {
       employerMatch: p.employerMatch,
       employerMatchThreshold: p.employerMatchThreshold / 100,
+      netPayContributions: db.memberContribution,
+      otherPensionInput: db.pensionInput,
     });
   } catch {
     return <InfoBox>Enter a valid salary to compute the tax-optimal contribution.</InfoBox>;
@@ -1621,7 +2759,6 @@ function AutoContributionReadout({ p }) {
   const gross = fmtGBP(p.grossIncome);
   const target = fmtGBP(auto.targetIncome); // £100,000 at today's thresholds
   const emp = fmtGBP(auto.employeeContribution);
-  const adjusted = fmtGBP(auto.adjustedGrossIncome);
   const total = fmtGBP(auto.totalContribution);
   const employer = fmtGBP(auto.employerContribution);
   const erPct = (auto.employerRate * 100).toFixed(1);
@@ -1633,13 +2770,21 @@ function AutoContributionReadout({ p }) {
     ? ` This exceeds the ${fmtGBP(auto.annualAllowance)} annual allowance, so an annual-allowance charge would apply to the excess.`
     : '';
 
-  const abovePA = p.grossIncome > auto.targetIncome + 0.5;
+  // Taxable pay before and after the sacrifice: a DB scheme's member
+  // contributions (net pay) have already come off.
+  const startTaxable = p.grossIncome - db.memberContribution;
+  const endTaxable = startTaxable - auto.employeeContribution;
+  const dbNote =
+    db.pensionInput > 0
+      ? `Your DB scheme is allowed for: its ${fmtGBP(db.memberContribution)}/yr contribution already lowers taxable pay, and its build-up counts as ${fmtGBP(db.pensionInput)} of pension input against the annual allowance. `
+      : '';
+  const abovePA = startTaxable > auto.targetIncome + 0.5;
   let explanation;
   if (!abovePA) {
     // Income at/below £100,000 — the personal allowance is safe already.
     if (auto.employeeContribution === 0) {
       explanation =
-        `At ${gross} your income is below ${target}, so your full tax-free personal allowance is ` +
+        `At ${fmtGBP(startTaxable)} your taxable income is below ${target}, so your full tax-free personal allowance is ` +
         `already safe — there is nothing to protect` +
         (auto.employerMatched ? ', and no employer match to capture' : '') +
         `. The tax-optimal contribution is 0%. `;
@@ -1650,16 +2795,16 @@ function AutoContributionReadout({ p }) {
         `${pct}% (${emp}/yr) to earn the full ${erPct}% employer match — ${total}/yr into your ` +
         `pension in total. `;
     }
-  } else if (auto.adjustedGrossIncome <= auto.targetIncome + 0.5) {
+  } else if (endTaxable <= auto.targetIncome + 0.5) {
     // Income above £100,000, and the sacrifice reaches the target.
     explanation =
-      `Sacrificing ${pct}% (${emp}/yr) brings your taxable income from ${gross} down to ${target}, ` +
+      `Sacrificing ${pct}% (${emp}/yr) brings your taxable income from ${fmtGBP(startTaxable)} down to ${target}, ` +
       `reclaiming your full tax-free personal allowance. Total pension input ${total}/yr ` +
       `(incl. ${employer} employer${matchClause}).${breachNote} `;
   } else {
     // The annual allowance stops the sacrifice reaching £100,000.
     explanation =
-      `Sacrificing ${pct}% (${emp}/yr) brings your taxable income from ${gross} down to ${adjusted}. ` +
+      `Sacrificing ${pct}% (${emp}/yr) brings your taxable income from ${fmtGBP(startTaxable)} down to ${fmtGBP(endTaxable)}. ` +
       `The ${fmtGBP(auto.annualAllowance)} annual allowance stops it reaching ${target}, so part of ` +
       `your personal allowance stays tapered away. Total pension input ${total}/yr ` +
       `(incl. ${employer} employer${matchClause}).${breachNote} `;
@@ -1704,6 +2849,7 @@ function AutoContributionReadout({ p }) {
       </div>
       <InfoBox>
         {explanation}
+        {dbNote}
         Based on today&apos;s salary and 2026/27 thresholds; the rate is held constant as your pay
         grows, and affordability is not considered.
       </InfoBox>
@@ -1714,14 +2860,15 @@ function AutoContributionReadout({ p }) {
 // Warns (without capping) when a manual employee + employer contribution exceeds
 // the annual allowance in the first year. Auto mode carries its own breach note.
 function ManualAllowanceWarning({ p }) {
-  const { breached, total, allowance } = manualAllowanceStatus(p);
+  const { breached, total, allowance, db } = manualAllowanceStatus(p);
   if (!breached) return null;
   return (
     <InfoBox tone="warn">
-      ⚠ Your employee + employer contributions total {fmtGBP(total)} this year — above the{' '}
-      {fmtGBP(allowance)} annual allowance. The excess would normally face an annual-allowance
-      charge, which this model flags but doesn&apos;t apply (nor does it model carrying forward
-      unused allowance from the past three years). Based on today&apos;s salary.
+      ⚠ Your employee + employer contributions{db ? ' plus your DB build-up' : ''} total{' '}
+      {fmtGBP(total)} this year — above the {fmtGBP(allowance)} annual allowance. The excess would
+      normally face an annual-allowance charge, which this model flags but doesn&apos;t apply (nor
+      does it model carrying forward unused allowance from the past three years). Based on
+      today&apos;s salary.
     </InfoBox>
   );
 }
@@ -1974,7 +3121,10 @@ function AnnuityControls({ p, set, annuity }) {
   );
 }
 
-function TabContent({ tab, p, set, derived, topUp, annuity }) {
+// `scope` is null in single mode; in couple mode 'self' or 'partner' — whose
+// settings are shown. Household settings are hidden while editing the partner.
+function TabContent({ tab, p, set, derived, topUp, annuity, dbSummary, scope = null }) {
+  const household = scope !== 'partner';
   switch (tab) {
     case 'Personal':
       return (
@@ -2015,18 +3165,20 @@ function TabContent({ tab, p, set, derived, topUp, annuity }) {
             allowInput
             help="Your pre-tax annual salary. Used to calculate pension contributions (employee and employer). Wage growth applies annually."
           />
-          <Slider
-            label="Pre-Retirement Living Expenses"
-            value={p.annualLivingExpenses}
-            min={0}
-            max={80_000}
-            step={500}
-            format={fmtGBP}
-            onChange={set('annualLivingExpenses')}
-            allowInput
-            help="Your annual non-debt living costs during the working years, in today's money — food, utilities, transport, insurance, leisure, etc. Do not include mortgage or debt repayments; those are entered separately. This amount is inflated each year to keep real purchasing power constant. Annual savings are derived automatically as: net take-home − debt payments − living expenses. Retirement spending is a separate parameter in the Retire tab."
-          />
-          <DerivedSavingsReadout derived={derived} />
+          {household && (
+            <Slider
+              label={scope ? 'Household Living Expenses' : 'Pre-Retirement Living Expenses'}
+              value={p.annualLivingExpenses}
+              min={0}
+              max={80_000}
+              step={500}
+              format={fmtGBP}
+              onChange={set('annualLivingExpenses')}
+              allowInput
+              help="Your annual non-debt living costs during the working years, in today's money — food, utilities, transport, insurance, leisure, etc. Do not include mortgage or debt repayments; those are entered separately. This amount is inflated each year to keep real purchasing power constant. Annual savings are derived automatically as: net take-home − debt payments − living expenses. Retirement spending is a separate parameter in the Retire tab."
+            />
+          )}
+          {household && <DerivedSavingsReadout derived={derived} />}
           <Slider
             label="NI Qualifying Years"
             value={p.niContributionYears}
@@ -2057,19 +3209,22 @@ function TabContent({ tab, p, set, derived, topUp, annuity }) {
             onChange={(v) => set('statePensionDeferralYears')(Math.max(0, Math.round(v)))}
             help="Years to defer claiming your state pension past state pension age. Each deferred year adds about 5.8% of the pension at the time you claim (1% per 9 weeks, new state pension rules). That extra then rises with CPI each year, while the base pension keeps its normal annual increases. It takes roughly 17 years to earn back each year deferred, and under the new rules a partner can't inherit it — so it mainly suits people still working (especially higher-rate taxpayers) or expecting a long life. Deferring means drawing more from your pots in the gap years."
           />
-          <Toggle
-            label="State Pension Increases"
-            value={p.statePensionUprating}
-            optA={{ value: 'adjusted', label: 'Adjusted lock' }}
-            optB={{ value: 'triple-lock', label: 'Triple lock' }}
-            onChange={set('statePensionUprating')}
-            help={
-              'How the state pension rises each April.\n\n' +
-              'Adjusted lock: the government announced on 29 September 2026 that the triple lock continues up to the April 2029 increase. From April 2030 the pension rises by the higher of CPI inflation and 2.5%, or by more if needed to keep its value relative to average earnings at the 2029/30 level. It still keeps pace with earnings over time, but a year when inflation beats wages is no longer topped up again when wages catch up. Not yet law: the government says it will legislate this Parliament.\n\n' +
-              'Triple lock: the current rule. The pension rises by the highest of earnings growth, CPI inflation and 2.5% every year.\n\n' +
-              'With steady assumptions, as in the main chart, both give the same pension. The difference shows in Monte Carlo, where earnings and inflation vary from year to year.'
-            }
-          />
+          {household && (
+            <Toggle
+              label="State Pension Increases"
+              value={p.statePensionUprating}
+              optA={{ value: 'adjusted', label: 'Adjusted lock' }}
+              optB={{ value: 'triple-lock', label: 'Triple lock' }}
+              onChange={set('statePensionUprating')}
+              help={
+                'How the state pension rises each April.\n\n' +
+                'Adjusted lock: the government announced on 29 September 2026, and confirmed in the Budget on 28 October, that the triple lock continues up to the April 2029 increase. From April 2030 the pension rises by the higher of CPI inflation and 2.5%, or by more if needed to keep its value relative to average earnings at the 2029/30 level. It still keeps pace with earnings over time, but a year when inflation beats wages is no longer topped up again when wages catch up. Not yet law: the government says it will legislate this Parliament.\n\n' +
+                'Triple lock: the current rule. The pension rises by the highest of earnings growth, CPI inflation and 2.5% every year.\n\n' +
+                'With steady assumptions, as in the main chart, both give the same pension. The difference shows in Monte Carlo, where earnings and inflation vary from year to year.' +
+                (scope ? ' It applies to both of you.' : '')
+              }
+            />
+          )}
           <Toggle
             label="State Pension Top-up (Class 3)"
             value={p.topUpStatePension ? 'on' : 'off'}
@@ -2186,6 +3341,21 @@ function TabContent({ tab, p, set, derived, topUp, annuity }) {
             allowance: £60,000. PCLS (tax-free lump sum): up to 25%. Pension accessible from age{' '}
             {p.pensionAccessAge}.
           </InfoBox>
+          {scope && (
+            <Slider
+              label="Death-in-service"
+              value={p.deathInServiceMultiple ?? 0}
+              min={0}
+              max={10}
+              step={1}
+              format={(v) => (v > 0 ? `${v}× salary` : 'None')}
+              onChange={(v) => set('deathInServiceMultiple')(Math.min(20, Math.max(0, v)))}
+              allowInput
+              help="A lump sum your employer's scheme pays if you die while working there, as a multiple of salary (often 2× to 4×; check your scheme booklet). Paid to your partner, normally outside your estate, so no inheritance tax. It stops when you stop working."
+            />
+          )}
+          <SecHead>Defined Benefit Pensions</SecHead>
+          <DbPensionsEditor p={p} set={set} dbSummary={dbSummary} />
         </>
       );
 
@@ -2235,13 +3405,15 @@ function TabContent({ tab, p, set, derived, topUp, annuity }) {
           />
           <InfoBox>
             ISA fills first (£20,000/yr limit) — excess goes to GIA. CGT annual exempt amount:
-            £3,000. Basic rate 18%, higher rate 24%.
+            £3,000, used every year: moving GIA into the ISA and sales use it first, and the rest is
+            used at the year end by realising gains and reinvesting, so they're never taxed. Basic
+            rate 18%, higher rate 24%.
           </InfoBox>
         </>
       );
 
     case 'Events':
-      return <EventsEditor p={p} set={set} />;
+      return <EventsEditor p={p} set={set} scope={scope} />;
 
     case 'Mortgage': {
       const effectiveMortgageRate =
@@ -2363,77 +3535,81 @@ function TabContent({ tab, p, set, derived, topUp, annuity }) {
         p.unsecuredRateType === 'boe' ? p.boePct + p.unsecuredSpreadPct : p.unsecuredRatePct;
       return (
         <>
-          <SecHead>Unsecured Debt</SecHead>
-          <Slider
-            label="Outstanding Balance"
-            value={p.unsecuredBalance}
-            min={0}
-            max={100_000}
-            step={500}
-            format={fmtGBP}
-            onChange={set('unsecuredBalance')}
-            color="#fb923c"
-            allowInput
-            help="Total balance of unsecured debts such as credit cards, personal loans, or overdrafts. Interest accrues monthly at the rate set below."
-          />
-          <Slider
-            label="Monthly Payment"
-            value={p.unsecuredMonthly}
-            min={0}
-            max={3_000}
-            step={25}
-            format={fmtGBP}
-            onChange={set('unsecuredMonthly')}
-            color="#fb923c"
-            allowInput
-            help="Your monthly payment toward unsecured debts. Must exceed the monthly interest charge for the balance to reduce over time. When the debt is repaid, payments stop automatically."
-          />
-          <Toggle
-            label="Rate type"
-            value={p.unsecuredRateType}
-            optA={{ value: 'fixed', label: 'Fixed rate' }}
-            optB={{ value: 'boe', label: 'BoE + spread' }}
-            onChange={set('unsecuredRateType')}
-            help="Fixed: a constant rate (e.g. a personal loan). BoE + spread: a variable-rate product that tracks the Bank of England base rate (e.g. a tracker credit card or overdraft)."
-          />
-          {p.unsecuredRateType === 'fixed' ? (
-            <Slider
-              label="Interest Rate"
-              value={p.unsecuredRatePct}
-              min={0}
-              max={40}
-              step={0.1}
-              format={fmtPct}
-              onChange={set('unsecuredRatePct')}
-              color="#fb923c"
-              allowInput
-              help="Fixed annual interest rate on your unsecured debts (credit cards, personal loans, overdrafts)."
-            />
-          ) : (
+          {household && (
             <>
+              <SecHead>Unsecured Debt</SecHead>
               <Slider
-                label="BoE Base Rate"
-                value={p.boePct}
-                min={-5}
-                max={10}
-                step={0.1}
-                format={fmtPct}
-                onChange={set('boePct')}
-                allowInput
-                help="Bank of England base rate. Also used for Plan 1 student loan interest (capped at RPI or BoE+1%), and for any BoE-tracker mortgage."
-              />
-              <Slider
-                label="Spread above BoE"
-                value={p.unsecuredSpreadPct}
+                label="Outstanding Balance"
+                value={p.unsecuredBalance}
                 min={0}
-                max={35}
-                step={0.1}
-                format={fmtPct}
-                onChange={set('unsecuredSpreadPct')}
+                max={100_000}
+                step={500}
+                format={fmtGBP}
+                onChange={set('unsecuredBalance')}
                 color="#fb923c"
                 allowInput
-                help={`Fixed margin added to the BoE base rate for your unsecured debts. Effective rate: ${fmtPct(p.boePct)} + ${fmtPct(p.unsecuredSpreadPct)} = ${fmtPct(effectiveUnsecuredRate)}.`}
+                help="Total balance of unsecured debts such as credit cards, personal loans, or overdrafts. Interest accrues monthly at the rate set below."
               />
+              <Slider
+                label="Monthly Payment"
+                value={p.unsecuredMonthly}
+                min={0}
+                max={3_000}
+                step={25}
+                format={fmtGBP}
+                onChange={set('unsecuredMonthly')}
+                color="#fb923c"
+                allowInput
+                help="Your monthly payment toward unsecured debts. Must exceed the monthly interest charge for the balance to reduce over time. When the debt is repaid, payments stop automatically."
+              />
+              <Toggle
+                label="Rate type"
+                value={p.unsecuredRateType}
+                optA={{ value: 'fixed', label: 'Fixed rate' }}
+                optB={{ value: 'boe', label: 'BoE + spread' }}
+                onChange={set('unsecuredRateType')}
+                help="Fixed: a constant rate (e.g. a personal loan). BoE + spread: a variable-rate product that tracks the Bank of England base rate (e.g. a tracker credit card or overdraft)."
+              />
+              {p.unsecuredRateType === 'fixed' ? (
+                <Slider
+                  label="Interest Rate"
+                  value={p.unsecuredRatePct}
+                  min={0}
+                  max={40}
+                  step={0.1}
+                  format={fmtPct}
+                  onChange={set('unsecuredRatePct')}
+                  color="#fb923c"
+                  allowInput
+                  help="Fixed annual interest rate on your unsecured debts (credit cards, personal loans, overdrafts)."
+                />
+              ) : (
+                <>
+                  <Slider
+                    label="BoE Base Rate"
+                    value={p.boePct}
+                    min={-5}
+                    max={10}
+                    step={0.1}
+                    format={fmtPct}
+                    onChange={set('boePct')}
+                    allowInput
+                    help="Bank of England base rate. Also used for Plan 1 student loan interest (capped at RPI or BoE+1%), and for any BoE-tracker mortgage."
+                  />
+                  <Slider
+                    label="Spread above BoE"
+                    value={p.unsecuredSpreadPct}
+                    min={0}
+                    max={35}
+                    step={0.1}
+                    format={fmtPct}
+                    onChange={set('unsecuredSpreadPct')}
+                    color="#fb923c"
+                    allowInput
+                    help={`Fixed margin added to the BoE base rate for your unsecured debts. Effective rate: ${fmtPct(p.boePct)} + ${fmtPct(p.unsecuredSpreadPct)} = ${fmtPct(effectiveUnsecuredRate)}.`}
+                  />
+                </>
+              )}
             </>
           )}
           <SecHead>Student Loan</SecHead>
@@ -2609,10 +3785,12 @@ function TabContent({ tab, p, set, derived, topUp, annuity }) {
     case 'Simulation':
       return (
         <>
-          <InfoBox>
-            These settings control the Monte Carlo simulation. Switch to the Monte Carlo tab in the
-            chart to run it.
-          </InfoBox>
+          {household && (
+            <InfoBox>
+              These settings control the Monte Carlo simulation. Switch to the Monte Carlo tab in
+              the chart to run it.
+            </InfoBox>
+          )}
           {/* Sex — mortality basis for the lifetime-solvency metric */}
           <div style={{ marginBottom: 16 }}>
             <div
@@ -2635,7 +3813,7 @@ function TabContent({ tab, p, set, derived, topUp, annuity }) {
                 Sex (for survival)
                 <HelpTip
                   title="Sex (for survival)"
-                  text="Sets the mortality table used for the lifetime-solvency figure — the chance of never running out of money while you're alive. Female mortality is lower, so a longer expected lifespan gives more exposure to late shortfalls. 'Neutral' blends the male and female rates. This affects only the lifetime-solvency number, never the projection itself or the fan bands. It's a rough population estimate, not individual health."
+                  text="Sets the death rates used for the lifetime-solvency figure — the chance of never running out of money while you're alive. They come from the ONS projected life tables (2024-based) for your sex and year of birth, so they include the improvements in life expectancy ONS expects in the years ahead. Women live longer on average, which means more exposure to late shortfalls. 'Neutral' averages the male and female rates. This affects only the lifetime-solvency number, never the projection itself or the fan bands. It's a population average, not your individual health."
                 />
               </span>
               <div
@@ -2674,319 +3852,383 @@ function TabContent({ tab, p, set, derived, topUp, annuity }) {
                 ))}
               </div>
             </div>
+            <LifeExpectancyReadout p={p} />
           </div>
-          <Slider
-            label="Trials"
-            value={p.mcTrials}
-            min={50}
-            max={1000}
-            step={50}
-            format={(v) => `${v}`}
-            onChange={set('mcTrials')}
-            allowInput
-            help="Number of independent lifecycle projections to run. More trials give smoother percentile bands but take longer to compute. 200–500 is a good balance for interactive use."
-          />
-          <Slider
-            label="Volatility"
-            value={p.mcVolatility}
-            min={0.1}
-            max={3}
-            step={0.1}
-            format={(v) => `${v.toFixed(1)}×`}
-            onChange={set('mcVolatility')}
-            allowInput
-            help={
-              'Scales the standard deviation of the random rate shocks. At 1× (default): investment returns ±8 pp per year (1 sd), macro rates ±0.8 pp.\n\n' +
-              'Each year draws fresh rates — this models both sequence-of-returns risk and year-to-year market volatility.\n\n' +
-              'At 1×: p90 trial ≈ base + 8 pp in a given year, p10 ≈ base − 8 pp. Increase for a wider fan, decrease for a narrower one.'
-            }
-          />
-          <Slider
-            label="Bear market frequency"
-            value={p.mcBearFreq}
-            min={4}
-            max={30}
-            step={1}
-            format={(v) => `every ${v} yrs`}
-            onChange={set('mcBearFreq')}
-            allowInput
-            help={
-              'Average number of years between bear markets (market downturns lasting 1–3 years).\n\n' +
-              'At 12 years (default): roughly matches post-war UK/US history. At 4–6 years: more crisis-prone, similar to the 1970s or emerging markets. At 20–30 years: unusually calm conditions.\n\n' +
-              'Changing this setting does not alter the long-run expected return — the simulation compensates so the median trial still tracks your chosen return rates. What it does affect is the shape of the fan: more frequent bear markets means more sequence-of-returns risk and a wider spread between p10 and p90.'
-            }
-          />
-          <Slider
-            label="Bear market severity"
-            value={p.mcBearSeverity}
-            min={0.02}
-            max={0.4}
-            step={0.01}
-            format={(v) => `−${(v * 100).toFixed(0)} pp`}
-            // Stored as a fraction but shown in percentage points, so manual
-            // entry ("20") is read back as 0.20 rather than 20.
-            parse={(s) => Math.abs(parseFloat(s.replace(/[^0-9.-]/g, ''))) / 100}
-            onChange={set('mcBearSeverity')}
-            allowInput
-            help={
-              'How much a bear market cuts annual investment returns during the downturn.\n\n' +
-              'At −15 pp (default): a moderate recession where returns drop roughly 15 pp below the long-run average for 1–2 years. At −30 pp: severe crash conditions (2008-style). At −5 pp: a mild correction only.\n\n' +
-              'Like frequency, changing severity does not shift the long-run expected return — the simulation compensates so the median remains anchored to your return rate sliders. Higher severity widens the fan and increases the chance of a bad sequence of returns early in retirement.'
-            }
-          />
-          {/* Crisis persistence toggle */}
-          <div style={{ marginBottom: 10 }}>
-            <div
-              style={{
-                display: 'flex',
-                justifyContent: 'space-between',
-                alignItems: 'center',
-                marginBottom: 6,
-              }}
-            >
-              <span
-                style={{
-                  fontSize: 12,
-                  fontFamily: 'var(--font-body)',
-                  color: 'var(--text-secondary)',
-                }}
-              >
-                Crisis persistence
-              </span>
-              <div
-                style={{
-                  display: 'flex',
-                  background: 'var(--bg-input)',
-                  border: '1px solid var(--border)',
-                  borderRadius: 5,
-                  overflow: 'hidden',
-                }}
-              >
-                {[
-                  { label: 'Short', value: 0.3 },
-                  { label: 'Medium', value: 0.6 },
-                  { label: 'Long', value: 0.8 },
-                ].map(({ label, value }) => (
-                  <button
-                    key={value}
-                    onClick={() => set('mcCrisisPersistence')(value)}
-                    style={{
-                      padding: '3px 9px',
-                      background:
-                        p.mcCrisisPersistence === value ? 'var(--accent-gold)' : 'transparent',
-                      border: 'none',
-                      color:
-                        p.mcCrisisPersistence === value
-                          ? 'var(--accent-gold-text)'
-                          : 'var(--text-secondary)',
-                      fontFamily: 'var(--font-mono)',
-                      fontSize: 10,
-                      fontWeight: 600,
-                      letterSpacing: '0.05em',
-                      cursor: 'pointer',
-                      transition: 'all 0.15s',
-                      whiteSpace: 'nowrap',
-                    }}
-                  >
-                    {label}
-                  </button>
-                ))}
-              </div>
-            </div>
-            <p
-              style={{
-                fontSize: 11,
-                color: 'var(--text-muted)',
-                fontFamily: 'var(--font-body)',
-                lineHeight: 1.5,
-              }}
-            >
-              How long elevated volatility lingers after a bear market ends. Short: volatility
-              normalises within 1–2 years. Long: unsettled conditions persist for 5+ years, as in
-              the aftermath of 2008.
-            </p>
-          </div>
-          <SecHead>Flexible Retirement Date</SecHead>
-          <Toggle
-            label="Postpone if off track"
-            value={p.flexibleRetirement ? 'yes' : 'no'}
-            optA={{ value: 'yes', label: 'On' }}
-            optB={{ value: 'no', label: 'Off' }}
-            onChange={(v) => set('flexibleRetirement')(v === 'yes')}
-            help="Models a realistic behavioural response: in trials where the plan is clearly off track at your target age (e.g. a downturn just wiped out part of your ISA), keep working a few more years to let things recover rather than retiring into the shortfall. Only affects the Monte Carlo fan and solvency figures — the central projection still retires at your target."
-          />
-          {p.flexibleRetirement && (
-            <Slider
-              label="Max years to postpone"
-              value={p.maxRetirementDelayYears}
-              min={1}
-              max={10}
-              step={1}
-              format={(v) => `${v} yr${v === 1 ? '' : 's'}`}
-              onChange={set('maxRetirementDelayYears')}
-              allowInput
-              help="The most any trial will delay retirement past your target age. Each trial stops as soon as the plan looks fundable under central assumptions, so most delay less than this — the cap only bites in the worst trials."
-            />
-          )}
-          <InfoBox collapsible>
-            {
-              'Each Monte Carlo trial checks, at your target retirement age, whether it can fund your target spending for the rest of the plan using central (expected) return assumptions — no peeking at the trial’s own future market path.\n\n'
-            }
-            {
-              'If not, it works one more year and re-checks, up to the cap. Trials that are on track retire exactly on time; only the ones knocked off course by a bad run postpone. This lifts the lower fan bands and lifetime-solvency figure, reflecting that a real person would rarely retire straight into an obvious shortfall.\n\n'
-            }
-            {
-              'The de-risking glide path stays anchored to your original target age (it can’t depend on a retirement date that itself depends on returns), and the delay never looks into the future — it reacts only to what has already happened by that age.'
-            }
-          </InfoBox>
-          <SecHead>Spending Guardrails</SecHead>
-          <Toggle
-            label="Flex spending in retirement"
-            value={p.spendingGuardrails ? 'yes' : 'no'}
-            optA={{ value: 'yes', label: 'On' }}
-            optB={{ value: 'no', label: 'Off' }}
-            onChange={(v) => set('spendingGuardrails')(v === 'yes')}
-            help="Models a retiree who adjusts spending to conditions: trim when the pot has fallen behind what it can sustainably support, restore (and optionally raise) when ahead — bounded by a hard floor and a ceiling. Only affects the Monte Carlo fan and solvency; the central projection always spends the target."
-          />
-          {p.spendingGuardrails && (
+          {household && (
             <>
-              {/* Floor = the shared essential-expenses input (Retire tab) */}
-              <div style={{ marginBottom: 20 }}>
+              <Slider
+                label="Trials"
+                value={p.mcTrials}
+                min={50}
+                max={1000}
+                step={50}
+                format={(v) => `${v}`}
+                onChange={set('mcTrials')}
+                allowInput
+                help="Number of independent lifecycle projections to run. More trials give smoother percentile bands but take longer to compute. 200–500 is a good balance for interactive use."
+              />
+              <Slider
+                label="Volatility"
+                value={p.mcVolatility}
+                min={0.1}
+                max={3}
+                step={0.1}
+                format={(v) => `${v.toFixed(1)}×`}
+                onChange={set('mcVolatility')}
+                allowInput
+                help={
+                  'Scales the standard deviation of the random rate shocks. At 1× (default): investment returns ±8 pp per year (1 sd), macro rates ±0.8 pp.\n\n' +
+                  'Each year draws fresh rates — this models both sequence-of-returns risk and year-to-year market volatility.\n\n' +
+                  'At 1×: p90 trial ≈ base + 8 pp in a given year, p10 ≈ base − 8 pp. Increase for a wider fan, decrease for a narrower one.'
+                }
+              />
+              <Slider
+                label="Bear market frequency"
+                value={p.mcBearFreq}
+                min={4}
+                max={30}
+                step={1}
+                format={(v) => `every ${v} yrs`}
+                onChange={set('mcBearFreq')}
+                allowInput
+                help={
+                  'Average number of years between bear markets (market downturns lasting 1–3 years).\n\n' +
+                  'At 12 years (default): roughly matches post-war UK/US history. At 4–6 years: more crisis-prone, similar to the 1970s or emerging markets. At 20–30 years: unusually calm conditions.\n\n' +
+                  'Changing this setting does not alter the long-run expected return — the simulation compensates so the median trial still tracks your chosen return rates. What it does affect is the shape of the fan: more frequent bear markets means more sequence-of-returns risk and a wider spread between p10 and p90.'
+                }
+              />
+              <Slider
+                label="Bear market severity"
+                value={p.mcBearSeverity}
+                min={0.02}
+                max={0.4}
+                step={0.01}
+                format={(v) => `−${(v * 100).toFixed(0)} pp`}
+                // Stored as a fraction but shown in percentage points, so manual
+                // entry ("20") is read back as 0.20 rather than 20.
+                parse={(s) => Math.abs(parseFloat(s.replace(/[^0-9.-]/g, ''))) / 100}
+                onChange={set('mcBearSeverity')}
+                allowInput
+                help={
+                  'How much a bear market cuts annual investment returns during the downturn.\n\n' +
+                  'At −15 pp (default): a moderate recession where returns drop roughly 15 pp below the long-run average for 1–2 years. At −30 pp: severe crash conditions (2008-style). At −5 pp: a mild correction only.\n\n' +
+                  'Like frequency, changing severity does not shift the long-run expected return — the simulation compensates so the median remains anchored to your return rate sliders. Higher severity widens the fan and increases the chance of a bad sequence of returns early in retirement.'
+                }
+              />
+              {/* Crisis persistence toggle */}
+              <div style={{ marginBottom: 10 }}>
                 <div
                   style={{
                     display: 'flex',
                     justifyContent: 'space-between',
                     alignItems: 'center',
-                    marginBottom: 4,
+                    marginBottom: 6,
                   }}
                 >
                   <span
+                    style={{
+                      fontSize: 12,
+                      fontFamily: 'var(--font-body)',
+                      color: 'var(--text-secondary)',
+                    }}
+                  >
+                    Crisis persistence
+                  </span>
+                  <div
                     style={{
                       display: 'flex',
-                      alignItems: 'center',
-                      color: 'var(--text-secondary)',
-                      fontSize: 11,
-                      letterSpacing: '0.07em',
-                      textTransform: 'uppercase',
-                      fontWeight: 500,
+                      background: 'var(--bg-input)',
+                      border: '1px solid var(--border)',
+                      borderRadius: 5,
+                      overflow: 'hidden',
                     }}
                   >
-                    Spending floor
-                    <HelpTip
-                      title="Spending floor"
-                      text="The level guardrails will never cut below: your essential expenses, set in the Retire tab (shared with the annuity's 'cover essential spending' option). Below it a bad trial counts as a genuine shortfall; above it, a squeeze is modelled as reduced spending rather than ruin."
-                    />
-                  </span>
-                  <span
-                    style={{
-                      color: 'var(--text-primary)',
-                      fontFamily: 'var(--font-mono)',
-                      fontSize: 12,
-                      fontWeight: 500,
-                    }}
-                  >
-                    {fmtGBP(Math.min(p.essentialExpenses, p.targetNetExpenses))}
-                  </span>
+                    {[
+                      { label: 'Short', value: 0.3 },
+                      { label: 'Medium', value: 0.6 },
+                      { label: 'Long', value: 0.8 },
+                    ].map(({ label, value }) => (
+                      <button
+                        key={value}
+                        onClick={() => set('mcCrisisPersistence')(value)}
+                        style={{
+                          padding: '3px 9px',
+                          background:
+                            p.mcCrisisPersistence === value ? 'var(--accent-gold)' : 'transparent',
+                          border: 'none',
+                          color:
+                            p.mcCrisisPersistence === value
+                              ? 'var(--accent-gold-text)'
+                              : 'var(--text-secondary)',
+                          fontFamily: 'var(--font-mono)',
+                          fontSize: 10,
+                          fontWeight: 600,
+                          letterSpacing: '0.05em',
+                          cursor: 'pointer',
+                          transition: 'all 0.15s',
+                          whiteSpace: 'nowrap',
+                        }}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
                 </div>
-                <div
+                <p
                   style={{
-                    color: 'var(--text-muted)',
                     fontSize: 11,
+                    color: 'var(--text-muted)',
                     fontFamily: 'var(--font-body)',
+                    lineHeight: 1.5,
                   }}
                 >
-                  Your essential expenses ·{' '}
-                  {Math.round(
-                    (100 * Math.min(p.essentialExpenses, p.targetNetExpenses)) /
-                      (p.targetNetExpenses || 1)
-                  )}
-                  % of target · set in the Retire tab
-                </div>
+                  How long elevated volatility lingers after a bear market ends. Short: volatility
+                  normalises within 1–2 years. Long: unsettled conditions persist for 5+ years, as
+                  in the aftermath of 2008.
+                </p>
               </div>
-              <Slider
-                label="Spending ceiling"
-                value={p.spendingCeilingPct}
-                min={100}
-                max={150}
-                step={5}
-                format={(v) => `${v}%`}
-                annotation={(v) =>
-                  v > 100
-                    ? `${fmtGBP((v / 100) * p.targetNetExpenses)} — prosperity rule on`
-                    : 'Recovery only — raises never exceed your target'
-                }
-                onChange={set('spendingCeilingPct')}
-                allowInput
-                help="The most guardrails will let spending rise to in good times, as a percentage of your target. At 100% (recovery only), raises can restore earlier cuts but never exceed your target — surpluses accrue as a bigger cushion. Above 100% turns on the prosperity rule: strong markets let you spend more, up to this cap (mildly worsens solvency, since spending a surplus re-exposes it). Type a value directly to go beyond the slider range."
+              <SecHead>Flexible Retirement Date</SecHead>
+              <Toggle
+                label="Postpone if off track"
+                value={p.flexibleRetirement ? 'yes' : 'no'}
+                optA={{ value: 'yes', label: 'On' }}
+                optB={{ value: 'no', label: 'Off' }}
+                onChange={(v) => set('flexibleRetirement')(v === 'yes')}
+                help="Models a realistic behavioural response: in trials where the plan is clearly off track at your target age (e.g. a downturn just wiped out part of your ISA), keep working a few more years to let things recover rather than retiring into the shortfall. Only affects the Monte Carlo fan and solvency figures — the central projection still retires at your target."
               />
-              {/* Sensitivity preset (band + step) */}
-              <div style={{ marginBottom: 20 }}>
-                <div style={{ marginBottom: 6, display: 'flex', alignItems: 'center' }}>
-                  <span
-                    style={{
-                      color: 'var(--text-secondary)',
-                      fontSize: 11,
-                      letterSpacing: '0.07em',
-                      textTransform: 'uppercase',
-                      fontWeight: 500,
-                    }}
-                  >
-                    Sensitivity
-                  </span>
-                  <HelpTip
-                    title="Sensitivity"
-                    text="How reactive the guardrails are. Gentle: a wide tolerance band and small 5% steps — spending moves rarely and slowly. Responsive: a narrow band and larger steps — spending tracks the sustainable level more tightly. Standard sits between."
-                  />
-                </div>
-                <div
-                  style={{
-                    display: 'flex',
-                    borderRadius: 6,
-                    overflow: 'hidden',
-                    border: '1px solid var(--border-bright)',
-                  }}
-                >
-                  {[
-                    { value: 'gentle', label: 'Gentle' },
-                    { value: 'standard', label: 'Standard' },
-                    { value: 'responsive', label: 'Responsive' },
-                  ].map((opt) => (
-                    <button
-                      key={opt.value}
-                      onClick={() => set('guardrailSensitivity')(opt.value)}
+              {p.flexibleRetirement && (
+                <Slider
+                  label="Max years to postpone"
+                  value={p.maxRetirementDelayYears}
+                  min={1}
+                  max={10}
+                  step={1}
+                  format={(v) => `${v} yr${v === 1 ? '' : 's'}`}
+                  onChange={set('maxRetirementDelayYears')}
+                  allowInput
+                  help="The most any trial will delay retirement past your target age. Each trial stops as soon as the plan looks fundable under central assumptions, so most delay less than this — the cap only bites in the worst trials."
+                />
+              )}
+              <InfoBox collapsible>
+                {
+                  'Each Monte Carlo trial checks, at your target retirement age, whether it can fund your target spending for the rest of the plan using central (expected) return assumptions — no peeking at the trial’s own future market path.\n\n'
+                }
+                {
+                  'If not, it works one more year and re-checks, up to the cap. Trials that are on track retire exactly on time; only the ones knocked off course by a bad run postpone. This lifts the lower fan bands and lifetime-solvency figure, reflecting that a real person would rarely retire straight into an obvious shortfall.\n\n'
+                }
+                {
+                  'The de-risking glide path stays anchored to your original target age (it can’t depend on a retirement date that itself depends on returns), and the delay never looks into the future — it reacts only to what has already happened by that age.'
+                }
+              </InfoBox>
+              <SecHead>Spending Guardrails</SecHead>
+              <Toggle
+                label="Flex spending in retirement"
+                value={p.spendingGuardrails ? 'yes' : 'no'}
+                optA={{ value: 'yes', label: 'On' }}
+                optB={{ value: 'no', label: 'Off' }}
+                onChange={(v) => set('spendingGuardrails')(v === 'yes')}
+                help="Models a retiree who adjusts spending to conditions: trim when the pot has fallen behind what it can sustainably support, restore (and optionally raise) when ahead — bounded by a hard floor and a ceiling. Only affects the Monte Carlo fan and solvency; the central projection always spends the target."
+              />
+              {p.spendingGuardrails && (
+                <>
+                  {/* Floor = the shared essential-expenses input (Retire tab) */}
+                  <div style={{ marginBottom: 20 }}>
+                    <div
                       style={{
-                        flex: 1,
-                        padding: '7px 10px',
-                        background:
-                          p.guardrailSensitivity === opt.value
-                            ? 'var(--accent-gold)'
-                            : 'var(--bg-input)',
-                        color:
-                          p.guardrailSensitivity === opt.value
-                            ? 'var(--accent-gold-text)'
-                            : 'var(--text-secondary)',
-                        border: 'none',
-                        cursor: 'pointer',
-                        fontFamily: 'var(--font-body)',
-                        fontSize: 12,
-                        fontWeight: p.guardrailSensitivity === opt.value ? 600 : 400,
-                        transition: 'all 0.15s',
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        marginBottom: 4,
                       }}
                     >
-                      {opt.label}
-                    </button>
-                  ))}
-                </div>
-              </div>
+                      <span
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          color: 'var(--text-secondary)',
+                          fontSize: 11,
+                          letterSpacing: '0.07em',
+                          textTransform: 'uppercase',
+                          fontWeight: 500,
+                        }}
+                      >
+                        Spending floor
+                        <HelpTip
+                          title="Spending floor"
+                          text="The level guardrails will never cut below: your essential expenses, set in the Retire tab (shared with the annuity's 'cover essential spending' option). Below it a bad trial counts as a genuine shortfall; above it, a squeeze is modelled as reduced spending rather than ruin."
+                        />
+                      </span>
+                      <span
+                        style={{
+                          color: 'var(--text-primary)',
+                          fontFamily: 'var(--font-mono)',
+                          fontSize: 12,
+                          fontWeight: 500,
+                        }}
+                      >
+                        {fmtGBP(Math.min(p.essentialExpenses, p.targetNetExpenses))}
+                      </span>
+                    </div>
+                    <div
+                      style={{
+                        color: 'var(--text-muted)',
+                        fontSize: 11,
+                        fontFamily: 'var(--font-body)',
+                      }}
+                    >
+                      Your essential expenses ·{' '}
+                      {Math.round(
+                        (100 * Math.min(p.essentialExpenses, p.targetNetExpenses)) /
+                          (p.targetNetExpenses || 1)
+                      )}
+                      % of target · set in the Retire tab
+                    </div>
+                  </div>
+                  <Slider
+                    label="Spending ceiling"
+                    value={p.spendingCeilingPct}
+                    min={100}
+                    max={150}
+                    step={5}
+                    format={(v) => `${v}%`}
+                    annotation={(v) =>
+                      v > 100
+                        ? `${fmtGBP((v / 100) * p.targetNetExpenses)} — prosperity rule on`
+                        : 'Recovery only — raises never exceed your target'
+                    }
+                    onChange={set('spendingCeilingPct')}
+                    allowInput
+                    help="The most guardrails will let spending rise to in good times, as a percentage of your target. At 100% (recovery only), raises can restore earlier cuts but never exceed your target — surpluses accrue as a bigger cushion. Above 100% turns on the prosperity rule: strong markets let you spend more, up to this cap (mildly worsens solvency, since spending a surplus re-exposes it). Type a value directly to go beyond the slider range."
+                  />
+                  {/* Sensitivity preset (band + step) */}
+                  <div style={{ marginBottom: 20 }}>
+                    <div style={{ marginBottom: 6, display: 'flex', alignItems: 'center' }}>
+                      <span
+                        style={{
+                          color: 'var(--text-secondary)',
+                          fontSize: 11,
+                          letterSpacing: '0.07em',
+                          textTransform: 'uppercase',
+                          fontWeight: 500,
+                        }}
+                      >
+                        Sensitivity
+                      </span>
+                      <HelpTip
+                        title="Sensitivity"
+                        text="How reactive the guardrails are. Gentle: a wide tolerance band and small 5% steps — spending moves rarely and slowly. Responsive: a narrow band and larger steps — spending tracks the sustainable level more tightly. Standard sits between."
+                      />
+                    </div>
+                    <div
+                      style={{
+                        display: 'flex',
+                        borderRadius: 6,
+                        overflow: 'hidden',
+                        border: '1px solid var(--border-bright)',
+                      }}
+                    >
+                      {[
+                        { value: 'gentle', label: 'Gentle' },
+                        { value: 'standard', label: 'Standard' },
+                        { value: 'responsive', label: 'Responsive' },
+                      ].map((opt) => (
+                        <button
+                          key={opt.value}
+                          onClick={() => set('guardrailSensitivity')(opt.value)}
+                          style={{
+                            flex: 1,
+                            padding: '7px 10px',
+                            background:
+                              p.guardrailSensitivity === opt.value
+                                ? 'var(--accent-gold)'
+                                : 'var(--bg-input)',
+                            color:
+                              p.guardrailSensitivity === opt.value
+                                ? 'var(--accent-gold-text)'
+                                : 'var(--text-secondary)',
+                            border: 'none',
+                            cursor: 'pointer',
+                            fontFamily: 'var(--font-body)',
+                            fontSize: 12,
+                            fontWeight: p.guardrailSensitivity === opt.value ? 600 : 400,
+                            transition: 'all 0.15s',
+                          }}
+                        >
+                          {opt.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </>
+              )}
+              <InfoBox collapsible>
+                {
+                  'Each year of each Monte Carlo trial, the model checks what constant spending your current pot could sustain for the rest of the plan under central assumptions — accounting for the state pension and pension-access age, and never peeking at the trial’s own future returns.\n\n'
+                }
+                {
+                  'If your spending has drifted above that sustainable level it is trimmed a step; if it is comfortably below, it is restored (up to the ceiling). Cuts stop at your essential-expenses floor. This converts many would-be shortfalls into survivable spending squeezes, so lifetime solvency rises — at the cost of a lower realised standard of living in the bad trials, which the spending fan and summary make explicit.'
+                }
+              </InfoBox>
             </>
           )}
-          <InfoBox collapsible>
-            {
-              'Each year of each Monte Carlo trial, the model checks what constant spending your current pot could sustain for the rest of the plan under central assumptions — accounting for the state pension and pension-access age, and never peeking at the trial’s own future returns.\n\n'
+        </>
+      );
+
+    case 'Protection':
+      return <LifePoliciesEditor p={p} set={set} />;
+
+    case 'Household':
+      return (
+        <>
+          <InfoBox>
+            You and your partner each have your own pay, tax, pensions and savings — switch between
+            You and Partner above to edit them. Spending, the mortgage, debts, life events and the
+            assumptions are shared, and the plan runs until the younger of you reaches the Model to
+            Age.
+          </InfoBox>
+          <Toggle
+            label="Partnership"
+            value={p.partnership}
+            optA={{ value: 'married', label: 'Married / civil' }}
+            optB={{ value: 'cohabiting', label: 'Living together' }}
+            onChange={set('partnership')}
+            help={
+              'Married couples and civil partners pay no inheritance tax on what passes between them, an ISA stays an ISA for the survivor (an extra ISA allowance), and Marriage Allowance can move £1,260 of personal allowance to a basic-rate partner.\n\n' +
+              "Couples living together pay inheritance tax at 40% on what passes to the partner above the deceased's £325,000 nil-rate band — counting savings and, from April 2027, pensions (the home is left out here). An inherited ISA arrives as cash. Pensions pass to the nominated beneficiary either way."
             }
-            {
-              'If your spending has drifted above that sustainable level it is trimmed a step; if it is comfortably below, it is restored (up to the ceiling). Cuts stop at your essential-expenses floor. This converts many would-be shortfalls into survivable spending squeezes, so lifetime solvency rises — at the cost of a lower realised standard of living in the bad trials, which the spending fan and summary make explicit.'
-            }
+          />
+          {p.partnership === 'cohabiting' && (
+            <>
+              <Toggle
+                label="Wills leave savings to each other"
+                value={p.willsToEachOther ? 'yes' : 'no'}
+                optA={{ value: 'yes', label: 'Yes' }}
+                optB={{ value: 'no', label: 'No' }}
+                onChange={(v) => set('willsToEachOther')(v === 'yes')}
+                help="Without a will, a partner you aren't married to inherits nothing automatically under the intestacy rules: savings go to the deceased's relatives. The survivor still gets any pension where they're the nominated beneficiary (assumed here), and anything jointly owned."
+              />
+              {!p.willsToEachOther && (
+                <InfoBox>
+                  Without wills, the survivor would keep only the pensions. Worth putting wills in
+                  place.
+                </InfoBox>
+              )}
+            </>
+          )}
+          <Slider
+            label="Spending after a death"
+            value={p.survivorSpendingPct}
+            min={50}
+            max={100}
+            step={1}
+            format={(v) => `${v}%`}
+            onChange={set('survivorSpendingPct')}
+            allowInput
+            help="How much the household spends once one of you has died, as a share of what you spend together — applied to living costs and the retirement target. The default 72% comes from the Retirement Living Standards 2026 (Pensions UK): a one-person household's budget is 72% of a two-person one at the Moderate (£32,700 vs £45,400) and Comfortable (£45,400 vs £62,700) standards, and 62% at Minimum (£13,900 vs £22,500). The standards assume the home is owned outright."
+          />
+          <InfoBox>
+            To see what happens if one of you dies, use What if one of us dies? under the chart. The
+            Monte Carlo chart draws death ages for each of you from the ONS life tables.
           </InfoBox>
         </>
       );
@@ -3071,6 +4313,16 @@ function TabContent({ tab, p, set, derived, topUp, annuity }) {
             onChange={(v) => set('annuityEnabled')(v === 'yes')}
             help="Convert part of your pension into an income guaranteed for life, bought once at the age you choose. A plan decision, so it applies to the central projection as well as Monte Carlo."
           />
+          {scope && p.annuityEnabled && (
+            <Toggle
+              label="Bought from"
+              value={p.annuityOwner}
+              optA={{ value: 'self', label: 'Your pension' }}
+              optB={{ value: 'partner', label: "Partner's" }}
+              onChange={set('annuityOwner')}
+              help="Whose pension pot buys the annuity. It's a single-life annuity, so it stops when that person dies. Sizing to cover essential spending counts both your guaranteed incomes."
+            />
+          )}
           {p.annuityEnabled && <AnnuityControls p={p} set={set} annuity={annuity} />}
         </>
       );
@@ -3146,7 +4398,217 @@ function Divider() {
   return <div style={{ borderTop: '1px solid var(--border)', margin: '5px 0 6px' }} />;
 }
 
+// Year detail: one person's panel, a couple's (both alive), or a survivor's
+// year after a death (one person's panel with a note).
 function YearDetailPanel({ row, mobile = false }) {
+  if (row?.people && row.people.every((q) => q.status !== 'died'))
+    return <CoupleYearDetail row={row} mobile={mobile} />;
+  const died = row?.people?.find((q) => q.status === 'died');
+  if (!died) return <SingleYearDetail row={row} mobile={mobile} />;
+  const who = died.id === 'self' ? 'You' : 'Your partner';
+  return (
+    <>
+      <div
+        style={{
+          borderTop: '1px solid var(--border)',
+          padding: mobile ? '10px 14px 0' : '10px 20px 0',
+          color: 'var(--text-muted)',
+          fontSize: 11,
+          fontFamily: 'var(--font-body)',
+        }}
+      >
+        {who} died in this plan — the survivor's year
+        {row.partnerAge != null && died.id === 'self' ? ` (partner aged ${row.partnerAge})` : ''}.
+      </div>
+      <SingleYearDetail row={row} mobile={mobile} />
+    </>
+  );
+}
+
+// A couple's year: each partner's income and tax side by side, then the
+// household's spending, savings or drawdown, and pots.
+function CoupleYearDetail({ row, mobile }) {
+  const person = (q, title, accent) => {
+    const working = q.status === 'working';
+    const drawn = q.pensionDrawdown + q.isaWithdrawal + q.giaWithdrawal;
+    return (
+      <DetailSection
+        title={`${title} · ${q.age} · ${working ? 'working' : 'retired'}`}
+        accent={accent}
+      >
+        {working && <DetailLine label="Gross salary" value={fmtGBP(q.grossIncome)} />}
+        {working && q.employeeContribution > 0 && (
+          <DetailLine
+            label="− Pension sacrifice"
+            value={fmtGBP(q.employeeContribution)}
+            color="#4f8ef7"
+            indent={1}
+          />
+        )}
+        {q.statePensionGross > 0 && (
+          <DetailLine label="State pension" value={fmtGBP(q.statePensionGross)} color="#a78bfa" />
+        )}
+        {(q.dbPension?.gross ?? 0) > 0 && (
+          <DetailLine label="DB pension" value={fmtGBP(q.dbPension.gross)} color="#2dd4bf" />
+        )}
+        {q.annuityGross > 0 && (
+          <DetailLine label="Annuity" value={fmtGBP(q.annuityGross)} color="#e879f9" />
+        )}
+        {q.pensionDrawdown > 0 && (
+          <DetailLine label="Pension drawn" value={fmtGBP(q.pensionDrawdown)} color="#4f8ef7" />
+        )}
+        {(q.pensionSavedWithinAllowance ?? 0) > 0 && (
+          <DetailLine
+            label="of which saved, tax-free"
+            value={fmtGBP(q.pensionSavedWithinAllowance)}
+            color="#34d399"
+            indent={1}
+            dim
+          />
+        )}
+        {q.incomeTax > 0 && (
+          <DetailLine label="− Income tax" value={fmtGBP(q.incomeTax)} color="#f43f5e" indent={1} />
+        )}
+        {q.employeeNI > 0 && (
+          <DetailLine
+            label="− Employee NI"
+            value={fmtGBP(q.employeeNI)}
+            color="#fb923c"
+            indent={1}
+          />
+        )}
+        {q.studentLoanRepayment > 0 && (
+          <DetailLine
+            label="− Student loan"
+            value={fmtGBP(q.studentLoanRepayment)}
+            color="#a78bfa"
+            indent={1}
+          />
+        )}
+        <DetailLine
+          label={working ? 'Take-home' : 'Guaranteed income (net)'}
+          value={fmtGBP(q.netIncome ?? 0)}
+          bold
+        />
+        {drawn > 0 && (
+          <DetailLine
+            label="From ISA / GIA"
+            value={fmtGBP(q.isaWithdrawal + q.giaWithdrawal)}
+            color="#34d399"
+            dim
+          />
+        )}
+        {q.isaContribution + q.giaContribution > 0 && (
+          <DetailLine
+            label="→ Saved (ISA / GIA)"
+            value={`${fmtGBP(q.isaContribution)} / ${fmtGBP(q.giaContribution)}`}
+            color="#34d399"
+          />
+        )}
+        <DetailLine label="Pension" value={fmtGBP(q.pension.closingBalance)} color="#4f8ef7" />
+        <DetailLine label="ISA" value={fmtGBP(q.isa.closingBalance)} color="#34d399" />
+        <DetailLine label="GIA" value={fmtGBP(q.gia.closingBalance)} color="#e8b84b" />
+        {(q.gia.gainsRealisedTaxFree ?? 0) > 0 && (
+          <DetailLine
+            label="gains realised tax-free"
+            value={fmtGBP(q.gia.gainsRealisedTaxFree)}
+            color="#34d399"
+            indent={1}
+            dim
+          />
+        )}
+      </DetailSection>
+    );
+  };
+  const [you, partner] = row.people;
+  const spending = row.targetNetExpenses ?? row.livingExpenses ?? 0;
+  return (
+    <div
+      style={{
+        borderTop: '1px solid var(--border)',
+        padding: mobile ? '14px' : '14px 20px',
+        display: 'grid',
+        gridTemplateColumns: mobile ? '1fr' : 'repeat(3, 1fr)',
+        gap: mobile ? '16px 0' : '0 24px',
+      }}
+    >
+      {person(you, 'You', '#4f8ef7')}
+      {person(partner, 'Partner', '#e8b84b')}
+      <DetailSection title="Household" accent="#34d399">
+        <DetailLine
+          label={row.targetNetExpenses != null ? 'Retirement spending' : 'Living expenses'}
+          value={fmtGBP(spending)}
+        />
+        {row.mortgagePayment > 0 && (
+          <DetailLine label="+ Mortgage" value={fmtGBP(row.mortgagePayment)} color="#f43f5e" />
+        )}
+        {row.unsecuredDebtPayments > 0 && (
+          <DetailLine
+            label="+ Unsecured debts"
+            value={fmtGBP(row.unsecuredDebtPayments)}
+            color="#fb923c"
+          />
+        )}
+        {row.lifeCoverPremiums > 0 && (
+          <DetailLine
+            label="+ Life cover premiums"
+            value={fmtGBP(row.lifeCoverPremiums)}
+            color="#f472b6"
+          />
+        )}
+        {row.oneOffExpense > 0 && (
+          <DetailLine
+            label={`+ ${row.oneOffExpenseLabels.join(', ') || 'One-off expense'}`}
+            value={fmtGBP(row.oneOffExpense)}
+            color="#f43f5e"
+          />
+        )}
+        {row.windfall > 0 && (
+          <DetailLine
+            label={`Windfall: ${row.windfallLabels.join(', ')}`}
+            value={fmtGBP(row.windfall)}
+            color="var(--accent-gold)"
+          />
+        )}
+        <DetailLine label="Income, both of you (net)" value={fmtGBP(row.netIncome)} />
+        {row.marriageAllowance > 0 && (
+          <DetailLine
+            label="Marriage Allowance saving"
+            value={fmtGBP(row.marriageAllowance)}
+            color="#34d399"
+            indent={1}
+          />
+        )}
+        {row.saved > 0 && (
+          <DetailLine label="→ Saved" value={fmtGBP(row.saved)} color="#34d399" bold />
+        )}
+        {row.pensionDrawdown + row.isaWithdrawal + row.giaWithdrawal > 0 && (
+          <DetailLine
+            label="Drawn from pots"
+            value={fmtGBP(row.pensionDrawdown + row.isaWithdrawal + row.giaWithdrawal)}
+            color="#4f8ef7"
+            bold
+          />
+        )}
+        {row.giaCGT > 0 && (
+          <DetailLine label="− CGT" value={fmtGBP(row.giaCGT)} color="#f43f5e" indent={1} />
+        )}
+        {row.shortfall > 0 && (
+          <DetailLine label="Shortfall" value={`−${fmtGBP(row.shortfall)}`} color="#f43f5e" bold />
+        )}
+        <DetailLine
+          label="Pots, both of you"
+          value={fmtGBP(
+            row.pension.closingBalance + row.isa.closingBalance + row.gia.closingBalance
+          )}
+          bold
+        />
+      </DetailSection>
+    </div>
+  );
+}
+
+function SingleYearDetail({ row, mobile = false }) {
   if (!row) {
     return (
       <div
@@ -3201,11 +4663,34 @@ function YearDetailPanel({ row, mobile = false }) {
             indent={1}
           />
           <DetailLine label="Adjusted gross" value={fmtGBP(row.adjustedGrossIncome)} dim />
+          {(row.dbPension?.memberContribution ?? 0) > 0 && (
+            <DetailLine
+              label="− DB contribution (tax relief, no NI relief)"
+              value={fmtGBP(row.dbPension.memberContribution)}
+              color="#2dd4bf"
+              indent={1}
+            />
+          )}
           {(row.statePensionGross ?? 0) > 0 && (
             <DetailLine
               label="+ State pension (while working)"
               value={fmtGBP(row.statePensionGross)}
               color="#a78bfa"
+            />
+          )}
+          {(row.dbPension?.gross ?? 0) > 0 && (
+            <DetailLine
+              label="+ DB pension (while working)"
+              value={fmtGBP(row.dbPension.gross)}
+              color="#2dd4bf"
+            />
+          )}
+          {(row.dbPension?.lumpSumTaxFree ?? 0) > 0 && (
+            <DetailLine
+              label="DB tax-free cash (to GIA)"
+              value={fmtGBP(row.dbPension.lumpSumTaxFree)}
+              color="#2dd4bf"
+              dim
             />
           )}
           <DetailLine
@@ -3257,6 +4742,13 @@ function YearDetailPanel({ row, mobile = false }) {
               label="− Unsecured debts"
               value={fmtGBP(row.unsecuredDebtPayments)}
               color="#fb923c"
+            />
+          )}
+          {row.lifeCoverPremiums > 0 && (
+            <DetailLine
+              label="− Life cover premiums"
+              value={fmtGBP(row.lifeCoverPremiums)}
+              color="#f472b6"
             />
           )}
           {row.livingExpenses != null && row.livingExpenses > 0 && (
@@ -3452,6 +4944,15 @@ function YearDetailPanel({ row, mobile = false }) {
             indent={1}
             dim
           />
+          {(row.gia.gainsRealisedTaxFree ?? 0) > 0 && (
+            <DetailLine
+              label="gains realised tax-free"
+              value={fmtGBP(row.gia.gainsRealisedTaxFree)}
+              color="#34d399"
+              indent={2}
+              dim
+            />
+          )}
           <DetailLine
             label="GIA — closing"
             value={fmtGBP(row.gia.closingBalance)}
@@ -3474,15 +4975,23 @@ function YearDetailPanel({ row, mobile = false }) {
 
   const mortgagePayment = row.mortgage?.payment ?? 0;
   const unsecuredPayments = row.unsecuredDebtPayments ?? 0;
-  const totalObligations = row.targetNetExpenses + mortgagePayment + unsecuredPayments;
+  const premiums = row.lifeCoverPremiums ?? 0;
+  const totalObligations = row.targetNetExpenses + mortgagePayment + unsecuredPayments + premiums;
   // Guaranteed income (state pension + any annuity), net of its own tax, is
   // netted against the whole year's obligations — as the engine does.
   const spNet = row.statePensionNet ?? 0;
+  const dbNet = row.dbPensionNet ?? 0;
   const annuityNet = row.annuityNet ?? 0;
+  const hasDb = dbNet > 0;
   const hasAnnuity = (row.annuityGross ?? 0) > 0;
+  // Stacked as the engine taxes them: state pension, then DB, then annuity.
   const spCoversLiving = Math.min(spNet, totalObligations);
-  const annuityCovers = Math.min(annuityNet, Math.max(0, totalObligations - spCoversLiving));
-  const fromPotsNeeded = Math.max(0, totalObligations - spCoversLiving - annuityCovers);
+  const dbCovers = Math.min(dbNet, Math.max(0, totalObligations - spCoversLiving));
+  const annuityCovers = Math.min(
+    annuityNet,
+    Math.max(0, totalObligations - spCoversLiving - dbCovers)
+  );
+  const fromPotsNeeded = Math.max(0, totalObligations - spCoversLiving - dbCovers - annuityCovers);
   const grossFromPots =
     (row.taxFreePensionDrawdown ?? 0) +
     (row.taxablePensionDrawdown ?? 0) +
@@ -3490,8 +4999,14 @@ function YearDetailPanel({ row, mobile = false }) {
     (row.giaWithdrawal ?? 0);
   // Tax on the pot withdrawals alone: the year's income tax less the tax already
   // taken off the (net) guaranteed income shown in the first column.
+  const dbGross =
+    (row.dbPension?.gross ?? 0) +
+    ((row.dbPension?.lumpSum ?? 0) - (row.dbPension?.lumpSumTaxFree ?? 0));
   const guaranteedTax =
-    (row.statePensionGross ?? 0) - spNet + ((row.annuityGross ?? 0) - annuityNet);
+    (row.statePensionGross ?? 0) -
+    spNet +
+    (dbGross - dbNet) +
+    ((row.annuityGross ?? 0) - annuityNet);
   const potIncomeTax = Math.max(0, (row.incomeTax ?? 0) - guaranteedTax);
   const netFromPots = grossFromPots - potIncomeTax - (row.giaCGT ?? 0);
   const rate = fmtPct((row.investmentRate ?? 0) * 100);
@@ -3522,6 +5037,13 @@ function YearDetailPanel({ row, mobile = false }) {
             color="#a78bfa"
           />
         )}
+        {(row.dbPension?.lumpSumTaxFree ?? 0) > 0 && (
+          <DetailLine
+            label="DB tax-free cash (one-off)"
+            value={fmtGBP(row.dbPension.lumpSumTaxFree)}
+            color="#2dd4bf"
+          />
+        )}
         <DetailLine label="Living expenses" value={fmtGBP(row.targetNetExpenses)} />
         {hasMortgage && (
           <DetailLine label="+ Mortgage payment" value={fmtGBP(mortgagePayment)} color="#f43f5e" />
@@ -3540,6 +5062,9 @@ function YearDetailPanel({ row, mobile = false }) {
         {hasUnsecured && (
           <DetailLine label="+ Unsecured debts" value={fmtGBP(unsecuredPayments)} color="#fb923c" />
         )}
+        {premiums > 0 && (
+          <DetailLine label="+ Life cover premiums" value={fmtGBP(premiums)} color="#f472b6" />
+        )}
         <Divider />
         <DetailLine label="Total obligations" value={fmtGBP(totalObligations)} bold />
         {hasSP && (
@@ -3547,6 +5072,14 @@ function YearDetailPanel({ row, mobile = false }) {
             label="− State pension (net)"
             value={fmtGBP(spCoversLiving)}
             color="#a78bfa"
+            indent={1}
+          />
+        )}
+        {hasDb && (
+          <DetailLine
+            label="− DB pension (net)"
+            value={fmtGBP(dbCovers)}
+            color="#2dd4bf"
             indent={1}
           />
         )}
@@ -3764,6 +5297,15 @@ function YearDetailPanel({ row, mobile = false }) {
           indent={1}
           dim
         />
+        {(row.gia.gainsRealisedTaxFree ?? 0) > 0 && (
+          <DetailLine
+            label="gains realised tax-free"
+            value={fmtGBP(row.gia.gainsRealisedTaxFree)}
+            color="#34d399"
+            indent={2}
+            dim
+          />
+        )}
         <DetailLine
           label="GIA — closing"
           value={fmtGBP(row.gia.closingBalance)}
@@ -3844,10 +5386,17 @@ function useHistory(initializer) {
     [commit]
   );
   const replace = useCallback((next) => commit(next, null), [commit]);
+  // Couple mode: set one of the partner's own inputs.
+  const setPartner = useCallback(
+    (key) => (value) =>
+      commit((prev) => ({ ...prev, partner: { ...prev.partner, [key]: value } }), `partner.${key}`),
+    [commit]
+  );
 
   return {
     state: hist.present,
     set,
+    setPartner,
     replace,
     seal,
     undo,
@@ -3876,6 +5425,7 @@ export default function App() {
   const {
     state: p,
     set,
+    setPartner,
     replace: replaceP,
     seal: sealHistory,
     undo,
@@ -3891,6 +5441,46 @@ export default function App() {
     }
   });
   const [activeTab, setActiveTab] = useState('Personal');
+  // The changelog panel, and whether this version is newer than the one last
+  // seen on this device (a first visit counts as seen).
+  const [infoPanel, setInfoPanel] = useState(null); // null | 'changelog' | 'roadmap'
+  const [versionUnseen, setVersionUnseen] = useState(() => {
+    try {
+      const seen = localStorage.getItem('lastSeenVersion');
+      if (seen == null) localStorage.setItem('lastSeenVersion', APP_VERSION);
+      return seen != null && seen !== APP_VERSION;
+    } catch {
+      return false;
+    }
+  });
+  const closeInfoPanel = useCallback(() => setInfoPanel(null), []);
+  const openRoadmap = useCallback(() => setInfoPanel('roadmap'), []);
+  const openChangelog = useCallback(() => {
+    setInfoPanel('changelog');
+    setVersionUnseen(false);
+    try {
+      localStorage.setItem('lastSeenVersion', APP_VERSION);
+    } catch {
+      /* storage unavailable: the dot just shows again next time */
+    }
+  }, []);
+  // Couple mode: whose settings the sidebar shows, and the tabs it offers.
+  const couple = p.householdMode === 'couple';
+  const [editScope, setEditScope] = useState('self');
+  const scope = couple ? editScope : null;
+  const visibleTabs = tabsFor(couple, scope);
+  const shownTab = visibleTabs.includes(activeTab) ? activeTab : 'Personal';
+  // Couple mode: the chart's timeline is your age; your partner's ages are
+  // offset by this much. The plan runs until the younger of you reaches Model to Age.
+  const partnerOffset = couple ? p.currentAge - p.partner.currentAge : 0;
+  const horizonAge = p.maxAge + Math.max(0, partnerOffset);
+  // Editing the partner: their own settings over the shared ones, and a setter
+  // that sends per-person fields to the partner and shared ones to the household.
+  const pv = useMemo(() => partnerView(p), [p]);
+  const setPv = useCallback(
+    (key) => (PERSON_KEYS.has(key) ? setPartner(key) : set(key)),
+    [set, setPartner]
+  );
   const [realTerms, setRealTerms] = useState(false);
   const [logScale, setLogScale] = useState(false);
   // 'all' = total pot incl. locked pension · 'available' = spendable now (pension only from access age)
@@ -4018,12 +5608,7 @@ export default function App() {
   }
 
   function buildPots(p) {
-    const pots = {
-      pensionBalance: p.pensionBalance,
-      isaBalance: p.isaBalance,
-      giaBalance: p.giaBalance,
-      giaCostBasis: Math.min(p.giaCostBasis, p.giaBalance),
-    };
+    const pots = personPots(p);
     if (p.mortgageBalance > 0) {
       pots.mortgage = {
         balance: p.mortgageBalance,
@@ -4036,38 +5621,18 @@ export default function App() {
     if (p.unsecuredBalance > 0) {
       pots.unsecuredDebts = [{ balance: p.unsecuredBalance, monthlyPayment: p.unsecuredMonthly }];
     }
-    if (p.studentLoanPlan && p.studentLoanBalance > 0) {
-      pots.studentLoan = {
-        balance: p.studentLoanBalance,
-        repaymentStartYear: CURRENT_YEAR - p.studentLoanYears,
-      };
-    }
     return pots;
   }
 
-  const { chartData, summary, error } = useMemo(() => {
+  const { chartData, summary, error, baseline, coverGap } = useMemo(() => {
     try {
-      const profile = {
-        currentAge: p.currentAge,
-        currentYear: CURRENT_YEAR,
-        retirementAge: p.retirementAge,
-        grossIncome: p.grossIncome,
-        annualLivingExpenses: p.annualLivingExpenses,
-        employeePensionRate: effectiveEmployeePensionRate(p),
-        employerPensionRate: p.employerPensionPct / 100,
-        employerMatch: p.employerMatch,
-        employerMatchThreshold: p.employerMatchThreshold / 100,
-        niContributionYears: p.niContributionYears,
-        statePensionAge: p.statePensionAge,
-        statePensionDeferralYears: p.statePensionDeferralYears,
-        statePensionUprating: p.statePensionUprating,
-        topUpStatePension: p.topUpStatePension,
-        pensionAccessAge: p.pensionAccessAge,
-        studentLoanPlan: p.studentLoanPlan || null,
-        windfalls: p.windfalls,
-        oneOffExpenses: p.oneOffExpenses,
-        employmentChanges: p.employmentChanges,
-      };
+      // Couple mode's "what if one of us dies?": the chart shows the survivor's
+      // plan, compared with both of you alive (`baseline`).
+      const whatIf =
+        p.householdMode === 'couple' && p.deathScenario.enabled
+          ? { person: p.deathScenario.person, age: p.deathScenario.age }
+          : null;
+      const profile = buildProfile(p, whatIf);
       const rates = buildRates(p);
       const pots = buildPots(p);
 
@@ -4083,12 +5648,20 @@ export default function App() {
       };
 
       const result = projectLifecycle(profile, rates, pots, retirementOptions);
+      const baseline = whatIf
+        ? projectLifecycle(buildProfile(p), rates, pots, retirementOptions)
+        : null;
+      // The extra cover the survivor would need for their plan to stay funded.
+      const coverGap = whatIf ? solveCoverGap(profile, rates, pots, retirementOptions) : null;
 
       const toRow = (row) => ({
         age: row.age,
         phase: row.phase ?? 'accumulation',
-        pension: row.pension?.closingBalance ?? 0,
-        pensionTax: row.pension?.estimatedTaxOnWithdrawal ?? 0,
+        // Includes any pension a survivor inherited (couple mode).
+        pension: (row.pension?.closingBalance ?? 0) + (row.inheritedPension?.closingBalance ?? 0),
+        pensionTax:
+          (row.pension?.estimatedTaxOnWithdrawal ?? 0) +
+          (row.inheritedPension?.estimatedTaxOnWithdrawal ?? 0),
         isa: row.isa?.closingBalance ?? 0,
         gia: row.gia?.closingBalance ?? 0,
         mortgage: -(row.mortgage?.closingBalance ?? 0),
@@ -4119,9 +5692,9 @@ export default function App() {
         });
       }
 
-      return { chartData: data, summary: result.summary, error: null };
+      return { chartData: data, summary: result.summary, error: null, baseline, coverGap };
     } catch (e) {
-      return { chartData: [], summary: null, error: e.message };
+      return { chartData: [], summary: null, error: e.message, baseline: null, coverGap: null };
     }
   }, [p]);
 
@@ -4130,6 +5703,17 @@ export default function App() {
   const firstYearDetail = chartData[0]?._detail ?? null;
   const derivedSavings = firstYearDetail
     ? { amount: firstYearDetail.availableForSavings, netTakeHome: firstYearDetail.netTakeHome }
+    : null;
+
+  // The partner's Class 3 top-up result (couple mode), for their Personal tab.
+  const partnerSummary = summary?.people?.[1] ?? null;
+  const partnerTopUpInfo = partnerSummary
+    ? {
+        yearsBought: partnerSummary.class3YearsBought,
+        totalCost: partnerSummary.class3TotalCost,
+        niAccrued: partnerSummary.niYearsAccrued,
+        niWithTopUp: partnerSummary.niYearsWithTopUp,
+      }
     : null;
 
   // Voluntary Class 3 state-pension top-up result, surfaced in the Personal tab.
@@ -4159,27 +5743,8 @@ export default function App() {
       }
       setMcPending(true);
       try {
-        const mcProfile = {
-          currentAge: p.currentAge,
-          currentYear: CURRENT_YEAR,
-          retirementAge: p.retirementAge,
-          grossIncome: p.grossIncome,
-          annualLivingExpenses: p.annualLivingExpenses,
-          employeePensionRate: effectiveEmployeePensionRate(p),
-          employerPensionRate: p.employerPensionPct / 100,
-          employerMatch: p.employerMatch,
-          employerMatchThreshold: p.employerMatchThreshold / 100,
-          niContributionYears: p.niContributionYears,
-          statePensionAge: p.statePensionAge,
-          statePensionDeferralYears: p.statePensionDeferralYears,
-          statePensionUprating: p.statePensionUprating,
-          topUpStatePension: p.topUpStatePension,
-          pensionAccessAge: p.pensionAccessAge,
-          studentLoanPlan: p.studentLoanPlan || null,
-          windfalls: p.windfalls,
-          oneOffExpenses: p.oneOffExpenses,
-          employmentChanges: p.employmentChanges,
-        };
+        // Couple mode: Monte Carlo draws death ages itself, so no what-if death.
+        const mcProfile = buildProfile(p);
         const mcRates = buildRates(p);
         const mcPots = buildPots(p);
         const mcRetOpts = {
@@ -4215,6 +5780,7 @@ export default function App() {
             preRetirementEquity: p.preRetirementEquityPct / 100,
             postRetirementEquity: p.postRetirementEquityPct / 100,
             sex: p.sex,
+            partnerSex: p.partner.sex,
             // Also report how securely the essential floor is met, not just the
             // full target — what an annuity or guardrails aim to protect.
             essentialFloorReal: Math.min(p.essentialExpenses, p.targetNetExpenses),
@@ -4254,7 +5820,10 @@ export default function App() {
 
   const displaySummary = useMemo(() => {
     if (!realTerms || !summary) return summary;
-    const retF = Math.pow(1 / (1 + inflRate), p.retirementAge - p.currentAge);
+    const retF = Math.pow(
+      1 / (1 + inflRate),
+      (summary.householdRetirementAge ?? p.retirementAge) - p.currentAge
+    );
     // State pension is nominal at statePensionAge, so use that age for its real-terms factor
     const spF = Math.pow(
       1 / (1 + inflRate),
@@ -4281,7 +5850,7 @@ export default function App() {
       const byAge = new Map();
       for (const ev of list ?? []) {
         if (ev.enabled === false) continue;
-        if (!(ev.amount > 0) || ev.age < p.currentAge || ev.age > p.maxAge) continue;
+        if (!(ev.amount > 0) || ev.age < p.currentAge || ev.age > horizonAge) continue;
         const label = ev.label || defaultLabel;
         byAge.set(ev.age, byAge.has(ev.age) ? `${byAge.get(ev.age)}, ${label}` : label);
       }
@@ -4306,11 +5875,72 @@ export default function App() {
       ...collectHours(p.employmentChanges),
     ];
     return markers.length > 0 ? markers : null;
-  }, [p.windfalls, p.oneOffExpenses, p.employmentChanges, p.currentAge, p.retirementAge, p.maxAge]);
+  }, [
+    p.windfalls,
+    p.oneOffExpenses,
+    p.employmentChanges,
+    p.currentAge,
+    p.retirementAge,
+    horizonAge,
+  ]);
 
   // Annuity purchase age for the chart's reference line: the age the central
   // projection actually buys it (null when no annuity is bought).
   const annuityChartAge = summary?.annuity?.purchased ? summary.annuity.purchaseAge : null;
+  // Ages defined benefit pensions start within the projection (reference lines).
+  // Kept stable between renders unless the ages change, so the chart doesn't redraw.
+  const dbChartAgesKey = [
+    ...(summary?.dbPensions ?? []).map((d) => d.startAge),
+    ...(summary?.people?.[1]?.dbPensions ?? []).map((d) =>
+      d.startAge === null ? null : d.startAge + partnerOffset
+    ),
+  ]
+    .filter((a) => a !== null && a > p.currentAge)
+    .join(',');
+  const dbChartAges = useMemo(
+    () => (dbChartAgesKey ? dbChartAgesKey.split(',').map(Number) : null),
+    [dbChartAgesKey]
+  );
+
+  // Couple mode reference lines: your partner's retirement and state pension,
+  // and a death in the "what if" plan (on your age's timeline).
+  const coupleLinesKey = couple
+    ? [
+        partnerSummary?.retirementAge ?? p.partner.retirementAge,
+        partnerSummary?.statePensionStartAge ?? p.partner.statePensionAge,
+        p.deathScenario.enabled ? `${p.deathScenario.person}:${p.deathScenario.age}` : '',
+      ].join('|')
+    : '';
+  const coupleLines = useMemo(() => {
+    if (!coupleLinesKey) return null;
+    const [ret, sp, death] = coupleLinesKey.split('|');
+    const lines = [
+      {
+        age: Number(ret) + partnerOffset,
+        label: 'Partner retires',
+        color: 'rgba(232,184,75,0.35)',
+        labelColor: 'rgba(232,184,75,0.9)',
+      },
+      {
+        age: Number(sp) + partnerOffset,
+        label: 'Partner SP',
+        color: 'rgba(167,139,250,0.3)',
+        labelColor: 'rgba(167,139,250,0.85)',
+      },
+    ];
+    if (death) {
+      const [who, at] = death.split(':');
+      lines.push({
+        age: who === 'self' ? Number(at) : Number(at) + partnerOffset,
+        label: who === 'self' ? 'You die' : 'Partner dies',
+        color: 'rgba(244,63,94,0.55)',
+        labelColor: 'rgba(244,63,94,0.9)',
+        death: true,
+      });
+    }
+    return lines;
+  }, [coupleLinesKey, partnerOffset]);
+  const coupleLinesMc = useMemo(() => coupleLines?.filter((l) => !l.death) ?? null, [coupleLines]);
 
   // 4% rule: need 25× annual spending as a portfolio (1 / 0.04 = 25).
   // Expressed in the same terms as the chart (real or nominal).
@@ -4370,7 +6000,7 @@ export default function App() {
           {fmtPct(mcResults.solvency.solventForLife * 100)}
         </span>
         <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>
-          · to age {p.maxAge}: {fmtPct(mcResults.solvency.solventToHorizon * 100)}
+          · to age {horizonAge}: {fmtPct(mcResults.solvency.solventToHorizon * 100)}
         </span>
       </span>
     ) : null;
@@ -4424,19 +6054,30 @@ export default function App() {
             ? { label: 'Shortfall', value: `age ${firstShortfall.age}`, color: '#f43f5e' }
             : lastRetRow
               ? {
-                  label: `At ${p.maxAge}`,
+                  label: `At ${horizonAge}`,
                   value: fmtGBPShort(lastRetRow.pension + lastRetRow.isa + lastRetRow.gia),
                   color: '#34d399',
                 }
               : null,
-        {
-          label: 'State pension',
-          value:
-            displaySummary.projectedStatePension > 0
-              ? `${fmtGBPShort(displaySummary.projectedStatePension)}/yr`
-              : 'None',
-          color: '#a78bfa',
-        },
+        (() => {
+          // Couple mode: both state pensions, each from its own start age.
+          const partnerSp =
+            couple && partnerSummary
+              ? partnerSummary.projectedStatePension *
+                (realTerms
+                  ? Math.pow(
+                      1 / (1 + inflRate),
+                      Math.max(0, partnerSummary.statePensionStartAge - p.partner.currentAge)
+                    )
+                  : 1)
+              : 0;
+          const total = displaySummary.projectedStatePension + partnerSp;
+          return {
+            label: couple ? 'State pensions' : 'State pension',
+            value: total > 0 ? `${fmtGBPShort(total)}/yr` : 'None',
+            color: '#a78bfa',
+          };
+        })(),
       ].filter(Boolean)
     : [];
 
@@ -4458,6 +6099,50 @@ export default function App() {
   // layout below, so both show exactly the same controls and results.
   const viewToggles = (
     <>
+      {/* Household: just me, or a couple */}
+      <div
+        style={{
+          display: 'flex',
+          borderRadius: 5,
+          overflow: 'hidden',
+          border: '1px solid var(--border-bright)',
+        }}
+        role="group"
+        aria-label="Plan for"
+      >
+        {[
+          { value: 'single', label: 'Just me' },
+          { value: 'couple', label: 'Couple' },
+        ].map(({ value, label }) => {
+          const active = p.householdMode === value;
+          return (
+            <button
+              key={value}
+              aria-pressed={active}
+              onClick={() => set('householdMode')(value)}
+              title={
+                value === 'couple'
+                  ? 'Plan for two: each of you with your own pay, tax, pensions and savings, sharing spending and debts'
+                  : 'Plan for one person'
+              }
+              style={{
+                padding: '4px 10px',
+                background: active ? 'var(--accent-gold)' : 'transparent',
+                color: active ? 'var(--accent-gold-text)' : 'var(--text-muted)',
+                border: 'none',
+                cursor: 'pointer',
+                fontFamily: 'var(--font-mono)',
+                fontSize: 10,
+                fontWeight: 600,
+                letterSpacing: '0.06em',
+                transition: 'all 0.15s',
+              }}
+            >
+              {label}
+            </button>
+          );
+        })}
+      </div>
       {/* Theme switcher */}
       <div
         style={{
@@ -4754,12 +6439,18 @@ Use Available funds to see whether an early-retirement plan can bridge the gap u
   const tabContent = (
     <>
       <TabContent
-        tab={activeTab}
-        p={p}
-        set={set}
+        tab={shownTab}
+        p={scope === 'partner' ? pv : p}
+        set={scope === 'partner' ? setPv : set}
+        scope={scope}
         derived={derivedSavings}
-        topUp={topUpInfo}
+        topUp={scope === 'partner' ? partnerTopUpInfo : topUpInfo}
         annuity={summary?.annuity ?? null}
+        dbSummary={
+          scope === 'partner'
+            ? (summary?.people?.[1]?.dbPensions ?? [])
+            : (summary?.dbPensions ?? [])
+        }
       />
     </>
   );
@@ -4806,7 +6497,11 @@ Use Available funds to see whether an early-retirement plan can bridge the gap u
                 label="Net Worth at Retirement"
                 value={fmtGBPLarge(retNetWorth)}
                 color="var(--accent-gold)"
-                subtitle={`Age ${p.retirementAge} · year-end${realTerms ? " · today's £" : ''}`}
+                subtitle={
+                  couple
+                    ? `Both retired · you ${retYearEndRow?.age ?? p.retirementAge} · year-end${realTerms ? " · today's £" : ''}`
+                    : `Age ${p.retirementAge} · year-end${realTerms ? " · today's £" : ''}`
+                }
                 note={afterTaxNote(retNetWorth, retYearEndRow, 'with pension after tax')}
                 help={
                   "Pension + ISA + GIA balances at the end of your first retirement year, minus any outstanding debts. Matches the chart value at that age. Property equity is deliberately excluded, even though the mortgage liability is counted: the mortgage is a contractual cash-flow commitment that must be serviced regardless of house prices, whereas home equity is illiquid, costly to access, and shouldn't silently prop up a retirement plan. If a plan only works by selling or borrowing against your home, this tool is designed to show that as a shortfall rather than hide it. Defined benefit pensions and other illiquid assets are also excluded.\n\n" +
@@ -4819,7 +6514,17 @@ Use Available funds to see whether an early-retirement plan can bridge the gap u
                   retYearEndRow ? retYearEndRow.pension : displaySummary.pensionPot
                 )}
                 color="#4f8ef7"
-                subtitle={`ISA: ${fmtGBPLarge(retYearEndRow ? retYearEndRow.isa : displaySummary.isaBalance)} · GIA: ${fmtGBPLarge(retYearEndRow ? retYearEndRow.gia : displaySummary.giaBalance)}`}
+                subtitle={(() => {
+                  const people = retYearEndRow?._detail?.people;
+                  if (couple && people) {
+                    // Each partner's share of the (displayed) pension total.
+                    const [a, b] = people.map((q) => q.pension?.closingBalance ?? 0);
+                    const total = retYearEndRow.pension;
+                    const share = a + b > 0 ? a / (a + b) : 0.5;
+                    return `You: ${fmtGBPLarge(total * share)} · Partner: ${fmtGBPLarge(total * (1 - share))}`;
+                  }
+                  return `ISA: ${fmtGBPLarge(retYearEndRow ? retYearEndRow.isa : displaySummary.isaBalance)} · GIA: ${fmtGBPLarge(retYearEndRow ? retYearEndRow.gia : displaySummary.giaBalance)}`;
+                })()}
                 note={
                   retYearEndRow
                     ? afterTaxNote(retYearEndRow.pension, retYearEndRow, 'after income tax')
@@ -4835,7 +6540,7 @@ Use Available funds to see whether an early-retirement plan can bridge the gap u
                   firstShortfall
                     ? 'Shortfall from Age'
                     : lastRetRow
-                      ? `Wealth at Age ${p.maxAge}`
+                      ? `Wealth at Age ${horizonAge}`
                       : 'Total Debt'
                 }
                 value={
@@ -4870,33 +6575,78 @@ Use Available funds to see whether an early-retirement plan can bridge the gap u
                   firstShortfall
                     ? `Your pots run out at this age — combined pension, ISA, and GIA can no longer cover the inflation-adjusted target spending of ${fmtGBP(p.targetNetExpenses)}/yr. Consider increasing savings, reducing target expenses, or retiring later.`
                     : lastRetRow
-                      ? `Combined pension + ISA + GIA balance at age ${p.maxAge}, after funding all retirement spending. Property equity and other illiquid assets are deliberately not included — the projection never draws on your home, so any shortfall is shown honestly rather than backfilled by assumed downsizing or equity release.\n\n${PENSION_AFTER_TAX_HELP} What your heirs would pay on a pension left unspent depends on their own circumstances.`
+                      ? `Combined pension + ISA + GIA balance at age ${horizonAge}, after funding all retirement spending. Property equity and other illiquid assets are deliberately not included — the projection never draws on your home, so any shortfall is shown honestly rather than backfilled by assumed downsizing or equity release.\n\n${PENSION_AFTER_TAX_HELP} What your heirs would pay on a pension left unspent depends on their own circumstances.`
                       : 'Total outstanding debt (mortgage + unsecured + student loan) at retirement.'
                 }
               />
-              <StatCard
-                label="State Pension"
-                value={
-                  displaySummary.projectedStatePension > 0
-                    ? `${fmtGBPLarge(displaySummary.projectedStatePension)}/yr`
-                    : 'Not eligible'
-                }
-                color={displaySummary.projectedStatePension > 0 ? '#a78bfa' : 'var(--text-muted)'}
-                subtitle={(() => {
-                  const niShown = displaySummary.niYearsWithTopUp ?? displaySummary.niYearsAccrued;
-                  const bought = displaySummary.class3YearsBought ?? 0;
-                  const niLabel = `${niShown} NI yrs${bought > 0 ? ` (incl. ${bought} Class 3)` : ''}`;
-                  const startAge =
-                    displaySummary.statePensionStartAge ?? displaySummary.statePensionAge;
-                  if (displaySummary.projectedStatePension > 0) {
-                    return displaySummary.statePensionEligibleAtRetirement
-                      ? `From age ${startAge} · ${niLabel}`
-                      : `Starts age ${startAge} · ${niLabel}`;
+              {couple && partnerSummary ? (
+                (() => {
+                  // Each state pension in the money of the year it starts (or today's £).
+                  const realAt = (amount, start, age) =>
+                    realTerms
+                      ? amount * Math.pow(1 / (1 + inflRate), Math.max(0, start - age))
+                      : amount;
+                  const you = displaySummary.projectedStatePension;
+                  const youStart = displaySummary.statePensionStartAge;
+                  const partner = realAt(
+                    partnerSummary.projectedStatePension,
+                    partnerSummary.statePensionStartAge,
+                    p.partner.currentAge
+                  );
+                  const paid = [
+                    ...(summary?.dbPensions ?? []),
+                    ...(partnerSummary.dbPensions ?? []),
+                  ].filter((d) => d.startAge !== null);
+                  const db = paid.reduce((sum, d) => sum + d.pensionAtStartReal, 0);
+                  return (
+                    <StatCard
+                      label="State Pensions"
+                      value={
+                        you + partner > 0 ? `${fmtGBPLarge(you + partner)}/yr` : 'Not eligible'
+                      }
+                      color={you + partner > 0 ? '#a78bfa' : 'var(--text-muted)'}
+                      subtitle={`You ${fmtGBPLarge(you)} from ${youStart} · Partner ${fmtGBPLarge(partner)} from ${partnerSummary.statePensionStartAge}`}
+                      note={db > 0 ? `+ DB ${fmtGBPLarge(db)}/yr between you (today's £)` : null}
+                      help="Your two state pensions, each from its own start age (shown at your own ages), based on each of your National Insurance records. A new state pension can't generally be inherited, so the survivor keeps only their own. Any defined benefit pensions are shown below, in today's money."
+                    />
+                  );
+                })()
+              ) : (
+                <StatCard
+                  label="State Pension"
+                  value={
+                    displaySummary.projectedStatePension > 0
+                      ? `${fmtGBPLarge(displaySummary.projectedStatePension)}/yr`
+                      : 'Not eligible'
                   }
-                  return `Only ${niShown} qualifying NI yrs — need 10`;
-                })()}
-                help="Your projected state pension, based on total NI qualifying years accrued by retirement (plus any voluntary Class 3 years bought via the top-up toggle). This is a real government entitlement that rises each year at least in line with inflation (see State Pension Increases in the Personal tab), not an investment return. It offsets retirement expenses before drawing from personal pots."
-              />
+                  color={displaySummary.projectedStatePension > 0 ? '#a78bfa' : 'var(--text-muted)'}
+                  subtitle={(() => {
+                    const niShown =
+                      displaySummary.niYearsWithTopUp ?? displaySummary.niYearsAccrued;
+                    const bought = displaySummary.class3YearsBought ?? 0;
+                    const niLabel = `${niShown} NI yrs${bought > 0 ? ` (incl. ${bought} Class 3)` : ''}`;
+                    const startAge =
+                      displaySummary.statePensionStartAge ?? displaySummary.statePensionAge;
+                    if (displaySummary.projectedStatePension > 0) {
+                      return displaySummary.statePensionEligibleAtRetirement
+                        ? `From age ${startAge} · ${niLabel}`
+                        : `Starts age ${startAge} · ${niLabel}`;
+                    }
+                    return `Only ${niShown} qualifying NI yrs — need 10`;
+                  })()}
+                  note={(() => {
+                    // Defined benefit pensions paid within the projection, in today's money.
+                    const paid = (displaySummary.dbPensions ?? []).filter(
+                      (d) => d.startAge !== null
+                    );
+                    if (paid.length === 0) return null;
+                    const total = paid.reduce((sum, d) => sum + d.pensionAtStartReal, 0);
+                    const from = Math.min(...paid.map((d) => d.startAge));
+                    return `+ DB ${fmtGBPLarge(total)}/yr (today's £) from ${from}`;
+                  })()}
+                  help="Your projected state pension, based on total NI qualifying years accrued by retirement (plus any voluntary Class 3 years bought via the top-up toggle). This is a real government entitlement that rises each year at least in line with inflation (see State Pension Increases in the Personal tab), not an investment return. It offsets retirement expenses before drawing from personal pots. Any defined benefit pensions are shown below it, in today's money from when each starts; like the state pension, they're guaranteed income counted before your pots are drawn."
+                />
+              )}
             </div>
           );
         })()}
@@ -4995,10 +6745,13 @@ Use Available funds to see whether an early-retirement plan can bridge the gap u
           title="Monte Carlo results"
           text={
             `${mcResults ? mcResults.trialCount : 0} trials shown. Each trial varies investment returns (market factor) and inflation / BoE / wage growth (macro factor) using correlated random shocks.\n\n` +
-            'Solvent for life: the chance you never run out of money while still alive — the complement of the lifetime probability of ruin. Each trial that runs dry is weighted by the probability you live to see it (from UK population mortality for the selected sex, set in the Simulation tab), so dying with money left counts as success. Set high enough that the age horizon reaches ~100 for this to be meaningful.\n\n' +
+            'Solvent for life: the chance you never run out of money while still alive — the complement of the lifetime probability of ruin. Each trial that runs dry is weighted by the probability you live to see it (from ONS life tables for your sex and year of birth, set in the Simulation tab), so dying with money left counts as success. Set high enough that the age horizon reaches ~100 for this to be meaningful.\n\n' +
             'Running dry means being unable to meet your target spending — including the bridge years before your pension access age, when a locked pension you cannot yet touch does not count as available. Early access penalties are not modelled.\n\n' +
             'The "to age N" figure is the simpler fixed-horizon view: the fraction of trials solvent all the way to the model horizon, ignoring survival. It is always the more pessimistic of the two.\n\n' +
-            'Bands show the 10th–90th percentile range (faint) and 25th–75th range (stronger). Lines show the 5 key percentiles. The dotted curve is the probability of still being alive at each age.\n\n' +
+            'Bands show the 10th–90th percentile range (faint) and 25th–75th range (stronger). Lines show the 5 key percentiles. ' +
+            (couple
+              ? 'The dotted curve, P(at least one alive), is the probability that at least one of you is still alive at each of your ages.\n\n'
+              : 'The dotted curve is the probability of still being alive at each age.\n\n') +
             'Click and hold on a data point to isolate the single trial closest to that percentile at that age. Shortfall labels (▼ with age) show when each percentile path runs out of money.'
           }
         />
@@ -5099,8 +6852,11 @@ Use Available funds to see whether an early-retirement plan can bridge the gap u
           logScale={logScale}
           eventMarkers={eventMarkers}
           annuityAge={annuityChartAge}
+          dbPensionAges={dbChartAges}
+          extraLines={coupleLinesMc}
           retirementIsTarget={p.flexibleRetirement}
           survivalSeries={mcResults.solvency?.survival}
+          survivalLabel={couple ? (mobile ? 'P(≥1 alive)' : 'P(at least one alive)') : 'P(alive)'}
           shortfallMarkers={mcResults.solvency?.shortfallMarkers}
           shortfallAges={mcResults.shortfallAges}
           fundsView={fundsView}
@@ -5140,6 +6896,27 @@ Use Available funds to see whether an early-retirement plan can bridge the gap u
   );
   const mcExtras = (
     <>
+      {/* Couple mode: random deaths */}
+      {mcResults?.solvency?.couple && (
+        <div
+          style={{
+            margin: '12px 16px 0',
+            padding: '10px 13px',
+            borderRadius: 7,
+            border: '1px solid var(--border)',
+            background: 'var(--bg-card)',
+            color: 'var(--text-secondary)',
+            fontSize: 11,
+            fontFamily: 'var(--font-body)',
+            lineHeight: 1.5,
+          }}
+        >
+          Each trial draws a death age for each of you from the ONS life tables. One of you dies
+          within the plan in {fmtPct(mcResults.solvency.couple.deathInPlanProb * 100)} of trials;
+          the survivor runs short in {fmtPct(mcResults.solvency.couple.survivorShortfallProb * 100)}
+          . Solvent for life counts a shortfall only while one of you is alive.
+        </div>
+      )}
       {/* Flexible-retirement postponement summary */}
       {mcResults?.retirement?.flexible && (
         <div
@@ -5398,6 +7175,8 @@ Use Available funds to see whether an early-retirement plan can bridge the gap u
             logScale={logScale}
             eventMarkers={eventMarkers}
             annuityAge={annuityChartAge}
+            dbPensionAges={dbChartAges}
+            extraLines={coupleLines}
             fundsView={fundsView}
             compact={mobile}
             onSelectRow={mobile ? selectDetail : null}
@@ -5420,6 +7199,256 @@ Use Available funds to see whether an early-retirement plan can bridge the gap u
         ))}
     </>
   );
+  // ── "What if one of us dies?" (couple mode, deterministic chart) ───────────
+  const whatIf = p.deathScenario;
+  const deathAgeBounds = (who) =>
+    who === 'self'
+      ? [p.currentAge, horizonAge]
+      : [p.partner.currentAge, horizonAge - partnerOffset];
+  const setWhatIf = (patch) => {
+    const next = { ...whatIf, ...patch };
+    const [lo, hi] = deathAgeBounds(next.person);
+    next.age = Math.min(hi, Math.max(lo, Math.round(next.age)));
+    set('deathScenario')(next);
+  };
+  const potsOf = (row) =>
+    (row?.pension?.closingBalance ?? 0) +
+    (row?.inheritedPension?.closingBalance ?? 0) +
+    (row?.isa?.closingBalance ?? 0) +
+    (row?.gia?.closingBalance ?? 0);
+  const realAtAge = (age) => (realTerms ? Math.pow(1 / (1 + inflRate), age - p.currentAge) : 1);
+  const whatIfPanel =
+    couple && chartTab === 'det' ? (
+      <div
+        style={{
+          background: 'var(--bg-panel)',
+          border: '1px solid var(--border)',
+          borderRadius: 10,
+          padding: mobile ? '12px 14px' : '14px 20px',
+          margin: mobile ? '0 0 16px' : '16px 0 0',
+        }}
+      >
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: 12,
+            marginBottom: whatIf.enabled ? 14 : 6,
+          }}
+        >
+          <span
+            style={{
+              fontFamily: 'var(--font-display)',
+              fontSize: 16,
+              color: 'var(--text-primary)',
+            }}
+          >
+            What if one of us dies?
+          </span>
+          <div
+            style={{
+              display: 'flex',
+              borderRadius: 5,
+              overflow: 'hidden',
+              border: '1px solid var(--border-bright)',
+            }}
+          >
+            {['Off', 'On'].map((opt) => {
+              const active = whatIf.enabled === (opt === 'On');
+              return (
+                <button
+                  key={opt}
+                  aria-pressed={active}
+                  onClick={() => setWhatIf({ enabled: opt === 'On' })}
+                  style={{
+                    padding: '4px 12px',
+                    background: active ? 'var(--accent-gold)' : 'transparent',
+                    color: active ? 'var(--accent-gold-text)' : 'var(--text-muted)',
+                    border: 'none',
+                    cursor: 'pointer',
+                    fontFamily: 'var(--font-mono)',
+                    fontSize: 10,
+                    fontWeight: 600,
+                  }}
+                >
+                  {opt}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+        {!whatIf.enabled ? (
+          <div style={{ color: 'var(--text-muted)', fontSize: 12, lineHeight: 1.5 }}>
+            Show the survivor's plan if one of you dies at a chosen age: spending falls to{' '}
+            {p.survivorSpendingPct}%, the deceased's pay, state pension and any annuity stop, and
+            their savings and pensions pass to the survivor after any inheritance tax.
+          </div>
+        ) : (
+          <>
+            <div
+              style={{
+                display: 'grid',
+                gridTemplateColumns: mobile ? '1fr' : '1fr 1fr',
+                gap: mobile ? 0 : 24,
+              }}
+            >
+              <Toggle
+                label="Who dies"
+                value={whatIf.person}
+                optA={{ value: 'self', label: 'You' }}
+                optB={{ value: 'partner', label: 'Partner' }}
+                onChange={(v) => setWhatIf({ person: v })}
+              />
+              <Slider
+                label={whatIf.person === 'self' ? 'At your age' : "At your partner's age"}
+                value={whatIf.age}
+                min={deathAgeBounds(whatIf.person)[0]}
+                max={deathAgeBounds(whatIf.person)[1]}
+                step={1}
+                format={fmtAge}
+                onChange={(v) => setWhatIf({ age: v })}
+                allowInput
+              />
+            </div>
+            {(() => {
+              const survivorRows = chartData.map((d) => d._detail).filter(Boolean);
+              const bothRows = baseline?.yearlyBreakdown ?? [];
+              const end = (rows) => {
+                const last = rows.at(-1);
+                return last ? potsOf(last) * realAtAge(last.age) : 0;
+              };
+              const shortfallAge = (rows) => rows.find((r) => r.shortfall > 0)?.age ?? null;
+              const estate = summary?.estates?.[0] ?? null;
+              const cell = { fontFamily: 'var(--font-mono)', fontSize: 12, textAlign: 'right' };
+              const head = { ...cell, color: 'var(--text-muted)', fontSize: 10 };
+              const compare = [
+                [
+                  `Wealth at ${horizonAge}`,
+                  fmtGBPLarge(end(bothRows)),
+                  fmtGBPLarge(end(survivorRows)),
+                ],
+                [
+                  'Money runs short',
+                  shortfallAge(bothRows) ? `age ${shortfallAge(bothRows)}` : 'never',
+                  shortfallAge(survivorRows) ? `age ${shortfallAge(survivorRows)}` : 'never',
+                ],
+              ];
+              return (
+                <>
+                  <div
+                    style={{
+                      display: 'grid',
+                      gridTemplateColumns: '1.4fr 1fr 1fr',
+                      gap: '6px 12px',
+                      alignItems: 'baseline',
+                      margin: '4px 0 12px',
+                    }}
+                  >
+                    <span />
+                    <span style={head}>BOTH ALIVE</span>
+                    <span style={head}>SURVIVOR'S PLAN</span>
+                    {compare.map(([label, a, b]) => (
+                      <Fragment key={label}>
+                        <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
+                          {label}
+                        </span>
+                        <span style={cell}>{a}</span>
+                        <span style={{ ...cell, color: 'var(--accent-gold)' }}>{b}</span>
+                      </Fragment>
+                    ))}
+                  </div>
+                  {estate ? (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                      <DetailLine
+                        label={`Inheritance tax at the death (${estate.year})`}
+                        value={
+                          estate.inheritanceTax > 0
+                            ? fmtGBP(estate.inheritanceTax)
+                            : p.partnership === 'married'
+                              ? 'None (spouse exemption)'
+                              : 'None (under £325k)'
+                        }
+                        color={estate.inheritanceTax > 0 ? '#f43f5e' : undefined}
+                      />
+                      <DetailLine
+                        label={`Pension passed on (${estate.inheritedPensionTaxFree ? 'tax-free to draw' : 'taxed as income'})`}
+                        value={fmtGBP(estate.toSurvivor.pension)}
+                        color="#4f8ef7"
+                      />
+                      <DetailLine
+                        label={
+                          p.partnership === 'married'
+                            ? 'Savings passed on (ISA stays an ISA)'
+                            : 'Savings passed on (ISA becomes cash)'
+                        }
+                        value={fmtGBP(estate.toSurvivor.isa + estate.toSurvivor.gia)}
+                        color="#34d399"
+                      />
+                      {estate.toOthers.isa + estate.toOthers.gia > 0 && (
+                        <DetailLine
+                          label="Savings to relatives (no will)"
+                          value={fmtGBP(estate.toOthers.isa + estate.toOthers.gia)}
+                          color="#f43f5e"
+                        />
+                      )}
+                      {estate.survivorDbPension > 0 && (
+                        <DetailLine
+                          label="DB survivor's pension"
+                          value={`${fmtGBP(estate.survivorDbPension)}/yr`}
+                          color="#2dd4bf"
+                        />
+                      )}
+                      {estate.lifeCover?.paid > 0 && (
+                        <DetailLine
+                          label={
+                            estate.lifeCover.toMortgage > 0
+                              ? `Life cover & death-in-service (${fmtGBP(estate.lifeCover.toMortgage)} cleared the mortgage)`
+                              : 'Life cover & death-in-service'
+                          }
+                          value={fmtGBP(estate.lifeCover.paid)}
+                          color="#f472b6"
+                        />
+                      )}
+                      {coverGap && (
+                        <DetailLine
+                          label="Cover gap (today's £)"
+                          value={
+                            coverGap.fundedWithoutExtra
+                              ? 'None — fully funded'
+                              : coverGap.exceedsMax
+                                ? 'Over £20m'
+                                : fmtGBP(coverGap.gap)
+                          }
+                          color={coverGap.fundedWithoutExtra ? '#34d399' : '#f43f5e'}
+                          bold
+                        />
+                      )}
+                      {coverGap && !coverGap.fundedWithoutExtra && (
+                        <div style={{ color: 'var(--text-muted)', fontSize: 11 }}>
+                          More cover paid on this death that would keep the survivor's plan from
+                          ever running short — on top of any cover above. Add a policy in the
+                          Protection tab to see it close the gap.
+                        </div>
+                      )}
+                      <div style={{ color: 'var(--text-muted)', fontSize: 11, marginTop: 6 }}>
+                        Amounts in the money of the year of the death. Spending falls to{' '}
+                        {p.survivorSpendingPct}% (Household tab).
+                      </div>
+                    </div>
+                  ) : (
+                    <div style={{ color: 'var(--text-muted)', fontSize: 11 }}>
+                      The death falls after the end of the plan.
+                    </div>
+                  )}
+                </>
+              );
+            })()}
+          </>
+        )}
+      </div>
+    ) : null;
+
   const snapshotTable = (
     <>
       {/* Snapshot table — deterministic tab only */}
@@ -5676,7 +7705,8 @@ Use Available funds to see whether an early-retirement plan can bridge the gap u
                 borderTop: landscape ? 'none' : '1px solid var(--border)',
               }}
             >
-              <SectionPicker value={activeTab} onChange={setActiveTab} />
+              {couple && <ScopeSwitch scope={editScope} onChange={setEditScope} />}
+              <SectionPicker value={shownTab} onChange={setActiveTab} tabs={visibleTabs} />
               <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '14px 14px 6px' }}>
                 {errorBanner}
                 {tabContent}
@@ -5725,6 +7755,30 @@ Use Available funds to see whether an early-retirement plan can bridge the gap u
               >
                 github.com/sambloom92/savings-planner
               </a>
+              <div style={{ marginTop: 10 }}>
+                <VersionButton
+                  onClick={() => {
+                    closeSheet();
+                    openChangelog();
+                  }}
+                  unseen={versionUnseen}
+                />
+                <span style={{ margin: '0 10px', color: 'var(--text-muted)' }}>·</span>
+                <RoadmapButton
+                  onClick={() => {
+                    closeSheet();
+                    openRoadmap();
+                  }}
+                />
+              </div>
+            </Sheet>
+          )}
+          {infoPanel && (
+            <Sheet
+              title={infoPanel === 'roadmap' ? 'Roadmap' : "What's new"}
+              onClose={closeInfoPanel}
+            >
+              <InfoPanelContent tab={infoPanel} onTab={setInfoPanel} />
             </Sheet>
           )}
 
@@ -5745,6 +7799,7 @@ Use Available funds to see whether an early-retirement plan can bridge the gap u
                 {chartRightControls}
               </div>
               {chartTab === 'mc' && mcExtras}
+              {whatIfPanel}
               {snapshotTable}
             </Sheet>
           )}
@@ -5838,6 +7893,8 @@ Use Available funds to see whether an early-retirement plan can bridge the gap u
             overflow: 'hidden',
           }}
         >
+          {/* Couple mode: whose settings */}
+          {couple && <ScopeSwitch scope={editScope} onChange={setEditScope} />}
           {/* Tab bar */}
           <div
             style={{
@@ -5847,22 +7904,22 @@ Use Available funds to see whether an early-retirement plan can bridge the gap u
               flexShrink: 0,
             }}
           >
-            {TABS.map((tab) => (
+            {visibleTabs.map((tab) => (
               <button
                 key={tab}
                 title={TAB_HELP[tab]}
                 onClick={() => setActiveTab(tab)}
                 style={{
                   padding: '9px 4px',
-                  background: activeTab === tab ? 'var(--bg-card)' : 'transparent',
+                  background: shownTab === tab ? 'var(--bg-card)' : 'transparent',
                   border: 'none',
                   borderBottom:
-                    activeTab === tab ? '2px solid var(--accent-gold)' : '2px solid transparent',
-                  color: activeTab === tab ? 'var(--accent-gold)' : 'var(--text-muted)',
+                    shownTab === tab ? '2px solid var(--accent-gold)' : '2px solid transparent',
+                  color: shownTab === tab ? 'var(--accent-gold)' : 'var(--text-muted)',
                   cursor: 'pointer',
                   fontFamily: 'var(--font-body)',
                   fontSize: 11,
-                  fontWeight: activeTab === tab ? 600 : 400,
+                  fontWeight: shownTab === tab ? 600 : 400,
                   letterSpacing: '0.03em',
                   transition: 'all 0.15s',
                 }}
@@ -5993,6 +8050,7 @@ Use Available funds to see whether an early-retirement plan can bridge the gap u
             <YearDetailPanel row={hoveredRow} />
           </div>
 
+          {whatIfPanel}
           {snapshotTable}
         </main>
       </div>
@@ -6003,9 +8061,13 @@ Use Available funds to see whether an early-retirement plan can bridge the gap u
           background: 'var(--bg-panel)',
           display: 'flex',
           justifyContent: 'center',
+          alignItems: 'center',
+          gap: 18,
           flexShrink: 0,
         }}
       >
+        <VersionButton onClick={openChangelog} unseen={versionUnseen} />
+        <RoadmapButton onClick={openRoadmap} />
         <a
           href="https://github.com/sambloom92/savings-planner"
           target="_blank"
@@ -6023,6 +8085,11 @@ Use Available funds to see whether an early-retirement plan can bridge the gap u
           github.com/sambloom92/savings-planner
         </a>
       </footer>
+      {infoPanel && !mobile && (
+        <Dialog title={infoPanel === 'roadmap' ? 'Roadmap' : "What's new"} onClose={closeInfoPanel}>
+          <InfoPanelContent tab={infoPanel} onTab={setInfoPanel} />
+        </Dialog>
+      )}
     </div>
   );
 }

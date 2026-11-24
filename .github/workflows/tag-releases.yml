@@ -1,0 +1,32 @@
+name: Tag releases
+
+# Tags each release (vX.Y.Z) on main: past releases from releases.json, and
+# the version in package.json on the commit that brought it. Only adds tags
+# that don't exist yet, so it's safe on every push.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  tag:
+    name: Create missing release tags
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Tag and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          node scripts/tag-releases.mjs
+          git push origin --tags

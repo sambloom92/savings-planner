@@ -174,6 +174,13 @@ function assertNonNegativeFinite(value, name) {
  *                              contributing at least employerMatchThreshold. Default false.
  *   employerMatchThreshold?: number - Minimum employee fraction of gross (0–1) that
  *                              unlocks the full employer contribution when matching. Default 0.
+ *   netPayContributions?: number - Other pension contributions already deducted from
+ *                              pay for income tax (e.g. to a defined benefit scheme
+ *                              under a net pay arrangement), in GBP. They lower taxable
+ *                              pay, so less sacrifice reaches the target. Default 0.
+ *   otherPensionInput?: number - Other pension input using the same annual allowance
+ *                              (e.g. a DB scheme's pension input amount), in GBP.
+ *                              Default 0.
  * }} [options]
  * @returns {{
  *   grossIncome:            number,
@@ -211,7 +218,11 @@ export function optimalEmployeePensionContribution(grossIncome, employerRate, op
     targetIncome: targetOverride,
     employerMatch = false,
     employerMatchThreshold = 0,
+    netPayContributions = 0,
+    otherPensionInput = 0,
   } = options;
+  assertNonNegativeFinite(netPayContributions, 'options.netPayContributions');
+  assertNonNegativeFinite(otherPensionInput, 'options.otherPensionInput');
   if (typeof scaleFactor !== 'number' || !isFinite(scaleFactor) || scaleFactor <= 0)
     throw new RangeError('scaleFactor must be a positive finite number');
   if (typeof employerMatch !== 'boolean')
@@ -245,7 +256,8 @@ export function optimalEmployeePensionContribution(grossIncome, employerRate, op
   const thresholdAmt = employerMatch ? round2(grossIncome * employerMatchThreshold) : 0;
 
   // Sacrifice needed to reach the tax target (0 if pay is already at/below it).
-  const taxDrivenEmployee = Math.max(0, round2(grossIncome - targetIncome));
+  // Net-pay contributions have already come off taxable pay.
+  const taxDrivenEmployee = Math.max(0, round2(grossIncome - netPayContributions - targetIncome));
 
   // With matching, contribute at least the required minimum to earn the full
   // employer contribution (we assume the saver maximises the offer). Otherwise
@@ -254,10 +266,13 @@ export function optimalEmployeePensionContribution(grossIncome, employerRate, op
     ? Math.max(taxDrivenEmployee, thresholdAmt)
     : taxDrivenEmployee;
 
-  // Adjusted income for the taper = threshold income + all contributions
-  //   = (gross − employee) + (employee + employer) = gross + employer — constant,
-  // because the employer amount is fixed at its maximum here.
-  const adjustedIncomeForTaper = round2(grossIncome + employerContribution);
+  // Adjusted income for the taper = threshold income + all pension input
+  //   = (gross − employee − netPay) + (employee + employer + otherInput)
+  //   = gross − netPay + employer + otherInput — constant, because the
+  // employer amount is fixed at its maximum here.
+  const adjustedIncomeForTaper = round2(
+    grossIncome - netPayContributions + employerContribution + otherPensionInput
+  );
 
   // Largest employee contribution that keeps the total within the allowance.
   // When matching, never drop below the threshold — that would forfeit the whole
@@ -265,7 +280,7 @@ export function optimalEmployeePensionContribution(grossIncome, employerRate, op
   // even if the employer's own contribution then pushes the total past the
   // allowance (an excess the model flags but does not quantify).
   const ceilingFor = (allowance) => {
-    const room = round2(allowance - employerContribution);
+    const room = round2(allowance - employerContribution - otherPensionInput);
     return employerMatch ? Math.max(thresholdAmt, room) : Math.max(0, room);
   };
 
@@ -273,7 +288,10 @@ export function optimalEmployeePensionContribution(grossIncome, employerRate, op
   // dependence with a fixed-point iteration.
   let employeeContribution = desiredEmployee;
   for (let i = 0; i < 12; i++) {
-    const thresholdIncome = Math.max(0, round2(grossIncome - employeeContribution));
+    const thresholdIncome = Math.max(
+      0,
+      round2(grossIncome - netPayContributions - employeeContribution)
+    );
     const allowance = taperedAnnualAllowance(thresholdIncome, adjustedIncomeForTaper);
     const next = Math.min(desiredEmployee, ceilingFor(allowance));
     if (Math.abs(next - employeeContribution) < 0.005) {
@@ -285,21 +303,23 @@ export function optimalEmployeePensionContribution(grossIncome, employerRate, op
 
   // Allowance consistent with the settled contribution (adjusted income constant).
   const annualAllowance = taperedAnnualAllowance(
-    Math.max(0, round2(grossIncome - employeeContribution)),
+    Math.max(0, round2(grossIncome - netPayContributions - employeeContribution)),
     adjustedIncomeForTaper
   );
 
   const totalContribution = round2(employeeContribution + employerContribution);
   const cappedByAllowance = employeeContribution + 0.005 < desiredEmployee;
-  const annualAllowanceBreached = totalContribution > annualAllowance + 0.005;
+  const annualAllowanceBreached = totalContribution + otherPensionInput > annualAllowance + 0.005;
   const adjustedGrossIncome = round2(grossIncome - employeeContribution);
   const employeeRate = grossIncome > 0 ? round4(employeeContribution / grossIncome) : 0;
   const effectiveEmployerRate = grossIncome > 0 ? round4(employerContribution / grossIncome) : 0;
 
   // Which high-tax bands the sacrifice reaches into: a band [lo, hi) is (partly)
-  // cleared when some removed income lay inside it.
+  // cleared when some removed taxable pay lay inside it. Taxable pay runs from
+  // gross less any net-pay contributions, down by the sacrifice.
+  const taxableTop = round2(grossIncome - netPayContributions);
   const removedIn = (lo, hi) =>
-    round2(Math.min(grossIncome, hi) - Math.max(adjustedGrossIncome, lo)) > 0.005;
+    round2(Math.min(taxableTop, hi) - Math.max(taxableTop - employeeContribution, lo)) > 0.005;
   const bandsCleared = [];
   if (removedIn(additionalRateThreshold, Infinity)) bandsCleared.push('additionalRate');
   if (removedIn(taperThreshold, additionalRateThreshold)) bandsCleared.push('paTaper');
