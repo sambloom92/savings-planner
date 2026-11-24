@@ -1794,6 +1794,11 @@ export function projectLifecycle(
             gia: 0,
           })
         : growPotsInRetirement(s.P, s.rate);
+      // The rest of each partner's own CGT allowance, used at the year end.
+      s.gainsHarvested = harvestGainsWithinExemption(
+        s.P,
+        round2(Math.max(0, exempt - s.exemptUsed - s.bed.gain))
+      );
       s.niQualifyingYear = s.working ? recordNiQualifyingYear(s.P, s.pay) : false;
     }
 
@@ -1861,6 +1866,7 @@ export function projectLifecycle(
       gia: {
         openingBalance: sum((s) => s.open.gia),
         growthAmount: sum((s) => s.growth.giaGrowth),
+        gainsRealisedTaxFree: sum((s) => s.gainsHarvested),
         closingBalance: sum((s) => s.P.gia),
         closingCostBasis: sum((s) => s.P.costBasis),
         unrealisedGain: sum((s) => s.P.gia - s.P.costBasis),
@@ -1981,6 +1987,7 @@ export function projectLifecycle(
       gia: {
         openingBalance: s.open.gia,
         growthAmount: s.growth.giaGrowth,
+        gainsRealisedTaxFree: s.gainsHarvested,
         closingBalance: P.gia,
         closingCostBasis: P.costBasis,
       },

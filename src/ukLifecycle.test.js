@@ -2798,6 +2798,31 @@ describe('couple mode — both alive', () => {
     near(row.people[1].giaContribution, row.saved - 40_000);
   });
 
+  it('each partner uses their own CGT allowance every year', () => {
+    // Both ISAs fill from pay, so nothing is sold; each partner's GIA holds a
+    // £30,000 gain, and £3,000 of each is realised at the year end.
+    const r = projectLifecycle(
+      {
+        ...earner,
+        grossIncome: 90_000,
+        partner: {
+          ...nonEarner,
+          grossIncome: 20_000,
+          pots: { giaBalance: 50_000, giaCostBasis: 20_000 },
+        },
+      },
+      { savingsRate: 0.05, wageGrowthRate: 0, inflationRate: 0 },
+      { giaBalance: 50_000, giaCostBasis: 20_000 }
+    );
+    const row = r.yearlyBreakdown[0];
+    assert.deepEqual(
+      row.people.map((p) => p.gia.gainsRealisedTaxFree),
+      [3_000, 3_000]
+    );
+    assert.equal(row.gia.gainsRealisedTaxFree, 6_000);
+    assert.equal(row.people[0].gia.closingCostBasis, 23_000);
+  });
+
   it('two retirees each use their whole personal allowance — no tax on £30k', () => {
     // UFPLS: £12,570 of taxable room ÷ 75% = £16,760 each, tax-free. £30k is
     // spent; the other £3,520 of the partner's allowance is drawn and saved.

@@ -3966,6 +3966,15 @@ function CoupleYearDetail({ row, mobile }) {
         <DetailLine label="Pension" value={fmtGBP(q.pension.closingBalance)} color="#4f8ef7" />
         <DetailLine label="ISA" value={fmtGBP(q.isa.closingBalance)} color="#34d399" />
         <DetailLine label="GIA" value={fmtGBP(q.gia.closingBalance)} color="#e8b84b" />
+        {(q.gia.gainsRealisedTaxFree ?? 0) > 0 && (
+          <DetailLine
+            label="gains realised tax-free"
+            value={fmtGBP(q.gia.gainsRealisedTaxFree)}
+            color="#34d399"
+            indent={1}
+            dim
+          />
+        )}
       </DetailSection>
     );
   };
