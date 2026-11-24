@@ -564,6 +564,103 @@ describe('couple mode: random death ages', () => {
   });
 });
 
+describe('couple mode: working longer helps', () => {
+  // A reported plan: you retire at 45 and your partner works on, with living
+  // costs of £65,000 and a £30,000 retirement target. Spending used to stay at
+  // living costs until both had retired, so her later retirement lowered
+  // solvency (82.0% retiring at 50, 79.1% at 60 on these trials): her pay
+  // mostly went on that spending, which couldn't flex in bad markets. With
+  // spending halfway between the two while one of you works, it no longer does.
+  const person = (v) => ({
+    employeePensionRate: v.employee,
+    employerPensionRate: v.employer,
+    employerMatch: false,
+    niContributionYears: v.niYears,
+    statePensionAge: 68,
+    statePensionDeferralYears: 0,
+    topUpStatePension: true,
+    pensionAccessAge: 57,
+    dbPensions: [],
+    employmentChanges: [],
+    currentAge: v.age,
+    retirementAge: v.retire,
+    grossIncome: v.pay,
+  });
+  const plan = (partnerRetires) =>
+    runMonteCarlo(
+      {
+        ...person({
+          age: 34,
+          retire: 45,
+          pay: 106_000,
+          employee: 0.11,
+          employer: 0.15,
+          niYears: 13,
+        }),
+        currentYear: 2026,
+        annualLivingExpenses: 65_000,
+        partner: {
+          ...person({
+            age: 32,
+            retire: partnerRetires,
+            pay: 75_000,
+            employee: 0.05,
+            employer: 0.03,
+            niYears: 10,
+          }),
+          studentLoanPlan: 'plan2',
+          pots: {
+            pensionBalance: 50_000,
+            isaBalance: 50_000,
+            studentLoan: { balance: 30_000, repaymentStartYear: 2016 },
+          },
+        },
+        partnership: 'married',
+        survivorSpendingShare: 0.72,
+        spendingShiftAtFirstRetirement: 0.5,
+      },
+      {
+        savingsRate: 0.07,
+        retirementRate: 0.046,
+        wageGrowthRate: 0.01,
+        mortgageRate: 0.06,
+        inflationRate: 0.03,
+        boeRate: 0.045,
+        fiscalDragRate: 0.01,
+      },
+      {
+        pensionBalance: 250_000,
+        isaBalance: 185_000,
+        giaBalance: 70_000,
+        giaCostBasis: 70_000,
+        mortgage: { balance: 330_000, termYears: 20, type: 'repayment', startAge: 28 },
+      },
+      {
+        targetNetAnnualExpenses: 30_000,
+        maxAge: 95,
+        takePCLS: true,
+        glideStartYears: 5,
+        glideEndYears: 5,
+        flexibleRetirement: true,
+        maxRetirementDelayYears: 5,
+        spendingGuardrails: { floor: 25_000, ceilingPct: 100, band: 0.2, step: 0.1 },
+      },
+      {
+        trials: 200,
+        preRetirementEquity: 1,
+        postRetirementEquity: 0.4,
+        sex: 'male',
+        partnerSex: 'female',
+      }
+    ).solvency.solventForLife;
+
+  it("your partner retiring later doesn't lower solvency", () => {
+    const at50 = plan(50);
+    const at60 = plan(60);
+    assert.ok(at60 >= at50, `retiring at 60: ${at60}, at 50: ${at50}`);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Summary
 // ---------------------------------------------------------------------------
