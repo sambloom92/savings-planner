@@ -237,6 +237,12 @@ function amortiseYear(balance, monthlyRate, monthlyPayment, monthlyOverpayment =
  *   survivorSpendingShare?: number,         - Household spending after a death, as a share of
  *                                             the couple's (default 0.72, Retirement Living
  *                                             Standards 2026).
+ *   spendingShiftAtFirstRetirement?: number, - While one partner has retired and the other
+ *                                             works: how far household spending moves from
+ *                                             annualLivingExpenses toward the retirement
+ *                                             target, 0–1. 0 (the default) keeps living costs
+ *                                             until both have retired; 0.5 is halfway; 1
+ *                                             switches to the target at the first retirement.
  *   statePensionUprating?:  string,         - 'triple-lock' (default): each April the state
  *                                             pension rises by the highest of earnings growth,
  *                                             CPI and 2.5%. 'adjusted': the announced reform —
@@ -353,6 +359,7 @@ export function projectLifecycle(
     partnership = 'married',
     willsToEachOther = true,
     survivorSpendingShare = COUPLE_DEFAULTS.survivorSpendingShare,
+    spendingShiftAtFirstRetirement = 0,
     death = null,
     // Couple mode: life insurance policies (see policyInForce).
     lifePolicies = [],
@@ -406,6 +413,11 @@ export function projectLifecycle(
       !(survivorSpendingShare > 0 && survivorSpendingShare <= 1)
     )
       throw new RangeError('survivorSpendingShare must be in (0, 1]');
+    if (
+      typeof spendingShiftAtFirstRetirement !== 'number' ||
+      !(spendingShiftAtFirstRetirement >= 0 && spendingShiftAtFirstRetirement <= 1)
+    )
+      throw new RangeError('spendingShiftAtFirstRetirement must be in [0, 1]');
   }
   const couple = partner !== null;
   const people = couple ? [self, partner] : [self];
@@ -1727,8 +1739,10 @@ export function projectLifecycle(
     const mort = mortgageYear(!allRetired);
     const unsec = unsecuredDebtsYear();
     const debtPayments = round2(mort.payment + unsec.payments);
-    // Living costs while either partner works; the retirement target once both
-    // have stopped (flexed by any guardrails).
+    // Living costs while both work; the retirement target once both have
+    // stopped (flexed by any guardrails). In between, while one has retired,
+    // spending has moved `spendingShiftAtFirstRetirement` of the way from one
+    // to the other.
     let guardrailAction = 'none';
     let spending;
     if (allRetired) {
@@ -1740,6 +1754,11 @@ export function projectLifecycle(
         );
       const targetReal = guardrails ? retirement.grSpendReal : retirement.targetNetAnnualExpenses;
       spending = round2(targetReal * infl);
+    } else if (!allWorking && retirement != null) {
+      const target = retirement.targetNetAnnualExpenses;
+      const real =
+        annualLivingExpenses + spendingShiftAtFirstRetirement * (target - annualLivingExpenses);
+      spending = round2(real * infl);
     } else {
       spending = round2(annualLivingExpenses * infl);
     }

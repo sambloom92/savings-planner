@@ -3401,6 +3401,101 @@ describe('couple mode — both alive', () => {
   });
 });
 
+describe('couple mode — spending while one of you works', () => {
+  // You retire at 61; your partner works until 60, when you are 70. Living
+  // costs £40,000, retirement target £30,000.
+  const flat = { savingsRate: 0, wageGrowthRate: 0, inflationRate: 0 };
+  const plan = (shift, rates = flat) =>
+    projectLifecycle(
+      {
+        currentAge: 60,
+        retirementAge: 61,
+        currentYear: 2026,
+        grossIncome: 0,
+        employeePensionRate: 0,
+        employerPensionRate: 0,
+        niContributionYears: 35,
+        pensionAccessAge: 55,
+        annualLivingExpenses: 40_000,
+        ...(shift === undefined ? {} : { spendingShiftAtFirstRetirement: shift }),
+        partner: {
+          currentAge: 50,
+          retirementAge: 60,
+          grossIncome: 30_000,
+          employeePensionRate: 0,
+          employerPensionRate: 0,
+          niContributionYears: 30,
+        },
+      },
+      rates,
+      { pensionBalance: 800_000 },
+      { targetNetAnnualExpenses: 30_000, maxAge: 75 }
+    );
+  const at = (r, age) => r.yearlyBreakdown.find((x) => x.age === age);
+
+  it('stays at living costs until both have retired, by default', () => {
+    const row = at(plan(), 65);
+    assert.equal(row.phase, 'transition');
+    assert.equal(row.livingExpenses, 40_000);
+  });
+
+  it('moves halfway, or all the way, to the retirement target', () => {
+    assert.equal(at(plan(0), 65).livingExpenses, 40_000);
+    assert.equal(at(plan(0.5), 65).livingExpenses, 35_000);
+    assert.equal(at(plan(1), 65).livingExpenses, 30_000);
+  });
+
+  it('changes nothing while both work or once both have retired', () => {
+    for (const shift of [0, 0.5, 1]) {
+      const r = plan(shift);
+      assert.equal(at(r, 60).phase, 'accumulation');
+      assert.equal(at(r, 60).livingExpenses, 40_000);
+      assert.equal(at(r, 71).phase, 'retirement');
+      assert.equal(at(r, 71).targetNetExpenses, 30_000);
+    }
+  });
+
+  it('follows inflation', () => {
+    // £35,000 in today's money, five years of 3% inflation on.
+    const row = at(plan(0.5, { ...flat, inflationRate: 0.03 }), 65);
+    near(row.livingExpenses, 35_000 * 1.03 ** 5);
+  });
+
+  it('works when the retirement target is above living costs', () => {
+    const r = projectLifecycle(
+      {
+        currentAge: 60,
+        retirementAge: 61,
+        currentYear: 2026,
+        grossIncome: 0,
+        employeePensionRate: 0,
+        employerPensionRate: 0,
+        niContributionYears: 35,
+        annualLivingExpenses: 20_000,
+        spendingShiftAtFirstRetirement: 0.5,
+        partner: {
+          currentAge: 50,
+          retirementAge: 60,
+          grossIncome: 30_000,
+          employeePensionRate: 0,
+          employerPensionRate: 0,
+          niContributionYears: 30,
+        },
+      },
+      flat,
+      { pensionBalance: 800_000 },
+      { targetNetAnnualExpenses: 30_000, maxAge: 75 }
+    );
+    assert.equal(at(r, 65).livingExpenses, 25_000);
+  });
+
+  it('rejects a shift outside 0–1', () => {
+    for (const bad of [-0.1, 1.5, '0.5', NaN]) {
+      assert.throws(() => plan(bad), RangeError);
+    }
+  });
+});
+
 describe('couple mode — what if one of us dies?', () => {
   const flat = { savingsRate: 0, wageGrowthRate: 0, inflationRate: 0 };
   const pensioner = (age) => ({

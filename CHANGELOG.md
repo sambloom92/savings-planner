@@ -8,11 +8,17 @@ Every change to Savings Planner, newest first. Each release is tagged `vX.Y.Z` o
 
 Versions before 1.0.0 are the early history, up to couple mode. Each pull request adds its entry here and bumps the version in `package.json`; the release is tagged automatically when it merges.
 
-## [1.7.0]
+## [1.8.0]
 
 ### Added
 
 - State pension increases: a setting in the Personal tab to choose how the state pension rises each April (#34). The **adjusted lock** (the default) is the government's reform, confirmed in the Budget on 28 October 2026 but not yet law: the triple lock until April 2029, then from April 2030 the higher of CPI and 2.5%, or more to hold the pension's 2029/30 value relative to earnings. The **triple lock** keeps the current rule. The main projection is unchanged; Monte Carlo results are lower, because a year of inflation outpacing wages no longer ratchets the pension up for good.
+
+## [1.7.0]
+
+### Changed
+
+- In couple mode, while one of you has retired and the other still works, household spending is now halfway between your living costs and your retirement target. It used to stay at living costs until you'd both retired, so a partner working longer could make the plan look worse: their extra pay mostly went on that spending, which couldn't flex in bad markets. A new Household tab setting, _Spending while one of you works_, picks living costs, halfway or the retirement target, and shows the amount. Plans where you retire years apart will see different results (#50).
 
 ## [1.6.0]
 

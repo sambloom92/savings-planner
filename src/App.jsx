@@ -273,6 +273,9 @@ const DEFAULTS = {
   // Couple mode, "Just me" view: your share of the mortgage, other debts and
   // one-off events if you were on your own.
   yourSharePct: 50,
+  // Household spending while one of you has retired and the other works:
+  // 'working' (living costs), 'halfway' or 'retirement' (the retirement target).
+  spendingWhileOneWorks: 'halfway',
   annuityOwner: 'self', // whose pension buys the annuity
   // "What if one of us dies?" on the deterministic chart.
   deathScenario: { enabled: false, person: 'partner', age: 80 },
@@ -428,6 +431,15 @@ function personPots(v) {
   return pots;
 }
 
+// How far household spending moves from living costs toward the retirement
+// target while one of you has retired and the other still works.
+const SPENDING_SHIFT = { working: 0, halfway: 0.5, retirement: 1 };
+
+// Household spending (today's £) while one of you has retired and the other works.
+const spendingWhileOneWorksAmount = (p) =>
+  p.annualLivingExpenses +
+  (SPENDING_SHIFT[p.spendingWhileOneWorks] ?? 0.5) * (p.targetNetExpenses - p.annualLivingExpenses);
+
 // The projection's profile: you, plus — in couple mode — your partner and the
 // household rules. `death` adds a "what if one of us dies?" scenario.
 function buildProfile(p, death = null) {
@@ -447,6 +459,7 @@ function buildProfile(p, death = null) {
     partnership: p.partnership,
     willsToEachOther: p.willsToEachOther,
     survivorSpendingShare: p.survivorSpendingPct / 100,
+    spendingShiftAtFirstRetirement: SPENDING_SHIFT[p.spendingWhileOneWorks] ?? 0.5,
     death,
     lifePolicies: buildLifePolicies(p),
   };
@@ -1729,7 +1742,7 @@ function Select({ label, value, options, onChange, help }) {
   );
 }
 
-function Toggle({ label, value, optA, optB, onChange, help }) {
+function Toggle({ label, value, optA, optB, optC, onChange, help, note }) {
   return (
     <div style={{ marginBottom: 20 }}>
       <div style={{ marginBottom: 6, display: 'flex', alignItems: 'center' }}>
@@ -1754,7 +1767,7 @@ function Toggle({ label, value, optA, optB, onChange, help }) {
           border: '1px solid var(--border-bright)',
         }}
       >
-        {[optA, optB].map((opt) => (
+        {[optA, optB, optC].filter(Boolean).map((opt) => (
           <button
             key={opt.value}
             onClick={() => onChange(opt.value)}
@@ -1775,6 +1788,18 @@ function Toggle({ label, value, optA, optB, onChange, help }) {
           </button>
         ))}
       </div>
+      {note && (
+        <div
+          style={{
+            marginTop: 6,
+            fontSize: 11,
+            color: 'var(--text-muted)',
+            fontFamily: 'var(--font-body)',
+          }}
+        >
+          {note}
+        </div>
+      )}
     </div>
   );
 }
@@ -3237,7 +3262,7 @@ function TabContent({ tab, p, set, derived, topUp, annuity, dbSummary, scope = n
               format={fmtGBP}
               onChange={set('annualLivingExpenses')}
               allowInput
-              help="Your annual non-debt living costs during the working years, in today's money — food, utilities, transport, insurance, leisure, etc. Do not include mortgage or debt repayments; those are entered separately. This amount is inflated each year to keep real purchasing power constant. Annual savings are derived automatically as: net take-home − debt payments − living expenses. Retirement spending is a separate parameter in the Retire tab."
+              help="Your annual non-debt living costs during the working years, in today's money — food, utilities, transport, insurance, leisure, etc. Do not include mortgage or debt repayments; those are entered separately. This amount is inflated each year to keep real purchasing power constant. Annual savings are derived automatically as: net take-home − debt payments − living expenses. Retirement spending is a separate parameter in the Retire tab; in couple mode, the Household tab sets the spending while one of you is retired and the other works."
             />
           )}
           {household && <DerivedSavingsReadout derived={derived} />}
@@ -4308,6 +4333,20 @@ function TabContent({ tab, p, set, derived, topUp, annuity, dbSummary, scope = n
               )}
             </>
           )}
+          <Toggle
+            label="Spending while one of you works"
+            value={p.spendingWhileOneWorks}
+            optA={{ value: 'working', label: 'Living costs' }}
+            optB={{ value: 'halfway', label: 'Halfway' }}
+            optC={{ value: 'retirement', label: 'Retirement' }}
+            onChange={set('spendingWhileOneWorks')}
+            note={`${fmtGBP(spendingWhileOneWorksAmount(p))} a year in today's money, from the first of you retiring to the second`}
+            help={
+              'What the household spends once one of you has retired and the other still works. Before then it spends your living costs (Personal tab); once you have both retired, your retirement target (Retire tab).\n\n' +
+              "Living costs: nothing changes until you've both retired. Halfway (the default): half the change happens when each of you retires. Retirement: spending drops to the retirement target as soon as the first of you retires.\n\n" +
+              'This matters most when you retire years apart. If the household keeps spending its working-life budget, the extra years of pay go on that spending, so working longer may barely improve the plan.'
+            }
+          />
           <Slider
             label="Spending on your own"
             value={p.survivorSpendingPct}
