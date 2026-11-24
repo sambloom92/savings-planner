@@ -8,11 +8,21 @@ Every change to Savings Planner, newest first. Each release is tagged `vX.Y.Z` o
 
 Versions before 1.0.0 are the early history, up to couple mode. Each pull request adds its entry here and bumps the version in `package.json`; the release is tagged automatically when it merges.
 
-## [1.6.0]
+## [1.7.0]
 
 ### Added
 
 - State pension increases: a setting in the Personal tab to choose how the state pension rises each April (#34). The **adjusted lock** (the default) is the government's reform, confirmed in the Budget on 28 October 2026 but not yet law: the triple lock until April 2029, then from April 2030 the higher of CPI and 2.5%, or more to hold the pension's 2029/30 value relative to earnings. The **triple lock** keeps the current rule. The main projection is unchanged; Monte Carlo results are lower, because a year of inflation outpacing wages no longer ratchets the pension up for good.
+
+## [1.6.0]
+
+### Added
+
+- A _Together / Just me_ switch for couples, to compare the household plan with where you'd stand on your own (say, if you split up) without changing any inputs. _Just me_ keeps your own pay, pensions and savings, takes your share of the mortgage, other debts, windfalls and one-off expenses (default 50%, set in the Household tab), and puts living costs and retirement spending at the one-person rate (default 72% of the household's, the same setting the survivor's plan uses). Monte Carlo follows the switch. On a phone it's in the ⋯ menu, and the summary strip says when _Just me_ is on (#49).
+
+### Changed
+
+- The header's household switch reads _Plan for: On my own / With a partner_ (it was _Just me / Couple_), since _Just me_ is now the view switch (#49).
 
 ## [1.5.1]
 
