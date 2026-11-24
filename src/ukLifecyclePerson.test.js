@@ -9,6 +9,7 @@ import {
   investTaxFreeCash,
   fundExpenseWhileWorking,
   bedAndIsa,
+  harvestGainsWithinExemption,
   takePensionLumpSum,
   enterRetirement,
   class3CostThisYear,
@@ -208,6 +209,29 @@ describe('moving money between pots', () => {
     assert.equal(P.isa, 6_000);
     assert.equal(P.gia, 4_000);
     assert.equal(P.costBasis, 3_600); // reduced in proportion
+    assert.equal(bed.gain, 600); // 10% of the £6,000 sold
+  });
+
+  it('the rest of the CGT allowance realises gains and resets the base cost', () => {
+    // A £5,000 gain, £3,000 of allowance: £3,000 realised, £2,000 still unrealised.
+    const P = person({}, { giaBalance: 20_000, giaCostBasis: 15_000 });
+    assert.equal(harvestGainsWithinExemption(P, 3_000), 3_000);
+    assert.equal(P.costBasis, 18_000);
+    assert.equal(P.gia, 20_000);
+    // A smaller gain than the allowance left is realised in full.
+    const Q = person({}, { giaBalance: 20_000, giaCostBasis: 19_000 });
+    assert.equal(harvestGainsWithinExemption(Q, 2_500), 1_000);
+    assert.equal(Q.costBasis, 20_000);
+  });
+
+  it('nothing is realised at a loss, with no GIA, or with the allowance used up', () => {
+    const loss = person({}, { giaBalance: 10_000, giaCostBasis: 12_000 });
+    assert.equal(harvestGainsWithinExemption(loss, 3_000), 0);
+    assert.equal(loss.costBasis, 12_000);
+    assert.equal(harvestGainsWithinExemption(person(), 3_000), 0);
+    const used = person({}, { giaBalance: 10_000, giaCostBasis: 5_000 });
+    assert.equal(harvestGainsWithinExemption(used, 0), 0);
+    assert.equal(used.costBasis, 5_000);
   });
 });
 
