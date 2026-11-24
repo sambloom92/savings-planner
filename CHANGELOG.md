@@ -14,7 +14,7 @@ Versions before 1.0.0 are the early history, up to couple mode. Each pull reques
 
 - A roadmap of ideas for what comes next, starting with tutorial mode and the proposed triple lock changes. It's on the site under Roadmap in the footer, and anyone can suggest ideas by editing `ROADMAP.md` (#42).
 
-## [1.2.0]
+## [1.2.0] — 2026-11-24
 
 ### Added
 
