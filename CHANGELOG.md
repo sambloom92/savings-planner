@@ -31,6 +31,12 @@ Versions before 1.0.0 are the early history, up to couple mode. Each pull reques
 - "What if one of us dies?" (#39): the survivor's plan beside the plan with both alive. Spending falls to the survivor's share (default 72%, from the Retirement Living Standards 2026); pensions, ISAs and investments pass to the survivor by the rules for married or cohabiting couples, including inheritance tax for couples living together and the effect of wills; DB schemes pay a survivor's pension.
 - Monte Carlo draws a death age for each of you from your own life table, and reports how often the survivor runs short (#39).
 
+## [0.28.0]
+
+### Changed
+
+- The £3,000 capital gains tax allowance is used every year, not only when you sell. Whatever the year's sales leave of it is used at the year end to realise gains and reinvest, which raises the base cost so those gains are never taxed. The year detail shows the gains realised (#43).
+
 ## [0.27.2] — 2026-11-23
 
 ### Changed
