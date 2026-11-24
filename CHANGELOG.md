@@ -8,7 +8,16 @@ Every change to Savings Planner, newest first. Each release is tagged `vX.Y.Z` o
 
 Versions before 1.0.0 are the early history, up to couple mode. Each pull request adds its entry here and bumps the version in `package.json`; the release is tagged automatically when it merges.
 
-## [1.4.0]
+## [1.5.0]
+
+### Changed
+
+- Announced and legislated changes (#46):
+  - Income tax and NI thresholds stay frozen until April 2031, as the 2025 and 2026 Budgets set out, instead of rising with inflation from 2027. The fiscal drag setting applies from 2031/32. This means more tax than before in most plans.
+  - The state pension age follows the law for your year of birth: 66 if born before 1961, 67 for 1961–1977 and 68 from 1978. It was 67 for everyone. Scenarios saved with the old default of 67 switch to the legal age; any other age you chose is kept.
+  - From April 2029, salary sacrifice into a pension above £2,000 a year is charged employee NI. The year detail shows the extra.
+
+## [1.4.0] — 2026-11-24
 
 ### Added
 
