@@ -8,6 +8,12 @@ Every change to Savings Planner, newest first. Each release is tagged `vX.Y.Z` o
 
 Versions before 1.0.0 are the early history, up to couple mode. Each pull request adds its entry here and bumps the version in `package.json`; the release is tagged automatically when it merges.
 
+## [1.7.0]
+
+### Changed
+
+- In couple mode, while one of you has retired and the other still works, household spending is now halfway between your living costs and your retirement target. It used to stay at living costs until you'd both retired, so a partner working longer could make the plan look worse: their extra pay mostly went on that spending, which couldn't flex in bad markets. A new Household tab setting, _Spending while one of you works_, picks living costs, halfway or the retirement target, and shows the amount. Plans where you retire years apart will see different results (#50).
+
 ## [1.6.0]
 
 ### Added
