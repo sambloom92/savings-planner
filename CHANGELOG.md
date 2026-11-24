@@ -14,7 +14,7 @@ Versions before 1.0.0 are the early history, up to couple mode. Each pull reques
 
 - A changelog: this page, with every change since the first version, and a version tag on each release. The site's footer shows the version and opens the changelog, with a dot when there's something new since your last visit (#41).
 
-## [1.1.0]
+## [1.1.0] — 2026-11-24
 
 ### Added
 
