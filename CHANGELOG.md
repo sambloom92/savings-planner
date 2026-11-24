@@ -29,7 +29,7 @@ Versions before 1.0.0 are the early history, up to couple mode. Each pull reques
   - death-in-service for each of you, as a multiple of salary, paid only while working
   - in "What if one of us dies?": the payouts, and the cover gap — how much more cover, paid on that death, would keep the survivor's plan from ever running short
 
-## [1.0.1]
+## [1.0.1] — 2026-11-24
 
 ### Fixed
 
