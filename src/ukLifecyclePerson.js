@@ -1335,13 +1335,22 @@ export function settleClass3(P, cost, unmet) {
  *   • LSA < taxFreeRoom/3: use all remaining LSA, rest taxable
  *       taxable = gross − lsaRemaining = taxFreeRoom → gross = taxFreeRoom + lsaRemaining
  * Skipped before the pension is accessible (NMPA) — the pot is left to grow.
+ * `guaranteedGross` is the taxable income already counted this year;
+ * `allowance` is the allowance to fill (a couple leaves part of it free for
+ * the Marriage Allowance).
  */
-export function drawPensionWithinAllowance(P, remaining, accessible, guaranteedGross, scale) {
+export function drawPensionWithinAllowance(
+  P,
+  remaining,
+  accessible,
+  guaranteedGross,
+  scale,
+  allowance = round2(PERSONAL_ALLOWANCE * scale)
+) {
   let draw = 0;
   let taxFree = 0;
   if (accessible && remaining > 0 && P.pension > 0) {
-    const scaledPA = round2(PERSONAL_ALLOWANCE * scale);
-    const taxFreeRoom = round2(Math.max(0, scaledPA - guaranteedGross));
+    const taxFreeRoom = round2(Math.max(0, allowance - guaranteedGross));
     let limit;
     if (P.takePCLS || taxFreeRoom <= 0) {
       limit = taxFreeRoom;
