@@ -8,6 +8,12 @@ Every change to Savings Planner, newest first. Each release is tagged `vX.Y.Z` o
 
 Versions before 1.0.0 are the early history, up to couple mode. Each pull request adds its entry here and bumps the version in `package.json`; the release is tagged automatically when it merges.
 
+## [1.5.1]
+
+### Fixed
+
+- The app responds quickly again. Monte Carlo now runs in the background, so dragging a slider no longer freezes the page while each run finishes: in couple mode with 1,000 trials, a few seconds of dragging used to lock the page for several seconds at a time. A change made during a run now replaces it. Moving the mouse over the chart redraws only the year detail, and numbers are formatted with one shared formatter. Results are unchanged (#47).
+
 ## [1.5.0]
 
 ### Changed
