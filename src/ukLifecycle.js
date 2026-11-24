@@ -60,6 +60,7 @@ import {
   investTaxFreeCash,
   fundExpenseWhileWorking,
   bedAndIsa,
+  harvestGainsWithinExemption,
   growPotsWhileWorking,
   growPotsInRetirement,
   estimatedPensionTaxShare,
@@ -1114,6 +1115,14 @@ export function projectLifecycle(
     });
     const inheritedGrowth = growInheritedPension(P, yearRate);
 
+    // ── The rest of the CGT allowance ───────────────────────────────────
+    // Gains up to the exempt amount not used by this year's sales are
+    // realised and reinvested at the year end, so they're never taxed.
+    const gainsHarvested = harvestGainsWithinExemption(
+      P,
+      round2(Math.max(0, funding.exemptRemaining - bed.gain))
+    );
+
     // ── NI qualifying year ──────────────────────────────────────────────
     // Uses the scaled LEL from the NI result so fiscal drag affects the
     // qualifying threshold too.
@@ -1194,6 +1203,8 @@ export function projectLifecycle(
         bedIsaGross: bed.gross,
         bedIsaCGT: bed.cgt,
         growthAmount: growth.giaGrowth,
+        // Gains realised within the CGT allowance and reinvested (base cost up).
+        gainsRealisedTaxFree: gainsHarvested,
         closingBalance: P.gia,
         closingCostBasis: P.costBasis,
         unrealisedGain: round2(P.gia - P.costBasis),
@@ -1447,6 +1458,12 @@ export function projectLifecycle(
     const growth = growPotsInRetirement(P, retYearRate);
     const inheritedGrowth = growInheritedPension(P, retYearRate);
 
+    // ── The rest of the CGT allowance ──────────────────────────────────────
+    const gainsHarvested = harvestGainsWithinExemption(
+      P,
+      round2(Math.max(0, retExemptRemaining - bed.gain))
+    );
+
     // ── Row ────────────────────────────────────────────────────────────────
     const retRow = {
       year,
@@ -1518,6 +1535,8 @@ export function projectLifecycle(
         bedIsaGross: bed.gross,
         bedIsaCGT: bed.cgt,
         growthAmount: growth.giaGrowth,
+        // Gains realised within the CGT allowance and reinvested (base cost up).
+        gainsRealisedTaxFree: gainsHarvested,
         closingBalance: P.gia,
         closingCostBasis: P.costBasis,
         unrealisedGain: round2(P.gia - P.costBasis),
@@ -1905,6 +1924,11 @@ export function projectLifecycle(
             gia: 0,
           })
         : growPotsInRetirement(s.P, s.rate);
+      // The rest of each partner's own CGT allowance, used at the year end.
+      s.gainsHarvested = harvestGainsWithinExemption(
+        s.P,
+        round2(Math.max(0, exempt - s.exemptUsed - s.bed.gain))
+      );
       s.niQualifyingYear = s.working ? recordNiQualifyingYear(s.P, s.pay) : false;
     }
 
@@ -1973,6 +1997,7 @@ export function projectLifecycle(
       gia: {
         openingBalance: sum((s) => s.open.gia),
         growthAmount: sum((s) => s.growth.giaGrowth),
+        gainsRealisedTaxFree: sum((s) => s.gainsHarvested),
         closingBalance: sum((s) => s.P.gia),
         closingCostBasis: sum((s) => s.P.costBasis),
         unrealisedGain: sum((s) => s.P.gia - s.P.costBasis),
@@ -2093,6 +2118,7 @@ export function projectLifecycle(
       gia: {
         openingBalance: s.open.gia,
         growthAmount: s.growth.giaGrowth,
+        gainsRealisedTaxFree: s.gainsHarvested,
         closingBalance: P.gia,
         closingCostBasis: P.costBasis,
       },
