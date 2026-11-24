@@ -61,6 +61,9 @@ import {
   fundExpenseWhileWorking,
   bedAndIsa,
   harvestGainsWithinExemption,
+  transferGIA,
+  reliefAtSourceRoom,
+  payWithReliefAtSource,
   growPotsWhileWorking,
   growPotsInRetirement,
   estimatedPensionTaxShare,
@@ -1621,6 +1624,12 @@ export function projectLifecycle(
     const allRetired = people.every((P) => P.retiredAt !== null);
     const allWorking = people.every((P) => P.retiredAt === null);
     const exempt = GIA_CGT_CONSTANTS.annualExemptAmount;
+    // Married couples and civil partners can move investments between them
+    // with no CGT (the receiver takes on the original cost), so each can use
+    // their ISA and CGT allowances on the other's GIA — in drawdown, bed and
+    // ISA and the year-end gains below. Only where it costs no tax now. A
+    // couple living together can't: a transfer counts as a sale.
+    const spouses = partnership === 'married';
 
     // ── Each partner's income ───────────────────────────────────────────
     const st = people.map((P) => {
@@ -1646,6 +1655,8 @@ export function projectLifecycle(
         pensionDraw: 0,
         pensionTaxFree: 0,
         allowanceTopUp: 0,
+        rasNet: 0,
+        rasGross: 0,
         giaDraw: 0,
         giaCGT: 0,
         isaDraw: 0,
@@ -1812,6 +1823,19 @@ export function projectLifecycle(
         s.giaCGT = round2(s.giaCGT + r.cgt);
         s.exemptUsed = round2(s.exemptUsed + r.draw * r.gainFracPre);
       }
+      // Married: what's left of one partner's allowance is used on the other's
+      // investments (moved to them free of CGT, then sold).
+      if (spouses)
+        for (const s of st) {
+          const o = st.find((x) => x !== s);
+          const left = round2(Math.max(0, exempt - s.exemptUsed));
+          if (remaining <= 0 || left <= 0 || o.P.gia <= 0) continue;
+          const r = drawGiaWithinExemption(o.P, remaining, s.incomeForCGT, scale, left);
+          remaining = r.remaining;
+          o.giaDraw = round2(o.giaDraw + r.draw);
+          o.giaCGT = round2(o.giaCGT + r.cgt);
+          s.exemptUsed = round2(s.exemptUsed + r.draw * r.gainFracPre);
+        }
       // 3. ISAs, in proportion to their balances.
       const isaTotal = st[0].P.isa + st[1].P.isa;
       if (remaining > 0 && isaTotal > 0) {
@@ -1924,6 +1948,26 @@ export function projectLifecycle(
       }
     }
 
+    // ── A non-earner's pension, with tax relief ─────────────────────────
+    // A partner with pay under £3,600 can still pay £2,880 a year into a
+    // pension and get £720 of basic-rate relief added: an instant 25% that
+    // beats any other home for the household's savings, so it comes first.
+    for (const s of st) {
+      if (savings <= 0) break;
+      const room = reliefAtSourceRoom(
+        s.P,
+        s.age,
+        s.working ? s.pay.effectiveIncome : 0,
+        s.working ? s.pay.employeeContrib : 0,
+        !s.working && s.accessible
+      );
+      if (room <= 0) continue;
+      const r = payWithReliefAtSource(s.P, savings, room);
+      s.rasNet = r.net;
+      s.rasGross = r.gross;
+      savings = round2(savings - r.net);
+    }
+
     // ── Savings: both ISAs first, then the lower earner's GIA ───────────
     if (savings > 0) {
       const room = st.map((s) => Math.max(0, ISA_LIMIT - s.isaUsed));
@@ -1942,13 +1986,22 @@ export function projectLifecycle(
 
     // ── Bed and ISA, growth and NI, per partner ─────────────────────────
     for (const s of st) {
-      s.bed = bedAndIsa(
-        s.P,
-        round2(ISA_LIMIT - s.isaUsed - s.isaContrib),
-        s.taxableIncome,
-        round2(Math.max(0, exempt - s.exemptUsed)),
-        scale
-      );
+      // Married: a partner with no investments of their own fills their ISA
+      // from the other's, moved to them free of CGT (the rest goes back) —
+      // only as far as their own CGT allowance covers the gain. Selling more
+      // would mean paying CGT now on gains that might never be taxed.
+      const o = st.find((x) => x !== s);
+      const borrowed = spouses && s.P.gia <= 0 ? transferGIA(o.P, s.P, o.P.gia) : 0;
+      const exemptLeft = round2(Math.max(0, exempt - s.exemptUsed));
+      let headroom = round2(ISA_LIMIT - s.isaUsed - s.isaContrib);
+      if (borrowed > 0) {
+        const gainFrac = Math.max(0, (s.P.gia - s.P.costBasis) / s.P.gia);
+        if (gainFrac > 0) headroom = round2(Math.min(headroom, exemptLeft / gainFrac));
+      }
+      s.bed = bedAndIsa(s.P, headroom, s.taxableIncome, exemptLeft, scale);
+      if (borrowed > 0) transferGIA(s.P, o.P, s.P.gia);
+    }
+    for (const s of st) {
       s.rate = getRateForAge(
         s.age,
         s.P.retirementAge,
@@ -1972,6 +2025,15 @@ export function projectLifecycle(
       );
       s.niQualifyingYear = s.working ? recordNiQualifyingYear(s.P, s.pay) : false;
     }
+    // Married: what's left of each partner's allowance realises gains on the
+    // other's investments too (moved to them free of CGT, sold and bought back).
+    if (spouses)
+      for (const s of st) {
+        const o = st.find((x) => x !== s);
+        const left = round2(Math.max(0, exempt - s.exemptUsed - s.bed.gain - s.gainsHarvested));
+        if (left > 0)
+          s.gainsHarvested = round2(s.gainsHarvested + harvestGainsWithinExemption(o.P, left));
+      }
 
     // ── Row ─────────────────────────────────────────────────────────────
     const sum = (f) => round2(st.reduce((t, s) => t + f(s), 0));
@@ -1999,6 +2061,8 @@ export function projectLifecycle(
       netIncomeAchieved,
       marriageAllowance,
       pensionSavedWithinAllowance: sum((s) => s.allowanceTopUp),
+      // Paid into a non-earner's pension from savings, with relief (gross).
+      reliefAtSourceContributions: sum((s) => s.rasGross),
       windfall: windfallAmt,
       windfallLabels: windfall?.labels ?? [],
       oneOffExpense: expenseAmt,
@@ -2113,6 +2177,10 @@ export function projectLifecycle(
       hoursFraction: s.pay?.hoursFraction ?? null,
       employeeContribution: s.pay?.employeeContrib ?? 0,
       employerContribution: s.pay?.employerContrib ?? 0,
+      // Paid in from the household's savings with no or low earnings: what was
+      // paid, and the total with basic-rate relief added.
+      reliefAtSourceNet: s.rasNet,
+      reliefAtSourceGross: s.rasGross,
       pensionInput: s.pay?.pensionInput ?? 0,
       annualAllowance: s.pay?.annualAllowance ?? null,
       annualAllowanceBreached: s.pay?.annualAllowanceBreached ?? false,
@@ -2159,6 +2227,8 @@ export function projectLifecycle(
       gia: {
         openingBalance: s.open.gia,
         growthAmount: s.growth.giaGrowth,
+        // Gains realised within this partner's CGT allowance (for a married
+        // couple, possibly on investments held by the other).
         gainsRealisedTaxFree: s.gainsHarvested,
         closingBalance: P.gia,
         closingCostBasis: P.costBasis,
@@ -2179,6 +2249,8 @@ export function projectLifecycle(
       hoursFraction: row.hoursFraction ?? null,
       employeeContribution: row.employeeContribution ?? 0,
       employerContribution: row.employerContribution ?? 0,
+      reliefAtSourceNet: 0,
+      reliefAtSourceGross: 0,
       pensionInput: row.pensionInput ?? 0,
       annualAllowance: row.annualAllowance ?? null,
       annualAllowanceBreached: row.annualAllowanceBreached ?? false,

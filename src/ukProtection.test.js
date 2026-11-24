@@ -78,8 +78,11 @@ describe('premiums', () => {
     );
     assert.equal(r.yearlyBreakdown[0].lifeCoverPremiums, 360);
     assert.equal(r.yearlyBreakdown[2].lifeCoverPremiums, 0);
+    // Everything the household puts away: savings plus anything paid into the
+    // non-earning partner's pension.
+    const putAway = (row) => row.saved + row.people.reduce((t, p) => t + p.reliefAtSourceNet, 0);
     const without = projectLifecycle({ ...you, partner }, flat, pots, ret);
-    assert.equal(without.yearlyBreakdown[0].saved - r.yearlyBreakdown[0].saved, 360);
+    assert.equal(putAway(without.yearlyBreakdown[0]) - putAway(r.yearlyBreakdown[0]), 360);
   });
 
   it('need a partner', () => {

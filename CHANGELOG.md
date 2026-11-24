@@ -8,11 +8,18 @@ Every change to Savings Planner, newest first. Each release is tagged `vX.Y.Z` o
 
 Versions before 1.0.0 are the early history, up to couple mode. Each pull request adds its entry here and bumps the version in `package.json`; the release is tagged automatically when it merges.
 
-## [1.4.0]
+## [1.5.0]
 
 ### Added
 
 - State pension increases: a setting in the Personal tab to choose how the state pension rises each April (#34). The **adjusted lock** (the default) is the government's reform, confirmed in the Budget on 28 October 2026 but not yet law: the triple lock until April 2029, then from April 2030 the higher of CPI and 2.5%, or more to hold the pension's 2029/30 value relative to earnings. The **triple lock** keeps the current rule. The main projection is unchanged; Monte Carlo results are lower, because a year of inflation outpacing wages no longer ratchets the pension up for good.
+
+## [1.4.0]
+
+### Added
+
+- Married couples and civil partners use both people's allowances on either one's investments, as moving investments between them costs no CGT: both £3,000 CGT allowances when selling in retirement and when realising gains each year, and the second £20k ISA allowance through bed and ISA, as far as the CGT allowance covers. Only moves that cost no tax now are made, so results can only improve (#45).
+- A partner with little or no pay gets pension tax relief: £2,880 a year from the household's savings goes into their pension, topped up to £3,600 by basic-rate relief, until they're 75, take tax-free cash or start drawing (#45).
 
 ## [1.3.0] — 2026-11-24
 

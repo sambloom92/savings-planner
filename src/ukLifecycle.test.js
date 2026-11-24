@@ -2890,19 +2890,63 @@ describe('couple mode — both alive', () => {
 
   it('pools take-home and splits savings across both ISAs', () => {
     // £40,000: tax 5,486, NI 2,194.40 → take-home £32,319.60. Marriage
-    // Allowance saves £252 (the non-earner's unused £1,260 at 20%).
+    // Allowance saves £252 (the non-earner's unused £1,260 at 20%). £2,880
+    // goes into the non-earner's pension first (£3,600 with relief), and the
+    // remaining £29,691.60 is split across both ISAs.
     const r = projectLifecycle({ ...earner, partner: nonEarner }, flat);
     const row = r.yearlyBreakdown[0];
     assert.equal(row.phase, 'accumulation');
     assert.equal(row.netIncome, 32_319.6);
     assert.equal(row.marriageAllowance, 252);
-    assert.equal(row.saved, 32_571.6);
+    assert.equal(row.people[1].reliefAtSourceNet, 2_880);
+    assert.equal(row.people[1].pension.closingBalance, 3_600);
+    assert.equal(row.saved, 29_691.6);
     assert.equal(row.people[0].incomeTax, 5_234);
     assert.deepEqual(
       row.people.map((p) => p.isaContribution),
-      [16_285.8, 16_285.8]
+      [14_845.8, 14_845.8]
     );
-    assert.equal(row.isa.closingBalance, 32_571.6);
+    assert.equal(row.isa.closingBalance, 29_691.6);
+  });
+
+  describe("a non-earner's pension, with tax relief", () => {
+    it('is paid from savings only for a partner with pay under £3,600', () => {
+      const row = projectLifecycle(
+        { ...earner, grossIncome: 90_000, partner: { ...nonEarner, grossIncome: 20_000 } },
+        flat
+      ).yearlyBreakdown[0];
+      assert.deepEqual(
+        row.people.map((p) => p.reliefAtSourceGross),
+        [0, 0]
+      );
+      assert.equal(row.reliefAtSourceContributions, 0);
+    });
+
+    it('takes only what the household can save', () => {
+      // Take-home £32,319.60 + £252 Marriage Allowance, living costs £31,000:
+      // £1,571.60 left, all of it paid in (£1,964.50 with relief).
+      const row = projectLifecycle(
+        { ...earner, annualLivingExpenses: 31_000, partner: nonEarner },
+        flat
+      ).yearlyBreakdown[0];
+      assert.equal(row.people[1].reliefAtSourceNet, 1_571.6);
+      assert.equal(row.people[1].reliefAtSourceGross, 1_964.5);
+      assert.equal(row.saved, 0);
+    });
+
+    it('applies to a couple living together too, and stops at 75', () => {
+      const row = (age) =>
+        projectLifecycle(
+          {
+            ...earner,
+            partnership: 'cohabiting',
+            partner: { ...nonEarner, currentAge: age, retirementAge: age + 1 },
+          },
+          flat
+        ).yearlyBreakdown[0];
+      assert.equal(row(74).people[1].reliefAtSourceGross, 3_600);
+      assert.equal(row(75).people[1].reliefAtSourceGross, 0);
+    });
   });
 
   it('no Marriage Allowance for a couple living together', () => {
@@ -2927,10 +2971,10 @@ describe('couple mode — both alive', () => {
     near(row.people[1].giaContribution, row.saved - 40_000);
   });
 
-  it('each partner uses their own CGT allowance every year', () => {
-    // Both ISAs fill from pay, so nothing is sold; each partner's GIA holds a
-    // £30,000 gain, and £3,000 of each is realised at the year end.
-    const r = projectLifecycle(
+  // Both partners hold a GIA of £50,000 with a £30,000 gain; both ISAs fill
+  // from pay, so nothing is sold during the year.
+  const twoGias = (extra = {}) =>
+    projectLifecycle(
       {
         ...earner,
         grossIncome: 90_000,
@@ -2939,17 +2983,99 @@ describe('couple mode — both alive', () => {
           grossIncome: 20_000,
           pots: { giaBalance: 50_000, giaCostBasis: 20_000 },
         },
+        ...extra,
       },
       { savingsRate: 0.05, wageGrowthRate: 0, inflationRate: 0 },
       { giaBalance: 50_000, giaCostBasis: 20_000 }
-    );
-    const row = r.yearlyBreakdown[0];
+    ).yearlyBreakdown[0];
+
+  it('living together: each partner uses their own CGT allowance on their own GIA', () => {
+    const row = twoGias({ partnership: 'cohabiting' });
     assert.deepEqual(
       row.people.map((p) => p.gia.gainsRealisedTaxFree),
       [3_000, 3_000]
     );
-    assert.equal(row.gia.gainsRealisedTaxFree, 6_000);
     assert.equal(row.people[0].gia.closingCostBasis, 23_000);
+  });
+
+  it("married: your CGT allowance also realises gains on your partner's GIA", () => {
+    // Only your partner has a GIA. Married, the £3,000 of gain realised
+    // within your allowance is on their investments (moved to you free of
+    // CGT, sold and bought back); living together, your allowance goes unused.
+    const oneGia = (partnership) =>
+      projectLifecycle(
+        {
+          ...earner,
+          grossIncome: 90_000,
+          partnership,
+          partner: {
+            ...nonEarner,
+            grossIncome: 20_000,
+            pots: { giaBalance: 50_000, giaCostBasis: 20_000 },
+          },
+        },
+        { savingsRate: 0.05, wageGrowthRate: 0, inflationRate: 0 }
+      ).yearlyBreakdown[0];
+    const married = oneGia('married');
+    const together = oneGia('cohabiting');
+    assert.deepEqual(
+      married.people.map((p) => p.gia.gainsRealisedTaxFree),
+      [3_000, 3_000]
+    );
+    assert.deepEqual(
+      together.people.map((p) => p.gia.gainsRealisedTaxFree),
+      [0, 3_000]
+    );
+    const them = married.people[1];
+    near(them.gia.closingCostBasis, 20_000 + them.giaContribution + 6_000);
+    assert.equal(married.giaCGT, 0);
+  });
+
+  describe("married: both allowances work on one partner's investments", () => {
+    // Two retirees with no pensions; your partner holds a £100,000 GIA that is
+    // half gain. The first year has no spending (nothing drawn); from the
+    // second, £20,000 a year is needed. Flat economy.
+    const plan = (partnership) =>
+      projectLifecycle(
+        {
+          ...retiree(60),
+          currentYear: 2026,
+          partnership,
+          partner: { ...retiree(60), pots: { giaBalance: 100_000, giaCostBasis: 50_000 } },
+        },
+        flat,
+        {},
+        { targetNetAnnualExpenses: 20_000, maxAge: 70 }
+      ).yearlyBreakdown;
+
+    it('your ISA is filled from it by bed and ISA, as far as your CGT allowance covers', () => {
+      // Your partner fills their own £20k ISA from their GIA, as one person
+      // would (paying CGT on gains above their allowance). Married, you fill
+      // yours from it too, but only CGT-free: £6,000 of a half-gain GIA.
+      const married = plan('married')[0].people.map((p) => p.bedIsa);
+      const together = plan('cohabiting')[0].people.map((p) => p.bedIsa);
+      assert.deepEqual(
+        married.map((b) => b.netContrib),
+        [6_000, 20_000]
+      );
+      assert.equal(married[0].cgt, 0);
+      assert.deepEqual(
+        together.map((b) => b.netContrib),
+        [0, 20_000]
+      );
+    });
+
+    it('drawdown sells it within both CGT allowances before touching the ISAs', () => {
+      // A half-gain GIA: £6,000 sold per £3,000 allowance.
+      const married = plan('married').find((x) => x.age === 61);
+      const together = plan('cohabiting').find((x) => x.age === 61);
+      near(married.giaWithdrawal, 12_000);
+      near(together.giaWithdrawal, 6_000);
+      assert.equal(married.giaCGT, 0);
+      assert.equal(together.giaCGT, 0);
+      near(married.isaWithdrawal, 8_000);
+      near(together.isaWithdrawal, 14_000);
+    });
   });
 
   it('two retirees each use their whole personal allowance — no tax on £30k', () => {
@@ -3077,7 +3203,11 @@ describe('couple mode — both alive', () => {
       assert.equal(me.taxableIncome, 12_570);
       assert.equal(me.incomeTax, 0);
       assert.equal(row.marriageAllowance, 0);
-      assert.equal(me.pension.closingBalance, 500_000 - 16_760);
+      // (Plus £3,600 paid in the year before, aged 60 with no pay and not
+      // yet drawing: £2,880 with basic-rate relief.)
+      assert.equal(me.pension.closingBalance, 500_000 + 3_600 - 16_760);
+      // Once drawing, nothing more is paid in.
+      assert.equal(me.reliefAtSourceGross, 0);
       // It joins the household's savings: both ISAs first.
       assert.ok(row.saved > 16_760);
       assert.equal(me.isaContribution + row.people[1].isaContribution, 40_000);
@@ -3118,7 +3248,9 @@ describe('couple mode — both alive', () => {
       assert.equal(row.people[0].status, 'retired');
       assert.equal(row.people[0].pensionDrawdown, 0);
       assert.equal(row.people[0].pensionSavedWithinAllowance, 0);
-      assert.equal(row.people[0].pension.closingBalance, 500_000);
+      // Not drawn; £3,600 a year is paid in instead (£2,880 with relief).
+      assert.equal(row.people[0].reliefAtSourceGross, 3_600);
+      assert.equal(row.people[0].pension.closingBalance, 500_000 + 2 * 3_600);
     });
 
     it('guaranteed income uses up the allowance first', () => {
@@ -3249,11 +3381,13 @@ describe('couple mode — what if one of us dies?', () => {
     const [estate] = r.summary.estates;
     assert.equal(estate.person, 'partner');
     assert.equal(estate.inheritanceTax, 0);
-    assert.equal(estate.toSurvivor.pension, 100_000);
+    // £100,000, plus £3,600 paid in during the first year (£2,880 with relief),
+    // before either of them was drawing.
+    assert.equal(estate.toSurvivor.pension, 103_600);
     assert.equal(estate.inheritedPensionTaxFree, true);
     const row = r.yearlyBreakdown.find((x) => x.age === 73);
     // The inherited pension is drawn first, tax-free.
-    assert.equal(row.inheritedPension.openingBalance, 100_000);
+    assert.equal(row.inheritedPension.openingBalance, 103_600);
     assert.ok(row.inheritedPension.taxFreeDrawdown > 0);
     assert.equal(row.isaWithdrawal, 0);
   });

@@ -10,6 +10,9 @@ import {
   fundExpenseWhileWorking,
   bedAndIsa,
   harvestGainsWithinExemption,
+  transferGIA,
+  reliefAtSourceRoom,
+  payWithReliefAtSource,
   takePensionLumpSum,
   enterRetirement,
   class3CostThisYear,
@@ -224,6 +227,42 @@ describe('moving money between pots', () => {
     assert.equal(Q.costBasis, 20_000);
   });
 
+  it('relief at source: £3,600 a year with little or no pay, under 75, before drawing', () => {
+    const P = person({ grossIncome: 0 });
+    assert.equal(reliefAtSourceRoom(P, 40, 0, 0, false), 3_600);
+    assert.equal(reliefAtSourceRoom(P, 40, 2_000, 1_000, false), 2_600); // less own payments
+    assert.equal(reliefAtSourceRoom(P, 40, 3_600, 0, false), 0); // pay of £3,600 or more
+    assert.equal(reliefAtSourceRoom(P, 75, 0, 0, false), 0);
+    assert.equal(reliefAtSourceRoom(P, 60, 0, 0, true), 0); // already drawing
+    P.lsaRemaining -= 1; // some tax-free cash taken
+    assert.equal(reliefAtSourceRoom(P, 60, 0, 0, false), 0);
+  });
+
+  it('relief at source adds £20 for every £80 paid in', () => {
+    const P = person({ grossIncome: 0 });
+    assert.deepEqual(payWithReliefAtSource(P, 10_000, 3_600), { net: 2_880, gross: 3_600 });
+    assert.deepEqual(payWithReliefAtSource(P, 1_000, 3_600), { net: 1_000, gross: 1_250 });
+    assert.equal(P.pension, 4_850);
+    assert.deepEqual(payWithReliefAtSource(P, 0, 3_600), { net: 0, gross: 0 });
+  });
+
+  it('a transfer between spouses moves value and its share of the cost', () => {
+    const A = person({}, { giaBalance: 40_000, giaCostBasis: 10_000 });
+    const B = person({}, { giaBalance: 5_000, giaCostBasis: 5_000 });
+    assert.equal(transferGIA(A, B, 10_000), 10_000);
+    // A quarter of A's holding moves, with a quarter of its cost.
+    assert.equal(A.gia, 30_000);
+    assert.equal(A.costBasis, 7_500);
+    assert.equal(B.gia, 15_000);
+    assert.equal(B.costBasis, 7_500);
+    // No more than there is; moving everything moves all the cost.
+    assert.equal(transferGIA(A, B, 99_999), 30_000);
+    assert.equal(A.gia, 0);
+    assert.equal(A.costBasis, 0);
+    assert.equal(B.costBasis, 15_000);
+    assert.equal(transferGIA(A, B, 1_000), 0);
+  });
+
   it('nothing is realised at a loss, with no GIA, or with the allowance used up', () => {
     const loss = person({}, { giaBalance: 10_000, giaCostBasis: 12_000 });
     assert.equal(harvestGainsWithinExemption(loss, 3_000), 0);
@@ -324,6 +363,14 @@ describe('drawdown steps', () => {
     assert.equal(s.draw, 6_000);
     assert.equal(s.cgt, 0);
     assert.equal(s.remaining, 4_000);
+  });
+
+  it("2. with part of an allowance (a spouse's leftover), sells only up to it", () => {
+    const P = retiree({ giaBalance: 20_000, giaCostBasis: 10_000 });
+    const s = drawGiaWithinExemption(P, 10_000, 20_000, 1, 1_000);
+    assert.equal(s.draw, 2_000);
+    assert.equal(s.cgt, 0);
+    assert.equal(drawGiaWithinExemption(P, 10_000, 20_000, 1, 0).draw, 0);
   });
 
   it('3. ISA, tax-free', () => {

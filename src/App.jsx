@@ -4193,8 +4193,8 @@ function TabContent({ tab, p, set, derived, topUp, annuity, dbSummary, scope = n
             optB={{ value: 'cohabiting', label: 'Living together' }}
             onChange={set('partnership')}
             help={
-              'Married couples and civil partners pay no inheritance tax on what passes between them, an ISA stays an ISA for the survivor (an extra ISA allowance), and Marriage Allowance can move £1,260 of personal allowance to a basic-rate partner.\n\n' +
-              "Couples living together pay inheritance tax at 40% on what passes to the partner above the deceased's £325,000 nil-rate band — counting savings and, from April 2027, pensions (the home is left out here). An inherited ISA arrives as cash. Pensions pass to the nominated beneficiary either way."
+              'Married couples and civil partners pay no inheritance tax on what passes between them, an ISA stays an ISA for the survivor (an extra ISA allowance), and Marriage Allowance can move £1,260 of personal allowance to a basic-rate partner. They can also move investments between them with no capital gains tax, so the planner uses both your ISA allowances and both CGT allowances on investments held by either of you, wherever that costs no tax.\n\n' +
+              "Couples living together pay inheritance tax at 40% on what passes to the partner above the deceased's £325,000 nil-rate band — counting savings and, from April 2027, pensions (the home is left out here). An inherited ISA arrives as cash. Pensions pass to the nominated beneficiary either way. Moving investments to a partner you live with counts as selling them, so each of you keeps your own."
             }
           />
           {p.partnership === 'cohabiting' && (
@@ -4496,6 +4496,13 @@ function CoupleYearDetail({ row, mobile }) {
             value={fmtGBP(q.isaWithdrawal + q.giaWithdrawal)}
             color="#34d399"
             dim
+          />
+        )}
+        {(q.reliefAtSourceGross ?? 0) > 0 && (
+          <DetailLine
+            label="→ Pension (+ tax relief)"
+            value={`${fmtGBP(q.reliefAtSourceNet)} + ${fmtGBP(q.reliefAtSourceGross - q.reliefAtSourceNet)}`}
+            color="#4f8ef7"
           />
         )}
         {q.isaContribution + q.giaContribution > 0 && (
