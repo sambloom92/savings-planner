@@ -2704,8 +2704,9 @@ describe('couple mode — both alive', () => {
     near(row.people[1].giaContribution, row.saved - 40_000);
   });
 
-  it('two retirees each use their own personal allowance first — no tax on £30k', () => {
-    // UFPLS: £12,570 of taxable room ÷ 75% = £16,760 each, tax-free.
+  it('two retirees each use their whole personal allowance — no tax on £30k', () => {
+    // UFPLS: £12,570 of taxable room ÷ 75% = £16,760 each, tax-free. £30k is
+    // spent; the other £3,520 of the partner's allowance is drawn and saved.
     const r = projectLifecycle(
       {
         ...retiree(60),
@@ -2721,11 +2722,21 @@ describe('couple mode — both alive', () => {
     assert.equal(row.shortfall, 0);
     assert.deepEqual(
       row.people.map((p) => p.pensionDrawdown),
-      [16_760, 13_240]
+      [16_760, 16_760]
+    );
+    assert.deepEqual(
+      row.people.map((p) => p.pensionSavedWithinAllowance),
+      [0, 3_520]
     );
     assert.deepEqual(
       row.people.map((p) => p.incomeTax),
       [0, 0]
+    );
+    assert.equal(row.saved, 3_520);
+    assert.equal(row.pensionSavedWithinAllowance, 3_520);
+    assert.deepEqual(
+      row.people.map((p) => p.isaContribution),
+      [1_760, 1_760]
     );
   });
 
@@ -2748,7 +2759,10 @@ describe('couple mode — both alive', () => {
   });
 
   it('when one has retired and the other works, the gap is drawn from the retiree', () => {
-    // Partner's £30,000 job takes home £25,119.60; living costs £40,000.
+    // Partner's £30,000 job takes home £25,119.60; living costs £40,000, so
+    // £14,880.40 is drawn for spending. The retiree then tops up to £11,310 of
+    // taxable income (£15,080 gross) — their allowance less the £1,260 left
+    // free for the Marriage Allowance, which saves their basic-rate partner £252.
     const r = projectLifecycle(
       {
         ...retiree(60),
@@ -2772,7 +2786,102 @@ describe('couple mode — both alive', () => {
     assert.equal(row.livingExpenses, 40_000);
     assert.equal(row.shortfall, 0);
     assert.equal(row.people[1].status, 'working');
-    near(row.people[0].pensionDrawdown, 40_000 - 25_119.6);
+    assert.equal(row.people[0].pensionDrawdown, 15_080);
+    near(row.people[0].pensionSavedWithinAllowance, 15_080 - (40_000 - 25_119.6));
+    assert.equal(row.people[0].taxableIncome, 11_310);
+    assert.equal(row.people[0].incomeTax, 0);
+    assert.equal(row.marriageAllowance, 252);
+    near(row.saved, 15_080 - (40_000 - 25_119.6) + 252);
+  });
+
+  describe('a retiree whose allowance would go unused', () => {
+    // The partner's pay covers the bills, so nothing is needed from the pots.
+    const plan = (partner, extra = {}) =>
+      projectLifecycle(
+        {
+          ...retiree(60),
+          currentYear: 2026,
+          annualLivingExpenses: 20_000,
+          partner: {
+            currentAge: 50,
+            retirementAge: 60,
+            employeePensionRate: 0,
+            employerPensionRate: 0,
+            niContributionYears: 30,
+            ...partner,
+          },
+          ...extra,
+        },
+        flat,
+        { pensionBalance: 500_000 },
+        { targetNetAnnualExpenses: 30_000, maxAge: 70 }
+      ).yearlyBreakdown.find((x) => x.age === 61);
+
+    it('draws pension up to the allowance, tax-free, and saves it', () => {
+      // A higher-rate partner can't receive the Marriage Allowance, so the
+      // whole £12,570 is used: £16,760 gross under UFPLS.
+      const row = plan({ grossIncome: 60_000 });
+      const [me] = row.people;
+      assert.equal(row.phase, 'transition');
+      assert.equal(me.pensionDrawdown, 16_760);
+      assert.equal(me.pensionSavedWithinAllowance, 16_760);
+      assert.equal(me.pensionTaxFreeDrawn, 4_190);
+      assert.equal(me.taxableIncome, 12_570);
+      assert.equal(me.incomeTax, 0);
+      assert.equal(row.marriageAllowance, 0);
+      assert.equal(me.pension.closingBalance, 500_000 - 16_760);
+      // It joins the household's savings: both ISAs first.
+      assert.ok(row.saved > 16_760);
+      assert.equal(me.isaContribution + row.people[1].isaContribution, 40_000);
+    });
+
+    it('a couple living together uses the whole allowance (no Marriage Allowance)', () => {
+      const row = plan({ grossIncome: 30_000 }, { partnership: 'cohabiting' });
+      assert.equal(row.people[0].pensionDrawdown, 16_760);
+      assert.equal(row.marriageAllowance, 0);
+    });
+
+    it('a married couple keeps £1,260 free when the partner can use it', () => {
+      const row = plan({ grossIncome: 30_000 });
+      assert.equal(row.people[0].pensionDrawdown, 15_080);
+      assert.equal(row.people[0].taxableIncome, 11_310);
+      assert.equal(row.marriageAllowance, 252);
+    });
+
+    it('nothing is drawn before the pension can be accessed', () => {
+      const row = projectLifecycle(
+        {
+          ...retiree(50),
+          currentYear: 2026,
+          annualLivingExpenses: 20_000,
+          partner: {
+            currentAge: 50,
+            retirementAge: 60,
+            grossIncome: 60_000,
+            employeePensionRate: 0,
+            employerPensionRate: 0,
+            niContributionYears: 30,
+          },
+        },
+        flat,
+        { pensionBalance: 500_000 },
+        { targetNetAnnualExpenses: 30_000, maxAge: 70 }
+      ).yearlyBreakdown.find((x) => x.age === 51);
+      assert.equal(row.people[0].status, 'retired');
+      assert.equal(row.people[0].pensionDrawdown, 0);
+      assert.equal(row.people[0].pensionSavedWithinAllowance, 0);
+      assert.equal(row.people[0].pension.closingBalance, 500_000);
+    });
+
+    it('guaranteed income uses up the allowance first', () => {
+      // A £10,000 DB pension leaves £2,570 of allowance: £3,426.67 gross.
+      const row = plan(
+        { grossIncome: 60_000 },
+        { dbPensions: [{ status: 'inPayment', pension: 10_000 }] }
+      );
+      near(row.people[0].pensionSavedWithinAllowance, 3_426.67);
+      assert.equal(row.people[0].incomeTax, 0);
+    });
   });
 
   it('runs until the younger partner reaches the horizon', () => {

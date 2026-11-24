@@ -4107,6 +4107,15 @@ function CoupleYearDetail({ row, mobile }) {
         {q.pensionDrawdown > 0 && (
           <DetailLine label="Pension drawn" value={fmtGBP(q.pensionDrawdown)} color="#4f8ef7" />
         )}
+        {(q.pensionSavedWithinAllowance ?? 0) > 0 && (
+          <DetailLine
+            label="of which saved, tax-free"
+            value={fmtGBP(q.pensionSavedWithinAllowance)}
+            color="#34d399"
+            indent={1}
+            dim
+          />
+        )}
         {q.incomeTax > 0 && (
           <DetailLine label="− Income tax" value={fmtGBP(q.incomeTax)} color="#f43f5e" indent={1} />
         )}

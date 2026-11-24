@@ -1585,6 +1585,7 @@ export function projectLifecycle(
         class3: null,
         pensionDraw: 0,
         pensionTaxFree: 0,
+        allowanceTopUp: 0,
         giaDraw: 0,
         giaCGT: 0,
         isaDraw: 0,
@@ -1791,6 +1792,47 @@ export function projectLifecycle(
     }
     const shortfall = round2(Math.max(0, unmet - class3Unfunded));
 
+    // ── Use each retiree's personal allowance in full ───────────────────
+    // Pension drawn within the personal allowance is tax-free, and moved into
+    // an ISA it grows tax-free just as it would in the pension — but later
+    // withdrawals from the pension would be taxed. So a retiree whose
+    // allowance isn't used up by the year's spending (their partner still
+    // works, or the household's other income covers it) draws pension up to
+    // the allowance anyway and the money joins the year's savings. If their
+    // partner can use the Marriage Allowance, £1,260 of it is left free for
+    // that instead.
+    const pa = round2(PERSONAL_ALLOWANCE * scale);
+    const transferable = round2(COUPLE_DEFAULTS.marriageAllowance * scale);
+    const basicRateTop = round2((PERSONAL_ALLOWANCE + BASIC_RATE_BAND) * scale);
+    const taxableSoFar = (s) =>
+      s.working
+        ? s.pay.thresholdIncome
+        : round2(s.guaranteedGross + round2(s.pensionDraw - s.pensionTaxFree));
+    const taxableBefore = st.map(taxableSoFar);
+    for (const [k, s] of st.entries()) {
+      if (s.working) continue;
+      const own = taxableBefore[k];
+      const other = taxableBefore[1 - k];
+      const leaveForMarriageAllowance =
+        partnership === 'married' &&
+        own <= pa - transferable &&
+        other > pa &&
+        other <= basicRateTop;
+      const r = drawPensionWithinAllowance(
+        s.P,
+        s.P.pension,
+        s.accessible,
+        own,
+        scale,
+        leaveForMarriageAllowance ? round2(pa - transferable) : pa
+      );
+      if (r.draw <= 0) continue;
+      s.allowanceTopUp = r.draw;
+      s.pensionDraw = round2(s.pensionDraw + r.draw);
+      s.pensionTaxFree = round2(s.pensionTaxFree + r.taxFree);
+      savings = round2(savings + r.draw);
+    }
+
     // Each retiree's income tax on guaranteed income plus taxable pension drawn.
     for (const s of st) {
       if (s.working) {
@@ -1809,12 +1851,10 @@ export function projectLifecycle(
     // transferor nothing; the saving is added to savings.
     let marriageAllowance = 0;
     if (partnership === 'married') {
-      const pa = PERSONAL_ALLOWANCE * scale;
-      const transferable = COUPLE_DEFAULTS.marriageAllowance * scale;
-      const basicRateTop = (PERSONAL_ALLOWANCE + BASIC_RATE_BAND) * scale;
       const [a, b] = byIncome;
       if (
-        a.taxableIncome <= pa - transferable &&
+        // (a penny's grace for rounding in the allowance top-up)
+        a.taxableIncome <= pa - transferable + 0.01 &&
         b.taxableIncome > pa &&
         b.taxableIncome <= basicRateTop
       ) {
@@ -1893,6 +1933,7 @@ export function projectLifecycle(
       shortfall,
       netIncomeAchieved,
       marriageAllowance,
+      pensionSavedWithinAllowance: sum((s) => s.allowanceTopUp),
       windfall: windfallAmt,
       windfallLabels: windfall?.labels ?? [],
       oneOffExpense: expenseAmt,
@@ -2022,6 +2063,9 @@ export function projectLifecycle(
       taxableIncome: s.taxableIncome,
       pensionDrawdown: s.pensionDraw,
       pensionTaxFreeDrawn: s.pensionTaxFree,
+      // Of the pension drawn, how much was moved to savings to use the
+      // personal allowance (not needed for spending).
+      pensionSavedWithinAllowance: s.allowanceTopUp,
       isaWithdrawal: s.isaDraw,
       giaWithdrawal: s.giaDraw,
       giaCGT: s.giaCGT,
@@ -2082,6 +2126,7 @@ export function projectLifecycle(
       pclsCapped: row.pclsCapped ?? false,
       netIncome: status === 'working' ? row.netTakeHome : null,
       pensionDrawdown: row.pensionDrawdown ?? 0,
+      pensionSavedWithinAllowance: 0,
       isaWithdrawal: row.isaWithdrawal ?? 0,
       giaWithdrawal: row.giaWithdrawal ?? 0,
       giaCGT: row.giaCGT ?? 0,
