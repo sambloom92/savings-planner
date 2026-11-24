@@ -6612,7 +6612,10 @@ Use Available funds to see whether an early-retirement plan can bridge the gap u
             'Solvent for life: the chance you never run out of money while still alive — the complement of the lifetime probability of ruin. Each trial that runs dry is weighted by the probability you live to see it (from ONS life tables for your sex and year of birth, set in the Simulation tab), so dying with money left counts as success. Set high enough that the age horizon reaches ~100 for this to be meaningful.\n\n' +
             'Running dry means being unable to meet your target spending — including the bridge years before your pension access age, when a locked pension you cannot yet touch does not count as available. Early access penalties are not modelled.\n\n' +
             'The "to age N" figure is the simpler fixed-horizon view: the fraction of trials solvent all the way to the model horizon, ignoring survival. It is always the more pessimistic of the two.\n\n' +
-            'Bands show the 10th–90th percentile range (faint) and 25th–75th range (stronger). Lines show the 5 key percentiles. The dotted curve is the probability of still being alive at each age.\n\n' +
+            'Bands show the 10th–90th percentile range (faint) and 25th–75th range (stronger). Lines show the 5 key percentiles. ' +
+            (couple
+              ? 'The dotted curve, P(at least one alive), is the probability that at least one of you is still alive at each of your ages.\n\n'
+              : 'The dotted curve is the probability of still being alive at each age.\n\n') +
             'Click and hold on a data point to isolate the single trial closest to that percentile at that age. Shortfall labels (▼ with age) show when each percentile path runs out of money.'
           }
         />
@@ -6717,6 +6720,7 @@ Use Available funds to see whether an early-retirement plan can bridge the gap u
           extraLines={coupleLinesMc}
           retirementIsTarget={p.flexibleRetirement}
           survivalSeries={mcResults.solvency?.survival}
+          survivalLabel={couple ? (mobile ? 'P(≥1 alive)' : 'P(at least one alive)') : 'P(alive)'}
           shortfallMarkers={mcResults.solvency?.shortfallMarkers}
           shortfallAges={mcResults.shortfallAges}
           fundsView={fundsView}
