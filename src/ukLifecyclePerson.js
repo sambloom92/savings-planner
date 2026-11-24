@@ -1071,6 +1071,23 @@ export function harvestGainsWithinExemption(P, exemptRemaining) {
 }
 
 /**
+ * Move `amount` (market value) of GIA investments from one spouse or civil
+ * partner to the other. Transfers between them are at "no gain, no loss": no
+ * CGT now, and the receiver takes over the original base cost, so the share
+ * of cost moves with the share of value. Returns the amount moved.
+ */
+export function transferGIA(from, to, amount) {
+  const moved = round2(Math.min(Math.max(0, amount), from.gia));
+  if (moved <= 0) return 0;
+  const cost = moved === from.gia ? from.costBasis : round2(from.costBasis * (moved / from.gia));
+  from.gia = round2(from.gia - moved);
+  from.costBasis = round2(from.costBasis - cost);
+  to.gia = round2(to.gia + moved);
+  to.costBasis = round2(to.costBasis + cost);
+  return moved;
+}
+
+/**
  * Grow the pots for a working year after this year's contributions. Balances
  * are floored at 0; negative growth (falling markets) cannot produce a
  * negative pot.
@@ -1405,26 +1422,26 @@ export function drawPensionWithinAllowance(
 }
 
 /**
- * Step 2. GIA up to the annual CGT exempt amount (gains realised tax-free).
+ * Step 2. GIA up to the annual CGT exempt amount (gains realised tax-free);
+ * `exempt` is the exempt amount to use (default the full £3,000 — a married
+ * couple uses what's left of one partner's on the other's investments).
  * Also returns the gain fraction before the sale, so the household can work
  * out how much of the exemption is left for bed and ISA.
  */
-export function drawGiaWithinExemption(P, remaining, incomeForCGT, scale) {
+export function drawGiaWithinExemption(
+  P,
+  remaining,
+  incomeForCGT,
+  scale,
+  exempt = GIA_CGT_CONSTANTS.annualExemptAmount
+) {
   const gainFracPre = P.gia > 0 ? Math.max(0, (P.gia - P.costBasis) / P.gia) : 0;
   let draw = 0;
   let cgt = 0;
-  if (remaining > 0 && P.gia > 0) {
-    const grossForExempt =
-      gainFracPre > 0 ? GIA_CGT_CONSTANTS.annualExemptAmount / gainFracPre : P.gia; // unrounded — used only in Math.min
+  if (remaining > 0 && P.gia > 0 && exempt > 0) {
+    const grossForExempt = gainFracPre > 0 ? exempt / gainFracPre : P.gia; // unrounded — used only in Math.min
     draw = round2(Math.min(remaining, Math.min(grossForExempt, P.gia)));
-    cgt = computeGIACGT(
-      draw,
-      P.gia,
-      P.costBasis,
-      incomeForCGT,
-      GIA_CGT_CONSTANTS.annualExemptAmount,
-      scale
-    );
+    cgt = computeGIACGT(draw, P.gia, P.costBasis, incomeForCGT, exempt, scale);
     const net = round2(draw - cgt);
     sellGIA(P, draw);
     remaining = round2(remaining - net);

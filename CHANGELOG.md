@@ -8,7 +8,13 @@ Every change to Savings Planner, newest first. Each release is tagged `vX.Y.Z` o
 
 Versions before 1.0.0 are the early history, up to couple mode. Each pull request adds its entry here and bumps the version in `package.json`; the release is tagged automatically when it merges.
 
-## [1.3.0]
+## [1.4.0]
+
+### Added
+
+- Married couples and civil partners use both people's allowances on either one's investments, as moving investments between them costs no CGT: both £3,000 CGT allowances when selling in retirement and when realising gains each year, and the second £20k ISA allowance through bed and ISA, as far as the CGT allowance covers. Only moves that cost no tax now are made, so results can only improve (#45).
+
+## [1.3.0] — 2026-11-24
 
 ### Added
 
