@@ -76,6 +76,12 @@ npm run format     # Prettier (auto-fix)
 
 CI runs lint, format check, and unit tests on every push and pull request. Deployment to GitHub Pages only happens on merges to `main` after all checks pass.
 
+## Versions and changelog
+
+Every change is listed in [CHANGELOG.md](CHANGELOG.md), which the site shows under **What's new** in the footer. Versions follow [Semantic Versioning](https://semver.org): a **major** version means saved scenarios or pasted JSON from before it won't load, a **minor** version adds a feature or changes results, and a **patch** fixes things.
+
+To release a change, the pull request adds its entry at the top of `CHANGELOG.md` and sets the same version in `package.json` (a test checks they match). When it merges, the **Tag releases** workflow tags that commit `vX.Y.Z`. `releases.json` records the releases made before the workflow existed; `node scripts/tag-releases.mjs --dry-run` shows what would be tagged.
+
 ## Project structure
 
 ```
@@ -93,6 +99,7 @@ src/
   ukLifecyclePerson.js    One person in the projection: pay and tax, pots, state/DB pensions, lump sums, drawdown steps
   ukEstate.js             A death in couple mode: inheritance tax, what passes to the survivor, the estate snapshot
   ukProtection.js         The cover gap: extra life cover a survivor would need (couple mode)
+  changelog.js            Reads CHANGELOG.md for the in-app What's new panel
   ukMonteCarlo.js         Monte Carlo simulation — two-regime Markov model
   ukMortality.js          UK survival model (ONS cohort life tables) for lifetime solvency
   ukMortalityTable.js     ONS 2024-based cohort death rates by sex and year of birth (generated)
@@ -102,6 +109,7 @@ src/
 scripts/
   build_ons_mortality_table.py  Regenerates ukMortalityTable.js from the ONS qx spreadsheet
   compare-engine.mjs            Checks the engine gives identical results to a git ref (for refactors)
+  tag-releases.mjs              Tags each release vX.Y.Z on main (run by the Tag releases workflow)
 ```
 
 Each `*.js` module (except `formatters.js` and the generated `ukMortalityTable.js`) has a corresponding `*.test.js` file with unit tests (no test framework dependency — plain Node assertions via `node:assert`).

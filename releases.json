@@ -1,0 +1,181 @@
+{
+  "_comment": "Past releases, for scripts/tag-releases.mjs: each version and the commit that shipped it, or the pull request whose squash-merge commit did. New releases need no entry: the version in package.json is tagged on main when it merges.",
+  "releases": [
+    {
+      "version": "0.1.0",
+      "commit": "04379c460e2a089273fd77d3ed77242233ac5ab2"
+    },
+    {
+      "version": "0.2.0",
+      "commit": "a763250a638a185a9f621036d58d6a3575e4656d"
+    },
+    {
+      "version": "0.3.0",
+      "pr": 1
+    },
+    {
+      "version": "0.4.0",
+      "pr": 3
+    },
+    {
+      "version": "0.4.1",
+      "pr": 4
+    },
+    {
+      "version": "0.4.2",
+      "pr": 5
+    },
+    {
+      "version": "0.5.0",
+      "commit": "3561f8f0aa12d6e555f1eee65e860b521059f8ce"
+    },
+    {
+      "version": "0.5.1",
+      "commit": "021305d47e50b794e5be8729b1c9dab0dba3dd5e"
+    },
+    {
+      "version": "0.6.0",
+      "pr": 7
+    },
+    {
+      "version": "0.7.0",
+      "pr": 8
+    },
+    {
+      "version": "0.8.0",
+      "pr": 9
+    },
+    {
+      "version": "0.9.0",
+      "pr": 10
+    },
+    {
+      "version": "0.10.0",
+      "pr": 11
+    },
+    {
+      "version": "0.11.0",
+      "pr": 12
+    },
+    {
+      "version": "0.11.1",
+      "pr": 13
+    },
+    {
+      "version": "0.12.0",
+      "pr": 14
+    },
+    {
+      "version": "0.12.1",
+      "pr": 15
+    },
+    {
+      "version": "0.12.2",
+      "pr": 16
+    },
+    {
+      "version": "0.13.0",
+      "pr": 17
+    },
+    {
+      "version": "0.13.1",
+      "pr": 18
+    },
+    {
+      "version": "0.14.0",
+      "pr": 19
+    },
+    {
+      "version": "0.15.0",
+      "pr": 20
+    },
+    {
+      "version": "0.16.0",
+      "pr": 21
+    },
+    {
+      "version": "0.17.0",
+      "pr": 22
+    },
+    {
+      "version": "0.18.0",
+      "pr": 23
+    },
+    {
+      "version": "0.19.0",
+      "pr": 24
+    },
+    {
+      "version": "0.20.0",
+      "pr": 25
+    },
+    {
+      "version": "0.20.1",
+      "pr": 26
+    },
+    {
+      "version": "0.21.0",
+      "pr": 27
+    },
+    {
+      "version": "0.22.0",
+      "pr": 28
+    },
+    {
+      "version": "0.23.0",
+      "pr": 29
+    },
+    {
+      "version": "0.24.0",
+      "pr": 30
+    },
+    {
+      "version": "0.24.1",
+      "pr": 31
+    },
+    {
+      "version": "0.25.0",
+      "pr": 32
+    },
+    {
+      "version": "0.25.1",
+      "pr": 33
+    },
+    {
+      "version": "0.26.0",
+      "pr": 35
+    },
+    {
+      "version": "0.27.0",
+      "pr": 36
+    },
+    {
+      "version": "0.27.1",
+      "pr": 37
+    },
+    {
+      "version": "0.27.2",
+      "pr": 38
+    },
+    {
+      "version": "0.28.0",
+      "pr": 43
+    },
+    {
+      "version": "1.0.0",
+      "pr": 39
+    },
+    {
+      "version": "1.0.1",
+      "pr": 44
+    },
+    {
+      "version": "1.1.0",
+      "pr": 40
+    },
+    {
+      "version": "1.2.0",
+      "pr": 41
+    }
+  ]
+}
