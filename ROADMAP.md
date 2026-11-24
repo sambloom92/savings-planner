@@ -18,6 +18,5 @@ Move it up to **Planned** once it's decided, and when it ships it goes in the ch
 - **Left to heirs** — what passes to your heirs after the second death in couple mode (or yours, planning alone), net of inheritance tax, including the nil-rate band a spouse can pass on and the home allowance. The estate snapshot already records what's needed.
 - **Chart by person** — in couple mode, stack the chart by partner instead of by pot.
 - **Debt owners** — mark each debt as yours, your partner's or joint, so a death settles it from the right estate.
-- **Marry at age X** — in couple mode, see what marrying or forming a civil partnership would change: inheritance tax, ISAs, Marriage Allowance.
 - **Moving investments between spouses** — rebalance the GIA between a married couple (no capital gains tax between spouses) to use both people's allowances and tax bands.
 - **Joint-life annuities** — an annuity that keeps paying the survivor.
