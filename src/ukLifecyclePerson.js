@@ -515,6 +515,15 @@ export function createPerson(profile, pots, retirementOptions, currentYear) {
     // cost, and how many are still to buy.
     class3: { yearsBought: 0, totalCost: 0, yearsRemaining: 0 },
     annuity: null,
+
+    // ── Couple mode (set by the household) ──
+    // Age at death in a "what if one of us dies" plan; null while alive.
+    diedAt: null,
+    // A pension inherited from a partner, kept apart from the person's own pot:
+    // withdrawals are tax-free if the partner died before 75, otherwise taxed
+    // as income — and neither uses the person's Lump Sum Allowance. Null until
+    // something is inherited.
+    inherited: null,
   };
 }
 
@@ -905,6 +914,7 @@ export function workingYearPay(P, age, year, i, yr, econ) {
     slRepayment,
     slRow,
     netTakeHome,
+    thresholdIncome,
   };
 }
 
@@ -949,9 +959,17 @@ export function investTaxFreeCash(P, amount, isaUsed) {
  *   3. ISA (liquid and tax-free)
  * The pension is never raided — it is inaccessible before retirement. Gains
  * stack on `incomeForCGT`. Returns the funding split, the cash left and the
- * annual exempt amount left for later sales this year.
+ * annual exempt amount left for later sales this year. A couple funds from
+ * both GIAs before either ISA by turning off `useGia` / `useIsa` per call.
  */
-export function fundExpenseWhileWorking(P, amount, cash, incomeForCGT, scale) {
+export function fundExpenseWhileWorking(
+  P,
+  amount,
+  cash,
+  incomeForCGT,
+  scale,
+  { useGia = true, useIsa = true } = {}
+) {
   let exemptRemaining = GIA_CGT_CONSTANTS.annualExemptAmount;
   let fromSavings = 0,
     fromGIAGross = 0,
@@ -965,7 +983,7 @@ export function fundExpenseWhileWorking(P, amount, cash, incomeForCGT, scale) {
     cashLeft = round2(cashLeft - fromSavings);
     expRemaining = round2(expRemaining - fromSavings);
 
-    if (expRemaining > 0 && P.gia > 0) {
+    if (useGia && expRemaining > 0 && P.gia > 0) {
       const gainFracPre = Math.max(0, (P.gia - P.costBasis) / P.gia);
       const gross = round2(
         Math.min(
@@ -981,7 +999,7 @@ export function fundExpenseWhileWorking(P, amount, cash, incomeForCGT, scale) {
       exemptRemaining = round2(Math.max(0, exemptRemaining - gross * gainFracPre));
     }
 
-    if (expRemaining > 0 && P.isa > 0) {
+    if (useIsa && expRemaining > 0 && P.isa > 0) {
       fromISA = round2(Math.min(P.isa, expRemaining));
       P.isa = round2(P.isa - fromISA);
       expRemaining = round2(expRemaining - fromISA);
@@ -1198,7 +1216,29 @@ export function annuityGrossThisYear(P, econ) {
  * already used by lump sums this year. Returns the purchase (or null), the
  * updated ISA use, and the first year's income (0 if nothing was bought).
  */
-export function maybeBuyAnnuity(P, age, econ, spGross, scale, isaUsed) {
+/**
+ * Guaranteed gross income this person will have once everything already
+ * planned is being paid, in this year's money: their state pension (what it
+ * pays now if started, otherwise what it will pay at this year's rates,
+ * counting any Class 3 years still planned) plus their DB pensions (paid, or
+ * as they will be paid). Used to size an annuity around guaranteed income.
+ */
+export function plannedGuaranteedGross(P, age, econ, spGross) {
+  const finalNiYears = P.niYears + P.class3.yearsBought + P.class3.yearsRemaining;
+  const spPlanned =
+    age >= P.spClaimAge
+      ? spGross
+      : finalNiYears >= LIFECYCLE_CONSTANTS.statePension.minimumQualifyingYears
+        ? round2(
+            computeStatePension(finalNiYears) * econ.cumulTriplelock * P.statePensionDeferralUplift
+          )
+        : 0;
+  // Any DB pensions are guaranteed income too: count what they pay, or
+  // will pay once taken, alongside the state pension.
+  return round2(spPlanned + dbPlannedGross(P));
+}
+
+export function maybeBuyAnnuity(P, age, econ, spGross, scale, isaUsed, otherGuaranteedNet = 0) {
   const cfg = P.annuityCfg;
   if (!cfg || age !== P.annuity.buyAge) return { purchase: null, isaUsed, income: null };
   const result = P.annuity.result;
@@ -1207,29 +1247,16 @@ export function maybeBuyAnnuity(P, age, econ, spGross, scale, isaUsed) {
   if (cfg.sizing === 'fixed') {
     targetIncome = round2(cfg.amountReal * econ.cumulInflation);
   } else {
-    // Cover essential net spending on top of the state pension, sized to the
-    // permanent gap once the state pension is paid. If it hasn't started
-    // yet, use what it will pay (this year's rates, counting any Class 3
-    // years still planned); the years before it starts come from the pots.
-    const finalNiYears = P.niYears + P.class3.yearsBought + P.class3.yearsRemaining;
-    const spPlanned =
-      age >= P.spClaimAge
-        ? spGross
-        : finalNiYears >= LIFECYCLE_CONSTANTS.statePension.minimumQualifyingYears
-          ? round2(
-              computeStatePension(finalNiYears) *
-                econ.cumulTriplelock *
-                P.statePensionDeferralUplift
-            )
-          : 0;
-    // Any DB pensions are guaranteed income too: count what they pay, or
-    // will pay once taken, alongside the state pension.
-    const guaranteedPlanned = round2(spPlanned + dbPlannedGross(P));
+    // Cover essential net spending on top of guaranteed income, sized to the
+    // permanent gap once the state pension is paid; the years before it
+    // starts come from the pots. In a couple the partner's guaranteed income
+    // (after their own tax) counts too.
+    const guaranteedPlanned = plannedGuaranteedGross(P, age, econ, spGross);
     const guaranteedPlannedNet = round2(
       guaranteedPlanned - calculateIncomeTax(guaranteedPlanned, scale).totalTax
     );
     const needNet = round2(
-      Math.max(0, cfg.amountReal * econ.cumulInflation - guaranteedPlannedNet)
+      Math.max(0, cfg.amountReal * econ.cumulInflation - guaranteedPlannedNet - otherGuaranteedNet)
     );
     // Gross up for income tax, stacked on top of the guaranteed income.
     targetIncome =
@@ -1329,13 +1356,22 @@ export function settleClass3(P, cost, unmet) {
  *   • LSA < taxFreeRoom/3: use all remaining LSA, rest taxable
  *       taxable = gross − lsaRemaining = taxFreeRoom → gross = taxFreeRoom + lsaRemaining
  * Skipped before the pension is accessible (NMPA) — the pot is left to grow.
+ * `guaranteedGross` is the taxable income already counted this year;
+ * `allowance` is the allowance to fill (a couple leaves part of it free for
+ * the Marriage Allowance).
  */
-export function drawPensionWithinAllowance(P, remaining, accessible, guaranteedGross, scale) {
+export function drawPensionWithinAllowance(
+  P,
+  remaining,
+  accessible,
+  guaranteedGross,
+  scale,
+  allowance = round2(PERSONAL_ALLOWANCE * scale)
+) {
   let draw = 0;
   let taxFree = 0;
   if (accessible && remaining > 0 && P.pension > 0) {
-    const scaledPA = round2(PERSONAL_ALLOWANCE * scale);
-    const taxFreeRoom = round2(Math.max(0, scaledPA - guaranteedGross));
+    const taxFreeRoom = round2(Math.max(0, allowance - guaranteedGross));
     let limit;
     if (P.takePCLS || taxFreeRoom <= 0) {
       limit = taxFreeRoom;
@@ -1436,4 +1472,88 @@ export function drawPensionTaxable(P, remaining, accessible, incomeForCGT, scale
     remaining = round2(remaining - net);
   }
   return { draw, taxFree, remaining };
+}
+
+/**
+ * Gross pension withdrawal whose taxable part is `taxable`: under UFPLS a
+ * quarter of each £1 is tax-free while the Lump Sum Allowance lasts, so the
+ * gross is taxable / 0.75 — or, once the allowance runs out partway, the
+ * taxable amount plus what's left of it. With the lump sum already taken
+ * every £1 is taxable. Capped at the pot.
+ */
+export function pensionGrossForTaxable(P, taxable) {
+  if (taxable <= 0 || P.pension <= 0) return 0;
+  let gross = taxable;
+  if (!P.takePCLS && P.lsaRemaining > 0)
+    gross = 0.25 * (taxable / 0.75) <= P.lsaRemaining ? taxable / 0.75 : taxable + P.lsaRemaining;
+  return Math.min(round2(gross), P.pension);
+}
+
+/**
+ * Withdraw `gross` from the pension (step 5 across a couple), taxed on top of
+ * `incomeForCGT`. Returns the draw, its tax-free part and the net received.
+ */
+export function drawPensionGross(P, gross, incomeForCGT, scale) {
+  const draw = round2(Math.min(gross, P.pension));
+  if (draw <= 0) return { draw: 0, taxFree: 0, net: 0 };
+  const taxFree = P.takePCLS ? 0 : round2(Math.min(0.25 * draw, P.lsaRemaining));
+  if (!P.takePCLS) P.lsaRemaining = round2(Math.max(0, P.lsaRemaining - taxFree));
+  const taxableIncome = round2(draw - taxFree);
+  const tax = round2(
+    calculateIncomeTax(incomeForCGT + taxableIncome, scale).totalTax -
+      calculateIncomeTax(incomeForCGT, scale).totalTax
+  );
+  P.pension = round2(P.pension - draw);
+  return { draw, taxFree, net: round2(draw - tax) };
+}
+
+/**
+ * Step 1b. A taxable inherited pension (partner died at 75 or over) within
+ * whatever personal allowance is left after `taxableSoFar` of income — so a
+ * survivor with no pension of their own doesn't waste their allowance.
+ */
+export function drawInheritedWithinAllowance(P, remaining, taxableSoFar, scale) {
+  if (!P.inherited?.taxable || remaining <= 0) return { draw: 0, remaining };
+  const room = Math.max(0, round2(PERSONAL_ALLOWANCE * scale) - taxableSoFar);
+  const draw = round2(Math.min(remaining, room, P.inherited.taxable));
+  P.inherited.taxable = round2(P.inherited.taxable - draw);
+  return { draw, remaining: round2(remaining - draw) };
+}
+
+/** Step 3a. An inherited pension paid out tax-free (partner died before 75). */
+export function drawInheritedTaxFree(P, remaining) {
+  if (!P.inherited?.taxFree) return { draw: 0, remaining };
+  const draw = round2(Math.min(remaining, P.inherited.taxFree));
+  P.inherited.taxFree = round2(P.inherited.taxFree - draw);
+  return { draw, remaining: round2(remaining - draw) };
+}
+
+/**
+ * Step 4b. An inherited pension taxed as income (partner died at 75 or over):
+ * every £1 is taxable, stacked on `incomeForCGT`, with no tax-free part.
+ */
+export function drawInheritedTaxable(P, remaining, incomeForCGT, scale) {
+  if (!P.inherited?.taxable || remaining <= 0) return { draw: 0, remaining };
+  const draw = pensionGrossForNet(remaining, P.inherited.taxable, incomeForCGT, scale);
+  const tax = round2(
+    calculateIncomeTax(incomeForCGT + draw, scale).totalTax -
+      calculateIncomeTax(incomeForCGT, scale).totalTax
+  );
+  P.inherited.taxable = round2(P.inherited.taxable - draw);
+  return { draw, remaining: round2(remaining - round2(draw - tax)) };
+}
+
+/** Grow any inherited pension pots, returning the growth. */
+export function growInheritedPension(P, rate) {
+  if (!P.inherited) return 0;
+  const tfGrowth = round2(P.inherited.taxFree * rate);
+  const txGrowth = round2(P.inherited.taxable * rate);
+  P.inherited.taxFree = Math.max(0, round2(P.inherited.taxFree + tfGrowth));
+  P.inherited.taxable = Math.max(0, round2(P.inherited.taxable + txGrowth));
+  return round2(tfGrowth + txGrowth);
+}
+
+/** Total inherited pension still held (0 if none). */
+export function inheritedPensionBalance(P) {
+  return P.inherited ? round2(P.inherited.taxFree + P.inherited.taxable) : 0;
 }

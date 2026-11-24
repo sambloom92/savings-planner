@@ -31,6 +31,13 @@
  *   automaticLumpSum
  *                   £ of tax-free cash paid on top of the pension by some older
  *                   schemes (e.g. 3× pension in the NHS 1995 section)
+ *   survivorPensionShare
+ *                   on the member's death, the share of their pension paid for
+ *                   life to a surviving partner (commonly 50%)
+ *   survivorPensionForUnmarriedPartner
+ *                   whether that survivor's pension is also paid to a partner
+ *                   the member wasn't married to (most public-sector schemes do,
+ *                   if nominated; many private schemes don't)
  *
  * Sources: HMRC Pensions Tax Manual — pension input amounts for defined benefit
  * arrangements (the "16 times" rule, PTM053100) and the pension commencement
@@ -65,6 +72,8 @@ export const DB_DEFAULTS = {
   lumpSum: 'none',
   commutationFactor: 12,
   automaticLumpSum: 0,
+  survivorPensionShare: 0.5,
+  survivorPensionForUnmarriedPartner: true,
 };
 
 function round2(n) {
@@ -117,6 +126,9 @@ export function normaliseDbScheme(scheme, currentAge) {
     throw new RangeError("scheme lumpSum must be 'none' or 'max'");
   assertFiniteInRange(s.commutationFactor, 'scheme commutationFactor', 1, 40);
   assertFiniteInRange(s.automaticLumpSum, 'scheme automaticLumpSum', 0, 1e8);
+  assertFiniteInRange(s.survivorPensionShare, 'scheme survivorPensionShare', 0, 1);
+  if (typeof s.survivorPensionForUnmarriedPartner !== 'boolean')
+    throw new TypeError('scheme survivorPensionForUnmarriedPartner must be a boolean');
   return s;
 }
 
