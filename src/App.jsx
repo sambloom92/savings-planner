@@ -24,8 +24,9 @@ import { fmtGBPLarge } from './formatters.js';
 import { illustrativeAnnuityRate } from './ukAnnuity.js';
 import { DB_CONSTANTS, dbPaymentFactor } from './ukDefinedBenefit.js';
 import { lifeExpectancy, survivalToAge } from './ukMortality.js';
-import { parseChangelog, inlineTokens } from './changelog.js';
+import { parseChangelog, parseRoadmap, inlineTokens } from './changelog.js';
 import changelogMarkdown from '../CHANGELOG.md?raw';
+import roadmapMarkdown from '../ROADMAP.md?raw';
 import packageJson from '../package.json';
 
 // ── Formatters ────────────────────────────────────────────────────────────────
@@ -785,6 +786,7 @@ function CompactSummary({ items, onOpen }) {
 // ── Version and changelog ─────────────────────────────────────────────────────
 const APP_VERSION = packageJson.version;
 const CHANGELOG = parseChangelog(changelogMarkdown);
+const ROADMAP = parseRoadmap(roadmapMarkdown);
 const REPO_URL = 'https://github.com/sambloom92/savings-planner';
 
 // A line of changelog text: bold, code, links and pull request references.
@@ -878,6 +880,118 @@ function ReleaseNotes() {
         </section>
       ))}
     </div>
+  );
+}
+
+// What might come next, from ROADMAP.md.
+function RoadmapNotes() {
+  return (
+    <div style={{ fontFamily: 'var(--font-body)', fontSize: 13, lineHeight: 1.55 }}>
+      <p style={{ color: 'var(--text-muted)', fontSize: 12, margin: '0 0 16px' }}>
+        Ideas for what comes next. Have one? It&apos;s a single file to edit:{' '}
+        <a
+          href={`${REPO_URL}/blob/main/ROADMAP.md`}
+          target="_blank"
+          rel="noopener noreferrer"
+          style={{ color: 'var(--accent-gold)' }}
+        >
+          ROADMAP.md
+        </a>
+        .
+      </p>
+      {ROADMAP.map((section) => (
+        <section key={section.title} style={{ marginBottom: 16 }}>
+          <div
+            style={{
+              color: 'var(--accent-gold)',
+              fontSize: 11,
+              letterSpacing: '0.08em',
+              textTransform: 'uppercase',
+              fontWeight: 600,
+              marginBottom: 4,
+            }}
+          >
+            {section.title}
+          </div>
+          <ul style={{ margin: 0, paddingLeft: 18, color: 'var(--text-secondary)' }}>
+            {section.items.map((item, i) => (
+              <li key={i} style={{ marginBottom: 5 }}>
+                <InlineText text={item.text} />
+                {item.children.length > 0 && (
+                  <ul style={{ margin: '2px 0 0', paddingLeft: 16 }}>
+                    {item.children.map((child, j) => (
+                      <li key={j}>
+                        <InlineText text={child} />
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </li>
+            ))}
+          </ul>
+        </section>
+      ))}
+    </div>
+  );
+}
+
+// The footer panel: What's new (the changelog) and the Roadmap, as two tabs.
+function InfoPanelContent({ tab, onTab }) {
+  return (
+    <>
+      <div role="tablist" aria-label="About" style={{ display: 'flex', gap: 6, marginBottom: 14 }}>
+        {[
+          { value: 'changelog', label: "What's new" },
+          { value: 'roadmap', label: 'Roadmap' },
+        ].map(({ value, label }) => {
+          const active = tab === value;
+          return (
+            <button
+              key={value}
+              role="tab"
+              aria-selected={active}
+              onClick={() => onTab(value)}
+              style={{
+                padding: '4px 12px',
+                background: active ? 'var(--accent-gold)' : 'var(--bg-input)',
+                color: active ? 'var(--accent-gold-text)' : 'var(--text-secondary)',
+                border: '1px solid var(--border-bright)',
+                borderRadius: 5,
+                cursor: 'pointer',
+                fontFamily: 'var(--font-body)',
+                fontSize: 12,
+                fontWeight: 600,
+              }}
+            >
+              {label}
+            </button>
+          );
+        })}
+      </div>
+      {tab === 'roadmap' ? <RoadmapNotes /> : <ReleaseNotes />}
+    </>
+  );
+}
+
+// Footer link to the roadmap.
+function RoadmapButton({ onClick }) {
+  return (
+    <button
+      onClick={onClick}
+      title="Roadmap: ideas for what comes next"
+      style={{
+        background: 'transparent',
+        border: 'none',
+        padding: 0,
+        cursor: 'pointer',
+        color: 'var(--text-muted)',
+        fontFamily: 'var(--font-mono)',
+        fontSize: 11,
+        letterSpacing: '0.06em',
+      }}
+    >
+      Roadmap
+    </button>
   );
 }
 
@@ -5270,7 +5384,7 @@ export default function App() {
   const [activeTab, setActiveTab] = useState('Personal');
   // The changelog panel, and whether this version is newer than the one last
   // seen on this device (a first visit counts as seen).
-  const [infoPanel, setInfoPanel] = useState(null); // null | 'changelog'
+  const [infoPanel, setInfoPanel] = useState(null); // null | 'changelog' | 'roadmap'
   const [versionUnseen, setVersionUnseen] = useState(() => {
     try {
       const seen = localStorage.getItem('lastSeenVersion');
@@ -5281,6 +5395,7 @@ export default function App() {
     }
   });
   const closeInfoPanel = useCallback(() => setInfoPanel(null), []);
+  const openRoadmap = useCallback(() => setInfoPanel('roadmap'), []);
   const openChangelog = useCallback(() => {
     setInfoPanel('changelog');
     setVersionUnseen(false);
@@ -7585,12 +7700,22 @@ Use Available funds to see whether an early-retirement plan can bridge the gap u
                   }}
                   unseen={versionUnseen}
                 />
+                <span style={{ margin: '0 10px', color: 'var(--text-muted)' }}>·</span>
+                <RoadmapButton
+                  onClick={() => {
+                    closeSheet();
+                    openRoadmap();
+                  }}
+                />
               </div>
             </Sheet>
           )}
-          {infoPanel === 'changelog' && (
-            <Sheet title="What's new" onClose={closeInfoPanel}>
-              <ReleaseNotes />
+          {infoPanel && (
+            <Sheet
+              title={infoPanel === 'roadmap' ? 'Roadmap' : "What's new"}
+              onClose={closeInfoPanel}
+            >
+              <InfoPanelContent tab={infoPanel} onTab={setInfoPanel} />
             </Sheet>
           )}
 
@@ -7879,6 +8004,7 @@ Use Available funds to see whether an early-retirement plan can bridge the gap u
         }}
       >
         <VersionButton onClick={openChangelog} unseen={versionUnseen} />
+        <RoadmapButton onClick={openRoadmap} />
         <a
           href="https://github.com/sambloom92/savings-planner"
           target="_blank"
@@ -7896,9 +8022,9 @@ Use Available funds to see whether an early-retirement plan can bridge the gap u
           github.com/sambloom92/savings-planner
         </a>
       </footer>
-      {infoPanel === 'changelog' && (
-        <Dialog title="What's new" onClose={closeInfoPanel}>
-          <ReleaseNotes />
+      {infoPanel && !mobile && (
+        <Dialog title={infoPanel === 'roadmap' ? 'Roadmap' : "What's new"} onClose={closeInfoPanel}>
+          <InfoPanelContent tab={infoPanel} onTab={setInfoPanel} />
         </Dialog>
       )}
     </div>

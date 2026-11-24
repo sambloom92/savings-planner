@@ -79,6 +79,8 @@ CI runs lint, format check, and unit tests on every push and pull request. Deplo
 
 Every change is listed in [CHANGELOG.md](CHANGELOG.md), which the site shows under **What's new** in the footer. Versions follow [Semantic Versioning](https://semver.org): a **major** version means saved scenarios or pasted JSON from before it won't load, a **minor** version adds a feature or changes results, and a **patch** fixes things.
 
+Ideas for what comes next live in [ROADMAP.md](ROADMAP.md), shown on the site under **Roadmap** — add one by editing the file.
+
 To release a change, the pull request adds its entry at the top of `CHANGELOG.md` and sets the same version in `package.json` (a test checks they match). When it merges, the **Tag releases** workflow tags that commit `vX.Y.Z`. `releases.json` records the releases made before the workflow existed; `node scripts/tag-releases.mjs --dry-run` shows what would be tagged.
 
 ## Project structure

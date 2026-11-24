@@ -1,6 +1,6 @@
 /**
- * Reads CHANGELOG.md (Keep a Changelog style) for the in-app "What's new"
- * panel: releases as `## [x.y.z] — date` headings (the date is optional, for
+ * Reads CHANGELOG.md (Keep a Changelog style) and ROADMAP.md for the in-app
+ * "What's new" and "Roadmap" panels. The changelog has releases as `## [x.y.z] — date` headings (the date is optional, for
  * an unreleased version), sections as `### Added` etc., and items as `- …`
  * bullets, with `  - …` sub-bullets and wrapped lines continuing an item.
  */
@@ -81,4 +81,45 @@ export function compareVersions(a, b) {
   const pb = b.split('.').map(Number);
   for (let i = 0; i < 3; i++) if (pa[i] !== pb[i]) return pa[i] - pb[i];
   return 0;
+}
+
+/**
+ * Read ROADMAP.md: `## Section` headings (Planned, Ideas…) with `- …` items,
+ * sub-items and wrapped lines as in the changelog. Text before the first
+ * section (how to add an idea) is left out.
+ *
+ * @param {string} markdown
+ * @returns {Array<{ title: string, items: Array<{ text: string, children: string[] }> }>}
+ */
+export function parseRoadmap(markdown) {
+  const sections = [];
+  let section = null;
+  for (const raw of markdown.split('\n')) {
+    const line = raw.trimEnd();
+    const heading = line.match(/^## (.+)$/);
+    if (heading) {
+      section = { title: heading[1], items: [] };
+      sections.push(section);
+      continue;
+    }
+    if (!section) continue;
+    const item = line.match(/^- (.+)$/);
+    if (item) {
+      section.items.push({ text: item[1], children: [] });
+      continue;
+    }
+    const last = section.items.at(-1);
+    if (!last) continue;
+    const child = line.match(/^ {2}- (.+)$/);
+    if (child) {
+      last.children.push(child[1]);
+      continue;
+    }
+    const wrapped = line.match(/^\s{2,}(\S.*)$/);
+    if (wrapped) {
+      if (last.children.length > 0) last.children[last.children.length - 1] += ` ${wrapped[1]}`;
+      else last.text += ` ${wrapped[1]}`;
+    }
+  }
+  return sections;
 }
