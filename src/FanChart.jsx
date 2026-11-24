@@ -88,7 +88,8 @@ function drawFanChart(
   annuityAge,
   retirementIsTarget,
   dbPensionAges,
-  extraLines
+  extraLines,
+  survivalLabel
 ) {
   const ctx = canvas.getContext('2d');
 
@@ -600,7 +601,7 @@ function drawFanChart(
     ctx.textAlign = 'left';
     ctx.fillStyle = mutedCol;
     const last = survivalSeries[survivalSeries.length - 1];
-    ctx.fillText('P(alive)', PAD.left + 4, survY(survivalSeries[0].survival) + 12);
+    ctx.fillText(survivalLabel, PAD.left + 4, survY(survivalSeries[0].survival) + 12);
     ctx.textAlign = 'right';
     ctx.fillText(
       `${Math.round(last.survival * 100)}%`,
@@ -870,6 +871,8 @@ export function FanChart({
   deterministicData = null,
   eventMarkers = null,
   survivalSeries = null,
+  // The survival curve's label: in couple mode it's the chance either is alive.
+  survivalLabel = 'P(alive)',
   pensionAccessAge = null,
   shortfallMarkers = null,
   shortfallAges = null,
@@ -1082,7 +1085,8 @@ export function FanChart({
       annuityAge,
       retirementIsTarget,
       dbPensionAges,
-      extraLines
+      extraLines,
+      survivalLabel
     );
     coordRef.current = { ...coords, adjData: effectiveAdjData };
     // colorMode in deps: theme change re-reads CSS vars via cssVar() at draw time
@@ -1112,6 +1116,7 @@ export function FanChart({
     retirementIsTarget,
     dbPensionAges,
     extraLines,
+    survivalLabel,
   ]);
 
   // Hit-test a pointer event: the nearest age column and, in fan mode, the
