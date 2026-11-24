@@ -1015,12 +1015,16 @@ export function fundExpenseWhileWorking(
  * rebuy inside the ISA (sheltering future growth from CGT). CGT is realised
  * now on any embedded gains, against the exempt amount still unused this year.
  * Grossed up so the net amount landing in the ISA equals the full headroom.
+ * Also returns the gain realised, so the caller knows how much of the exempt
+ * amount it used.
  */
 export function bedAndIsa(P, headroom, incomeForCGT, exemptRemaining, scale) {
   let gross = 0,
     cgt = 0,
-    net = 0;
+    net = 0,
+    gain = 0;
   if (headroom > 0 && P.gia > 0) {
+    const gainFracPre = Math.max(0, (P.gia - P.costBasis) / P.gia);
     const grossNeeded = giaGrossForNet(
       headroom,
       P.gia,
@@ -1032,10 +1036,27 @@ export function bedAndIsa(P, headroom, incomeForCGT, exemptRemaining, scale) {
     gross = round2(Math.min(P.gia, grossNeeded));
     cgt = computeGIACGT(gross, P.gia, P.costBasis, incomeForCGT, exemptRemaining, scale);
     net = round2(gross - cgt);
+    gain = round2(gross * gainFracPre);
     sellGIA(P, gross);
     P.isa = round2(P.isa + net);
   }
-  return { gross, cgt, net };
+  return { gross, cgt, net, gain };
+}
+
+/**
+ * Use the rest of the year's CGT annual exempt amount: realise gains up to it
+ * and reinvest at once, raising the base cost. No tax is due now, and less gain
+ * is taxed when the investments are sold later. In practice this means selling
+ * and buying a similar (not identical) fund, or buying back after 30 days —
+ * shares bought back within 30 days are matched to the sale and the gain
+ * isn't reset. Run after the year's growth (the end of the tax year), with
+ * `exemptRemaining` the exempt amount not already used this year by sales.
+ * Returns the gain realised.
+ */
+export function harvestGainsWithinExemption(P, exemptRemaining) {
+  const gain = round2(Math.max(0, Math.min(P.gia - P.costBasis, exemptRemaining)));
+  if (gain > 0) P.costBasis = round2(P.costBasis + gain);
+  return gain;
 }
 
 /**
