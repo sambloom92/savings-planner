@@ -13,6 +13,7 @@ Versions before 1.0.0 are the early history, up to couple mode. Each pull reques
 ### Added
 
 - Married couples and civil partners use both people's allowances on either one's investments, as moving investments between them costs no CGT: both £3,000 CGT allowances when selling in retirement and when realising gains each year, and the second £20k ISA allowance through bed and ISA, as far as the CGT allowance covers. Only moves that cost no tax now are made, so results can only improve (#45).
+- A partner with little or no pay gets pension tax relief: £2,880 a year from the household's savings goes into their pension, topped up to £3,600 by basic-rate relief, until they're 75, take tax-free cash or start drawing (#45).
 
 ## [1.3.0] — 2026-11-24
 

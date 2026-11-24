@@ -11,7 +11,7 @@ Move it up to **Planned** once it's decided, and when it ships it goes in the ch
 ## Planned
 
 - **Tutorial mode** — a guided introduction for first-time users. To be described: what it should walk through, and how.
-- **State pension triple lock changes** — the government has proposed changing how the triple lock uprates the state pension. Waiting for a bill to set out the details; model the new rule then, with a setting to compare it against the current triple lock. An earlier draft is in #34.
+- **State pension triple lock changes** — from April 2030 the state pension would rise by the higher of CPI and 2.5%, or more to hold its value relative to earnings, instead of the triple lock (announced September 2026, confirmed in the Budget on 28 October). Modelled in #34, with a setting to compare it against the triple lock; it merges once the change is law.
 
 ## Ideas
 

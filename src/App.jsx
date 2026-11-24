@@ -4477,6 +4477,13 @@ function CoupleYearDetail({ row, mobile }) {
             dim
           />
         )}
+        {(q.reliefAtSourceGross ?? 0) > 0 && (
+          <DetailLine
+            label="→ Pension (+ tax relief)"
+            value={`${fmtGBP(q.reliefAtSourceNet)} + ${fmtGBP(q.reliefAtSourceGross - q.reliefAtSourceNet)}`}
+            color="#4f8ef7"
+          />
+        )}
         {q.isaContribution + q.giaContribution > 0 && (
           <DetailLine
             label="→ Saved (ISA / GIA)"

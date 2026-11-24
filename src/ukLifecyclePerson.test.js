@@ -11,6 +11,8 @@ import {
   bedAndIsa,
   harvestGainsWithinExemption,
   transferGIA,
+  reliefAtSourceRoom,
+  payWithReliefAtSource,
   takePensionLumpSum,
   enterRetirement,
   class3CostThisYear,
@@ -223,6 +225,25 @@ describe('moving money between pots', () => {
     const Q = person({}, { giaBalance: 20_000, giaCostBasis: 19_000 });
     assert.equal(harvestGainsWithinExemption(Q, 2_500), 1_000);
     assert.equal(Q.costBasis, 20_000);
+  });
+
+  it('relief at source: £3,600 a year with little or no pay, under 75, before drawing', () => {
+    const P = person({ grossIncome: 0 });
+    assert.equal(reliefAtSourceRoom(P, 40, 0, 0, false), 3_600);
+    assert.equal(reliefAtSourceRoom(P, 40, 2_000, 1_000, false), 2_600); // less own payments
+    assert.equal(reliefAtSourceRoom(P, 40, 3_600, 0, false), 0); // pay of £3,600 or more
+    assert.equal(reliefAtSourceRoom(P, 75, 0, 0, false), 0);
+    assert.equal(reliefAtSourceRoom(P, 60, 0, 0, true), 0); // already drawing
+    P.lsaRemaining -= 1; // some tax-free cash taken
+    assert.equal(reliefAtSourceRoom(P, 60, 0, 0, false), 0);
+  });
+
+  it('relief at source adds £20 for every £80 paid in', () => {
+    const P = person({ grossIncome: 0 });
+    assert.deepEqual(payWithReliefAtSource(P, 10_000, 3_600), { net: 2_880, gross: 3_600 });
+    assert.deepEqual(payWithReliefAtSource(P, 1_000, 3_600), { net: 1_000, gross: 1_250 });
+    assert.equal(P.pension, 4_850);
+    assert.deepEqual(payWithReliefAtSource(P, 0, 3_600), { net: 0, gross: 0 });
   });
 
   it('a transfer between spouses moves value and its share of the cost', () => {

@@ -62,6 +62,8 @@ import {
   bedAndIsa,
   harvestGainsWithinExemption,
   transferGIA,
+  reliefAtSourceRoom,
+  payWithReliefAtSource,
   growPotsWhileWorking,
   growPotsInRetirement,
   estimatedPensionTaxShare,
@@ -1612,6 +1614,8 @@ export function projectLifecycle(
         pensionDraw: 0,
         pensionTaxFree: 0,
         allowanceTopUp: 0,
+        rasNet: 0,
+        rasGross: 0,
         giaDraw: 0,
         giaCGT: 0,
         isaDraw: 0,
@@ -1903,6 +1907,26 @@ export function projectLifecycle(
       }
     }
 
+    // ── A non-earner's pension, with tax relief ─────────────────────────
+    // A partner with pay under £3,600 can still pay £2,880 a year into a
+    // pension and get £720 of basic-rate relief added: an instant 25% that
+    // beats any other home for the household's savings, so it comes first.
+    for (const s of st) {
+      if (savings <= 0) break;
+      const room = reliefAtSourceRoom(
+        s.P,
+        s.age,
+        s.working ? s.pay.effectiveIncome : 0,
+        s.working ? s.pay.employeeContrib : 0,
+        !s.working && s.accessible
+      );
+      if (room <= 0) continue;
+      const r = payWithReliefAtSource(s.P, savings, room);
+      s.rasNet = r.net;
+      s.rasGross = r.gross;
+      savings = round2(savings - r.net);
+    }
+
     // ── Savings: both ISAs first, then the lower earner's GIA ───────────
     if (savings > 0) {
       const room = st.map((s) => Math.max(0, ISA_LIMIT - s.isaUsed));
@@ -1996,6 +2020,8 @@ export function projectLifecycle(
       netIncomeAchieved,
       marriageAllowance,
       pensionSavedWithinAllowance: sum((s) => s.allowanceTopUp),
+      // Paid into a non-earner's pension from savings, with relief (gross).
+      reliefAtSourceContributions: sum((s) => s.rasGross),
       windfall: windfallAmt,
       windfallLabels: windfall?.labels ?? [],
       oneOffExpense: expenseAmt,
@@ -2110,6 +2136,10 @@ export function projectLifecycle(
       hoursFraction: s.pay?.hoursFraction ?? null,
       employeeContribution: s.pay?.employeeContrib ?? 0,
       employerContribution: s.pay?.employerContrib ?? 0,
+      // Paid in from the household's savings with no or low earnings: what was
+      // paid, and the total with basic-rate relief added.
+      reliefAtSourceNet: s.rasNet,
+      reliefAtSourceGross: s.rasGross,
       pensionInput: s.pay?.pensionInput ?? 0,
       annualAllowance: s.pay?.annualAllowance ?? null,
       annualAllowanceBreached: s.pay?.annualAllowanceBreached ?? false,
@@ -2178,6 +2208,8 @@ export function projectLifecycle(
       hoursFraction: row.hoursFraction ?? null,
       employeeContribution: row.employeeContribution ?? 0,
       employerContribution: row.employerContribution ?? 0,
+      reliefAtSourceNet: 0,
+      reliefAtSourceGross: 0,
       pensionInput: row.pensionInput ?? 0,
       annualAllowance: row.annualAllowance ?? null,
       annualAllowanceBreached: row.annualAllowanceBreached ?? false,

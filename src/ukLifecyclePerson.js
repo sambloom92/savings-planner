@@ -65,6 +65,13 @@ export const LIFECYCLE_CONSTANTS = {
     // Currently 55; legislated to rise to 57 from 6 April 2028. Default to 57 as
     // the forward-looking figure for anyone retiring in the years ahead.
     defaultAccessAge: 57,
+    // Relief at source with no (or low) earnings: anyone under 75 can pay up to
+    // £2,880 a year into a personal pension and have basic-rate relief added,
+    // making £3,600 — even with no earnings. Source: gov.uk/tax-on-your-private-
+    // pension/pension-tax-relief
+    reliefAtSourceMinimumGross: 3_600,
+    reliefAtSourceRate: 0.2,
+    reliefAtSourceMaxAge: 75,
   },
 };
 
@@ -1068,6 +1075,35 @@ export function harvestGainsWithinExemption(P, exemptRemaining) {
   const gain = round2(Math.max(0, Math.min(P.gia - P.costBasis, exemptRemaining)));
   if (gain > 0) P.costBasis = round2(P.costBasis + gain);
   return gain;
+}
+
+/**
+ * How much (gross) can still go into this person's pension this year under
+ * the £3,600 relief-at-source limit for people with little or no earnings:
+ * only while their pay is under £3,600 (with more, the limit is their pay and
+ * their own contributions are the way in), they're under 75, and they haven't
+ * yet taken any tax-free cash or started drawing — paying in after that risks
+ * HMRC's rules on recycling tax-free cash. `ownGross` is what they already pay
+ * in this year.
+ */
+export function reliefAtSourceRoom(P, age, pay, ownGross, drawing) {
+  const { reliefAtSourceMinimumGross, reliefAtSourceMaxAge } = LIFECYCLE_CONSTANTS.pension;
+  if (age >= reliefAtSourceMaxAge || drawing || pay >= reliefAtSourceMinimumGross) return 0;
+  if (P.lsaRemaining < PENSION_CONSTANTS.lumpSumAllowance) return 0; // tax-free cash taken
+  return round2(Math.max(0, reliefAtSourceMinimumGross - ownGross));
+}
+
+/**
+ * Pay into the pension from `available` cash, up to `grossRoom` once basic-rate
+ * relief is added (each £80 paid becomes £100). Returns { net, gross }.
+ */
+export function payWithReliefAtSource(P, available, grossRoom) {
+  const rate = LIFECYCLE_CONSTANTS.pension.reliefAtSourceRate;
+  const net = round2(Math.max(0, Math.min(available, grossRoom * (1 - rate))));
+  if (net <= 0) return { net: 0, gross: 0 };
+  const gross = round2(net / (1 - rate));
+  P.pension = round2(P.pension + gross);
+  return { net, gross };
 }
 
 /**
