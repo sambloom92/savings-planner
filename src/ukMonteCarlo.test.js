@@ -661,10 +661,6 @@ describe('couple mode: working longer helps', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// Summary
-// ---------------------------------------------------------------------------
-
 describe('state pension uprating rule', () => {
   // Same seed → identical market and macro paths, so only the uprating differs.
   const run = (statePensionUprating) =>
@@ -692,6 +688,10 @@ describe('state pension uprating rule', () => {
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// Summary
+// ---------------------------------------------------------------------------
 
 console.log(`\n${'─'.repeat(50)}`);
 if (failed === 0) {
