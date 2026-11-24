@@ -24,6 +24,9 @@ import { fmtGBPLarge } from './formatters.js';
 import { illustrativeAnnuityRate } from './ukAnnuity.js';
 import { DB_CONSTANTS, dbPaymentFactor } from './ukDefinedBenefit.js';
 import { lifeExpectancy, survivalToAge } from './ukMortality.js';
+import { parseChangelog, inlineTokens } from './changelog.js';
+import changelogMarkdown from '../CHANGELOG.md?raw';
+import packageJson from '../package.json';
 
 // ── Formatters ────────────────────────────────────────────────────────────────
 const fmtGBP = (n) => `£${Math.round(Math.abs(n)).toLocaleString('en-GB')}`;
@@ -775,6 +778,216 @@ function CompactSummary({ items, onOpen }) {
       >
         Results ›
       </span>
+    </button>
+  );
+}
+
+// ── Version and changelog ─────────────────────────────────────────────────────
+const APP_VERSION = packageJson.version;
+const CHANGELOG = parseChangelog(changelogMarkdown);
+const REPO_URL = 'https://github.com/sambloom92/savings-planner';
+
+// A line of changelog text: bold, code, links and pull request references.
+function InlineText({ text }) {
+  return inlineTokens(text).map((t, i) => {
+    if (t.type === 'bold') return <strong key={i}>{t.text}</strong>;
+    if (t.type === 'code')
+      return (
+        <code key={i} style={{ fontFamily: 'var(--font-mono)', fontSize: '0.92em' }}>
+          {t.text}
+        </code>
+      );
+    if (t.type === 'link' || t.type === 'pr')
+      return (
+        <a
+          key={i}
+          href={t.type === 'pr' ? `${REPO_URL}/pull/${t.number}` : t.href}
+          target="_blank"
+          rel="noopener noreferrer"
+          style={{ color: 'var(--accent-gold)' }}
+        >
+          {t.text}
+        </a>
+      );
+    return <Fragment key={i}>{t.text}</Fragment>;
+  });
+}
+
+// Every release, newest first, from CHANGELOG.md.
+function ReleaseNotes() {
+  return (
+    <div style={{ fontFamily: 'var(--font-body)', fontSize: 13, lineHeight: 1.55 }}>
+      <p style={{ color: 'var(--text-muted)', fontSize: 12, margin: '0 0 16px' }}>
+        Every change, newest first. A major version means saved scenarios from before it won't load;
+        minor versions add features or change results; patches fix things.
+      </p>
+      {CHANGELOG.map((release) => (
+        <section key={release.version} style={{ marginBottom: 18 }}>
+          <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, marginBottom: 4 }}>
+            <a
+              href={`${REPO_URL}/releases/tag/v${release.version}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              style={{
+                fontFamily: 'var(--font-mono)',
+                fontWeight: 700,
+                color: 'var(--accent-gold)',
+                textDecoration: 'none',
+              }}
+            >
+              v{release.version}
+            </a>
+            {release.date && (
+              <span style={{ color: 'var(--text-muted)', fontSize: 11 }}>{release.date}</span>
+            )}
+            {release.version === APP_VERSION && (
+              <span style={{ color: '#34d399', fontSize: 11 }}>this version</span>
+            )}
+          </div>
+          {release.sections.map((section) => (
+            <div key={section.title} style={{ marginBottom: 6 }}>
+              <div
+                style={{
+                  color: 'var(--text-muted)',
+                  fontSize: 10,
+                  letterSpacing: '0.08em',
+                  textTransform: 'uppercase',
+                  margin: '6px 0 2px',
+                }}
+              >
+                {section.title}
+              </div>
+              <ul style={{ margin: 0, paddingLeft: 18, color: 'var(--text-secondary)' }}>
+                {section.items.map((item, i) => (
+                  <li key={i} style={{ marginBottom: 3 }}>
+                    <InlineText text={item.text} />
+                    {item.children.length > 0 && (
+                      <ul style={{ margin: '2px 0 0', paddingLeft: 16 }}>
+                        {item.children.map((child, j) => (
+                          <li key={j}>
+                            <InlineText text={child} />
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ))}
+        </section>
+      ))}
+    </div>
+  );
+}
+
+// A centred dialog over the desktop layout (phones use Sheet).
+function Dialog({ title, onClose, children }) {
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+  return createPortal(
+    <div
+      onClick={onClose}
+      style={{
+        position: 'fixed',
+        inset: 0,
+        zIndex: 1000,
+        background: 'rgba(0,0,0,0.55)',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        padding: 24,
+      }}
+    >
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label={title}
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          width: 'min(680px, 100%)',
+          maxHeight: '82vh',
+          display: 'flex',
+          flexDirection: 'column',
+          background: 'var(--bg-panel)',
+          border: '1px solid var(--border-bright)',
+          borderRadius: 12,
+          boxShadow: '0 20px 60px rgba(0,0,0,0.45)',
+        }}
+      >
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            padding: '14px 20px',
+            borderBottom: '1px solid var(--border)',
+          }}
+        >
+          <span
+            style={{
+              fontFamily: 'var(--font-display)',
+              fontSize: 18,
+              color: 'var(--text-primary)',
+            }}
+          >
+            {title}
+          </span>
+          <button
+            onClick={onClose}
+            aria-label="Close"
+            style={{
+              background: 'transparent',
+              border: 'none',
+              color: 'var(--text-muted)',
+              fontSize: 20,
+              cursor: 'pointer',
+              lineHeight: 1,
+            }}
+          >
+            ×
+          </button>
+        </div>
+        <div style={{ overflowY: 'auto', padding: '16px 20px' }}>{children}</div>
+      </div>
+    </div>,
+    document.body
+  );
+}
+
+// Footer button: the version, opening the changelog. A dot marks a version
+// newer than the one last seen on this device.
+function VersionButton({ onClick, unseen }) {
+  return (
+    <button
+      onClick={onClick}
+      title="What's new: the changelog"
+      style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 6,
+        background: 'transparent',
+        border: 'none',
+        padding: 0,
+        cursor: 'pointer',
+        color: 'var(--text-muted)',
+        fontFamily: 'var(--font-mono)',
+        fontSize: 11,
+        letterSpacing: '0.06em',
+      }}
+    >
+      v{APP_VERSION} · What&apos;s new
+      {unseen && (
+        <span
+          aria-label="new"
+          style={{ width: 6, height: 6, borderRadius: 3, background: 'var(--accent-gold)' }}
+        />
+      )}
     </button>
   );
 }
@@ -5055,6 +5268,28 @@ export default function App() {
     }
   });
   const [activeTab, setActiveTab] = useState('Personal');
+  // The changelog panel, and whether this version is newer than the one last
+  // seen on this device (a first visit counts as seen).
+  const [infoPanel, setInfoPanel] = useState(null); // null | 'changelog'
+  const [versionUnseen, setVersionUnseen] = useState(() => {
+    try {
+      const seen = localStorage.getItem('lastSeenVersion');
+      if (seen == null) localStorage.setItem('lastSeenVersion', APP_VERSION);
+      return seen != null && seen !== APP_VERSION;
+    } catch {
+      return false;
+    }
+  });
+  const closeInfoPanel = useCallback(() => setInfoPanel(null), []);
+  const openChangelog = useCallback(() => {
+    setInfoPanel('changelog');
+    setVersionUnseen(false);
+    try {
+      localStorage.setItem('lastSeenVersion', APP_VERSION);
+    } catch {
+      /* storage unavailable: the dot just shows again next time */
+    }
+  }, []);
   // Couple mode: whose settings the sidebar shows, and the tabs it offers.
   const couple = p.householdMode === 'couple';
   const [editScope, setEditScope] = useState('self');
@@ -7342,6 +7577,20 @@ Use Available funds to see whether an early-retirement plan can bridge the gap u
               >
                 github.com/sambloom92/savings-planner
               </a>
+              <div style={{ marginTop: 10 }}>
+                <VersionButton
+                  onClick={() => {
+                    closeSheet();
+                    openChangelog();
+                  }}
+                  unseen={versionUnseen}
+                />
+              </div>
+            </Sheet>
+          )}
+          {infoPanel === 'changelog' && (
+            <Sheet title="What's new" onClose={closeInfoPanel}>
+              <ReleaseNotes />
             </Sheet>
           )}
 
@@ -7624,9 +7873,12 @@ Use Available funds to see whether an early-retirement plan can bridge the gap u
           background: 'var(--bg-panel)',
           display: 'flex',
           justifyContent: 'center',
+          alignItems: 'center',
+          gap: 18,
           flexShrink: 0,
         }}
       >
+        <VersionButton onClick={openChangelog} unseen={versionUnseen} />
         <a
           href="https://github.com/sambloom92/savings-planner"
           target="_blank"
@@ -7644,6 +7896,11 @@ Use Available funds to see whether an early-retirement plan can bridge the gap u
           github.com/sambloom92/savings-planner
         </a>
       </footer>
+      {infoPanel === 'changelog' && (
+        <Dialog title="What's new" onClose={closeInfoPanel}>
+          <ReleaseNotes />
+        </Dialog>
+      )}
     </div>
   );
 }
