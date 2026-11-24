@@ -13,6 +13,7 @@ import {
 import { createPortal } from 'react-dom';
 import { projectLifecycle, LIFECYCLE_CONSTANTS } from './ukLifecycle.js';
 import { legalStatePensionAge } from './ukLifecyclePerson.js';
+import { justMeInputs } from './justMe.js';
 import { solveCoverGap } from './ukProtection.js';
 import { NI_THRESHOLDS } from './ukNationalInsurance.js';
 import {
@@ -265,6 +266,9 @@ const DEFAULTS = {
   // Household spending after a death, % of the couple's (Retirement Living
   // Standards 2026: a one-person budget is 72% of a two-person one).
   survivorSpendingPct: 72,
+  // Couple mode, "Just me" view: your share of the mortgage, other debts and
+  // one-off events if you were on your own.
+  yourSharePct: 50,
   annuityOwner: 'self', // whose pension buys the annuity
   // "What if one of us dies?" on the deterministic chart.
   deathScenario: { enabled: false, person: 'partner', age: 80 },
@@ -753,7 +757,8 @@ const compactIconButton = {
 
 // One-line headline figures under the compact header; tapping opens the full
 // results sheet.
-function CompactSummary({ items, onOpen }) {
+// `tag` is a short note shown above "Results", such as which view is on.
+function CompactSummary({ items, onOpen, tag }) {
   return (
     <button
       onClick={onOpen}
@@ -803,14 +808,37 @@ function CompactSummary({ items, onOpen }) {
       </span>
       <span
         style={{
-          fontSize: 11,
-          color: 'var(--accent-gold)',
-          fontFamily: 'var(--font-body)',
-          whiteSpace: 'nowrap',
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'flex-end',
           flexShrink: 0,
         }}
       >
-        Results ›
+        {tag && (
+          <span
+            style={{
+              fontSize: 9,
+              letterSpacing: '0.08em',
+              textTransform: 'uppercase',
+              color: 'var(--accent-gold)',
+              fontFamily: 'var(--font-body)',
+              fontWeight: 600,
+              whiteSpace: 'nowrap',
+            }}
+          >
+            {tag}
+          </span>
+        )}
+        <span
+          style={{
+            fontSize: 11,
+            color: 'var(--accent-gold)',
+            fontFamily: 'var(--font-body)',
+            whiteSpace: 'nowrap',
+          }}
+        >
+          Results ›
+        </span>
       </span>
     </button>
   );
@@ -2907,7 +2935,7 @@ function ManualAllowanceWarning({ p }) {
 // Shown for the first projected year, in today's money.
 function DerivedSavingsReadout({ derived }) {
   if (!derived) return null;
-  const { amount, netTakeHome } = derived;
+  const { amount, netTakeHome, justMe } = derived;
   const rate = netTakeHome > 0 ? Math.round((amount / netTakeHome) * 100) : 0;
   return (
     <div style={{ marginTop: -8, marginBottom: 20 }}>
@@ -2952,6 +2980,7 @@ function DerivedSavingsReadout({ derived }) {
         {amount === 0
           ? "today's money · nothing left to save — lower expenses or debt to free up savings"
           : `${netTakeHome > 0 ? `${rate}% of take-home · ` : ''}today's money`}
+        {justMe && ' · Just me view'}
       </div>
     </div>
   );
@@ -4259,7 +4288,7 @@ function TabContent({ tab, p, set, derived, topUp, annuity, dbSummary, scope = n
             </>
           )}
           <Slider
-            label="Spending after a death"
+            label="Spending on your own"
             value={p.survivorSpendingPct}
             min={50}
             max={100}
@@ -4267,11 +4296,25 @@ function TabContent({ tab, p, set, derived, topUp, annuity, dbSummary, scope = n
             format={(v) => `${v}%`}
             onChange={set('survivorSpendingPct')}
             allowInput
-            help="How much the household spends once one of you has died, as a share of what you spend together — applied to living costs and the retirement target. The default 72% comes from the Retirement Living Standards 2026 (Pensions UK): a one-person household's budget is 72% of a two-person one at the Moderate (£32,700 vs £45,400) and Comfortable (£45,400 vs £62,700) standards, and 62% at Minimum (£13,900 vs £22,500). The standards assume the home is owned outright."
+            help="What one of you would spend living alone, as a share of what you spend together — applied to living costs and the retirement target. Used for the survivor's plan after a death, and for the Just me view. Living alone costs more than half: energy, council tax, broadband, a car and upkeep cost much the same for one as for two. The default 72% comes from the Retirement Living Standards 2026 (Pensions UK): a one-person household's budget is 72% of a two-person one at the Moderate (£32,700 vs £45,400) and Comfortable (£45,400 vs £62,700) standards, and 62% at Minimum (£13,900 vs £22,500). The standards assume the home is owned outright."
+          />
+          <Slider
+            label="Your share of joint debts and events"
+            value={p.yourSharePct}
+            min={0}
+            max={100}
+            step={1}
+            format={(v) => `${v}%`}
+            onChange={set('yourSharePct')}
+            allowInput
+            help="For the Just me view (in the header): the share of the mortgage, other debts, windfalls and one-off expenses that would be yours if you were on your own. 50% for an equal split; set your actual share if it's different."
           />
           <InfoBox>
-            To see what happens if one of you dies, use What if one of us dies? under the chart. The
-            Monte Carlo chart draws death ages for each of you from the ONS life tables.
+            Switch the header to Just me to see where you&apos;d stand on your own — your own pay,
+            pensions and savings, your share of the debts and events, and living costs at the
+            one-person rate. Your inputs stay as they are. To see what happens if one of you dies,
+            use What if one of us dies? under the chart; the Monte Carlo chart draws death ages for
+            each of you from the ONS life tables.
           </InfoBox>
         </>
       );
@@ -5513,6 +5556,48 @@ function isTextEntry(el) {
   return false;
 }
 
+// A small switch in the header: one of a few options, the chosen one highlighted.
+function HeaderSwitch({ label, options, value, onChange }) {
+  return (
+    <div
+      style={{
+        display: 'flex',
+        borderRadius: 5,
+        overflow: 'hidden',
+        border: '1px solid var(--border-bright)',
+      }}
+      role="group"
+      aria-label={label}
+    >
+      {options.map((o) => {
+        const active = value === o.value;
+        return (
+          <button
+            key={o.value}
+            aria-pressed={active}
+            onClick={() => onChange(o.value)}
+            title={o.title}
+            style={{
+              padding: '4px 10px',
+              background: active ? 'var(--accent-gold)' : 'transparent',
+              color: active ? 'var(--accent-gold-text)' : 'var(--text-muted)',
+              border: 'none',
+              cursor: 'pointer',
+              fontFamily: 'var(--font-mono)',
+              fontSize: 10,
+              fontWeight: 600,
+              letterSpacing: '0.06em',
+              transition: 'all 0.15s',
+            }}
+          >
+            {o.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 // ── Monte Carlo off the main thread ──────────────────────────────────────────
 // Runs the simulation in a Web Worker so the page stays responsive. Each call
 // returns a promise for that run's result; a newer call supersedes it — a run
@@ -5600,11 +5685,19 @@ export default function App() {
       /* storage unavailable: the dot just shows again next time */
     }
   }, []);
+  // With a partner, the results show the two of you together, or just you on
+  // your own (justMeInputs). The sidebar always edits the couple's inputs.
+  const hasPartner = p.householdMode === 'couple';
+  const [coupleView, setCoupleView] = useState('together');
+  const justMe = hasPartner && coupleView === 'alone';
+  // The inputs the results are worked out from.
+  const pr = useMemo(() => (justMe ? justMeInputs(p) : p), [justMe, p]);
+  // Whether the results are a couple's plan.
+  const couple = pr.householdMode === 'couple';
   // Couple mode: whose settings the sidebar shows, and the tabs it offers.
-  const couple = p.householdMode === 'couple';
   const [editScope, setEditScope] = useState('self');
-  const scope = couple ? editScope : null;
-  const visibleTabs = tabsFor(couple, scope);
+  const scope = hasPartner ? editScope : null;
+  const visibleTabs = tabsFor(hasPartner, scope);
   const shownTab = visibleTabs.includes(activeTab) ? activeTab : 'Personal';
   // Couple mode: the chart's timeline is your age; your partner's ages are
   // offset by this much. The plan runs until the younger of you reaches Model to Age.
@@ -5765,27 +5858,27 @@ export default function App() {
       // Couple mode's "what if one of us dies?": the chart shows the survivor's
       // plan, compared with both of you alive (`baseline`).
       const whatIf =
-        p.householdMode === 'couple' && p.deathScenario.enabled
-          ? { person: p.deathScenario.person, age: p.deathScenario.age }
+        pr.householdMode === 'couple' && pr.deathScenario.enabled
+          ? { person: pr.deathScenario.person, age: pr.deathScenario.age }
           : null;
-      const profile = buildProfile(p, whatIf);
-      const rates = buildRates(p);
-      const pots = buildPots(p);
+      const profile = buildProfile(pr, whatIf);
+      const rates = buildRates(pr);
+      const pots = buildPots(pr);
 
       const retirementOptions = {
-        targetNetAnnualExpenses: p.targetNetExpenses,
-        maxAge: p.maxAge,
-        takePCLS: p.takePCLS,
-        glideStartYears: p.glideStartYears,
-        glideEndYears: p.glideEndYears,
+        targetNetAnnualExpenses: pr.targetNetExpenses,
+        maxAge: pr.maxAge,
+        takePCLS: pr.takePCLS,
+        glideStartYears: pr.glideStartYears,
+        glideEndYears: pr.glideEndYears,
         // An annuity is a plan decision, not a reaction to markets, so it
         // applies to the central projection as well as Monte Carlo.
-        annuity: buildAnnuity(p),
+        annuity: buildAnnuity(pr),
       };
 
       const result = projectLifecycle(profile, rates, pots, retirementOptions);
       const baseline = whatIf
-        ? projectLifecycle(buildProfile(p), rates, pots, retirementOptions)
+        ? projectLifecycle(buildProfile(pr), rates, pots, retirementOptions)
         : null;
       // The extra cover the survivor would need for their plan to stay funded.
       const coverGap = whatIf ? solveCoverGap(profile, rates, pots, retirementOptions) : null;
@@ -5814,7 +5907,7 @@ export default function App() {
       if (!result.hasRetirementPhase) {
         const s = result.summary;
         data.push({
-          age: p.retirementAge,
+          age: pr.retirementAge,
           phase: 'accumulation',
           pension: s.pensionPot,
           // No retirement phase: the pot is still uncrystallised.
@@ -5832,13 +5925,17 @@ export default function App() {
     } catch (e) {
       return { chartData: [], summary: null, error: e.message, baseline: null, coverGap: null };
     }
-  }, [p]);
+  }, [pr]);
 
   // First projected year's surplus (today's money — year 0 is unscaled), surfaced
   // in the Personal tab so the savings implied by the expenses input is visible.
   const firstYearDetail = chartData[0]?._detail ?? null;
   const derivedSavings = firstYearDetail
-    ? { amount: firstYearDetail.availableForSavings, netTakeHome: firstYearDetail.netTakeHome }
+    ? {
+        amount: firstYearDetail.availableForSavings,
+        netTakeHome: firstYearDetail.netTakeHome,
+        justMe,
+      }
     : null;
 
   // The partner's Class 3 top-up result (couple mode), for their Personal tab.
@@ -5883,30 +5980,30 @@ export default function App() {
       setMcPending(true);
       try {
         // Couple mode: Monte Carlo draws death ages itself, so no what-if death.
-        const mcProfile = buildProfile(p);
-        const mcRates = buildRates(p);
-        const mcPots = buildPots(p);
+        const mcProfile = buildProfile(pr);
+        const mcRates = buildRates(pr);
+        const mcPots = buildPots(pr);
         const mcRetOpts = {
-          targetNetAnnualExpenses: p.targetNetExpenses,
-          maxAge: p.maxAge,
-          takePCLS: p.takePCLS,
-          glideStartYears: p.glideStartYears,
-          glideEndYears: p.glideEndYears,
+          targetNetAnnualExpenses: pr.targetNetExpenses,
+          maxAge: pr.maxAge,
+          takePCLS: pr.takePCLS,
+          glideStartYears: pr.glideStartYears,
+          glideEndYears: pr.glideEndYears,
           // Flexible retirement is a Monte Carlo concept — it only bites in
           // trials that are off track at the target age. The deterministic
           // projection always retires at the target, so it omits these.
-          flexibleRetirement: p.flexibleRetirement,
-          maxRetirementDelayYears: p.flexibleRetirement ? p.maxRetirementDelayYears : 0,
+          flexibleRetirement: pr.flexibleRetirement,
+          maxRetirementDelayYears: pr.flexibleRetirement ? pr.maxRetirementDelayYears : 0,
           // Spending guardrails — also Monte Carlo only (they react to a trial's
           // realised path). Omitted from the deterministic projection above.
-          spendingGuardrails: p.spendingGuardrails
+          spendingGuardrails: pr.spendingGuardrails
             ? {
-                floor: p.essentialExpenses,
-                ceilingPct: p.spendingCeilingPct,
-                ...(GUARDRAIL_PRESETS[p.guardrailSensitivity] ?? GUARDRAIL_PRESETS.standard),
+                floor: pr.essentialExpenses,
+                ceilingPct: pr.spendingCeilingPct,
+                ...(GUARDRAIL_PRESETS[pr.guardrailSensitivity] ?? GUARDRAIL_PRESETS.standard),
               }
             : null,
-          annuity: buildAnnuity(p),
+          annuity: buildAnnuity(pr),
         };
 
         runMc([
@@ -5915,18 +6012,18 @@ export default function App() {
           mcPots,
           mcRetOpts,
           {
-            trials: p.mcTrials,
-            volatility: p.mcVolatility,
-            bearFreq: p.mcBearFreq,
-            bearSeverity: p.mcBearSeverity,
-            crisisPersistence: p.mcCrisisPersistence,
-            preRetirementEquity: p.preRetirementEquityPct / 100,
-            postRetirementEquity: p.postRetirementEquityPct / 100,
-            sex: p.sex,
-            partnerSex: p.partner.sex,
+            trials: pr.mcTrials,
+            volatility: pr.mcVolatility,
+            bearFreq: pr.mcBearFreq,
+            bearSeverity: pr.mcBearSeverity,
+            crisisPersistence: pr.mcCrisisPersistence,
+            preRetirementEquity: pr.preRetirementEquityPct / 100,
+            postRetirementEquity: pr.postRetirementEquityPct / 100,
+            sex: pr.sex,
+            partnerSex: pr.partner.sex,
             // Also report how securely the essential floor is met, not just the
             // full target — what an annuity or guardrails aim to protect.
-            essentialFloorReal: Math.min(p.essentialExpenses, p.targetNetExpenses),
+            essentialFloorReal: Math.min(pr.essentialExpenses, pr.targetNetExpenses),
           },
         ]).then(
           (result) => {
@@ -5950,7 +6047,7 @@ export default function App() {
       stale = true;
       clearTimeout(tid);
     };
-  }, [p, chartTab, runMc]);
+  }, [pr, chartTab, runMc]);
 
   // ── Real-terms adjustment ──────────────────────────────────────────────────
   // Divides every monetary value by (1 + inflationRate)^(age − currentAge)
@@ -6027,14 +6124,14 @@ export default function App() {
       return Array.from(byAge, ([age, label]) => ({ age, label, kind: 'hours' }));
     };
     const markers = [
-      ...collect(p.windfalls, 'windfall', 'Windfall'),
-      ...collect(p.oneOffExpenses, 'expense', 'Expense'),
+      ...collect(pr.windfalls, 'windfall', 'Windfall'),
+      ...collect(pr.oneOffExpenses, 'expense', 'Expense'),
       ...collectHours(p.employmentChanges),
     ];
     return markers.length > 0 ? markers : null;
   }, [
-    p.windfalls,
-    p.oneOffExpenses,
+    pr.windfalls,
+    pr.oneOffExpenses,
     p.employmentChanges,
     p.currentAge,
     p.retirementAge,
@@ -6104,8 +6201,8 @@ export default function App() {
   // In real terms the spending figure is already in today's money, so no inflation needed.
   // In nominal terms we inflate the spending to retirement-date prices first.
   const fourPctTarget = realTerms
-    ? p.targetNetExpenses * 25
-    : p.targetNetExpenses * 25 * Math.pow(1 + inflRate, p.retirementAge - p.currentAge);
+    ? pr.targetNetExpenses * 25
+    : pr.targetNetExpenses * 25 * Math.pow(1 + inflRate, p.retirementAge - p.currentAge);
 
   // First retirement year's year-end row from displayData (already real-terms adjusted).
   // The chart plots closingBalance at every age point, so this matches what the graph shows
@@ -6256,50 +6353,37 @@ export default function App() {
   // layout below, so both show exactly the same controls and results.
   const viewToggles = (
     <>
-      {/* Household: just me, or a couple */}
-      <div
-        style={{
-          display: 'flex',
-          borderRadius: 5,
-          overflow: 'hidden',
-          border: '1px solid var(--border-bright)',
-        }}
-        role="group"
-        aria-label="Plan for"
-      >
-        {[
-          { value: 'single', label: 'Just me' },
-          { value: 'couple', label: 'Couple' },
-        ].map(({ value, label }) => {
-          const active = p.householdMode === value;
-          return (
-            <button
-              key={value}
-              aria-pressed={active}
-              onClick={() => set('householdMode')(value)}
-              title={
-                value === 'couple'
-                  ? 'Plan for two: each of you with your own pay, tax, pensions and savings, sharing spending and debts'
-                  : 'Plan for one person'
-              }
-              style={{
-                padding: '4px 10px',
-                background: active ? 'var(--accent-gold)' : 'transparent',
-                color: active ? 'var(--accent-gold-text)' : 'var(--text-muted)',
-                border: 'none',
-                cursor: 'pointer',
-                fontFamily: 'var(--font-mono)',
-                fontSize: 10,
-                fontWeight: 600,
-                letterSpacing: '0.06em',
-                transition: 'all 0.15s',
-              }}
-            >
-              {label}
-            </button>
-          );
-        })}
-      </div>
+      {/* Household: on your own, or with a partner */}
+      <HeaderSwitch
+        label="Plan for"
+        value={p.householdMode}
+        onChange={set('householdMode')}
+        options={[
+          { value: 'single', label: 'On my own', title: 'Plan for one person' },
+          {
+            value: 'couple',
+            label: 'With a partner',
+            title:
+              'Plan for two: each of you with your own pay, tax, pensions and savings, sharing spending and debts',
+          },
+        ]}
+      />
+      {/* With a partner: the two of you, or where you'd stand on your own */}
+      {hasPartner && (
+        <HeaderSwitch
+          label="Show"
+          value={coupleView}
+          onChange={setCoupleView}
+          options={[
+            { value: 'together', label: 'Together', title: 'Your plan as a couple' },
+            {
+              value: 'alone',
+              label: 'Just me',
+              title: `Where you'd stand on your own, for example if you split up: your own pay, pensions and savings, ${p.yourSharePct}% of the mortgage, debts and one-off events, and living costs at ${p.survivorSpendingPct}% of the household's (set in the Household tab)`,
+            },
+          ]}
+        />
+      )}
       {/* Theme switcher */}
       <div
         style={{
@@ -6634,6 +6718,29 @@ Use Available funds to see whether an early-retirement plan can bridge the gap u
   );
   const statCards = (
     <>
+      {/* "Just me": what the figures are */}
+      {justMe && (
+        <div
+          style={{
+            background: 'var(--bg-card)',
+            border: '1px solid var(--border-bright)',
+            borderLeft: '3px solid var(--accent-gold)',
+            borderRadius: 8,
+            padding: '10px 14px',
+            marginBottom: 16,
+            color: 'var(--text-secondary)',
+            fontSize: 12,
+            lineHeight: 1.5,
+            fontFamily: 'var(--font-body)',
+          }}
+        >
+          <strong style={{ color: 'var(--text-primary)' }}>Just me:</strong> where you&apos;d stand
+          on your own, for example if you split up — your own pay, pensions and savings,{' '}
+          {p.yourSharePct}% of the mortgage, other debts and one-off events, and living costs and
+          retirement spending at {p.survivorSpendingPct}% of the household&apos;s (living alone
+          costs more than half). Change these in the Household tab; your inputs stay as they are.
+        </div>
+      )}
       {/* Stat cards */}
       {displaySummary &&
         (() => {
@@ -6712,7 +6819,7 @@ Use Available funds to see whether an early-retirement plan can bridge the gap u
                 color={firstShortfall ? '#f43f5e' : '#34d399'}
                 subtitle={
                   firstShortfall
-                    ? `Target: ${fmtGBP(p.targetNetExpenses)}/yr · pots exhausted`
+                    ? `Target: ${fmtGBP(pr.targetNetExpenses)}/yr · pots exhausted`
                     : lastRetRow
                       ? `Pension: ${fmtGBPLarge(lastRetRow.pension)} · ISA: ${fmtGBPLarge(lastRetRow.isa)}`
                       : displaySummary.totalDebt > 0
@@ -6730,7 +6837,7 @@ Use Available funds to see whether an early-retirement plan can bridge the gap u
                 }
                 help={
                   firstShortfall
-                    ? `Your pots run out at this age — combined pension, ISA, and GIA can no longer cover the inflation-adjusted target spending of ${fmtGBP(p.targetNetExpenses)}/yr. Consider increasing savings, reducing target expenses, or retiring later.`
+                    ? `Your pots run out at this age — combined pension, ISA, and GIA can no longer cover the inflation-adjusted target spending of ${fmtGBP(pr.targetNetExpenses)}/yr. Consider increasing savings, reducing target expenses, or retiring later.`
                     : lastRetRow
                       ? `Combined pension + ISA + GIA balance at age ${horizonAge}, after funding all retirement spending. Property equity and other illiquid assets are deliberately not included — the projection never draws on your home, so any shortfall is shown honestly rather than backfilled by assumed downsizing or equity release.\n\n${PENSION_AFTER_TAX_HELP} What your heirs would pay on a pension left unspent depends on their own circumstances.`
                       : 'Total outstanding debt (mortgage + unsecured + student loan) at retirement.'
@@ -7825,7 +7932,11 @@ Use Available funds to see whether an early-retirement plan can bridge the gap u
             </div>
           </header>
 
-          <CompactSummary items={summaryItems} onOpen={() => setSheet('results')} />
+          <CompactSummary
+            items={summaryItems}
+            onOpen={() => setSheet('results')}
+            tag={justMe ? 'Just me' : null}
+          />
 
           <div
             style={{
@@ -7860,7 +7971,7 @@ Use Available funds to see whether an early-retirement plan can bridge the gap u
                 borderTop: landscape ? 'none' : '1px solid var(--border)',
               }}
             >
-              {couple && <ScopeSwitch scope={editScope} onChange={setEditScope} />}
+              {hasPartner && <ScopeSwitch scope={editScope} onChange={setEditScope} />}
               <SectionPicker value={shownTab} onChange={setActiveTab} tabs={visibleTabs} />
               <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '14px 14px 6px' }}>
                 {errorBanner}
@@ -8049,7 +8160,7 @@ Use Available funds to see whether an early-retirement plan can bridge the gap u
           }}
         >
           {/* Couple mode: whose settings */}
-          {couple && <ScopeSwitch scope={editScope} onChange={setEditScope} />}
+          {hasPartner && <ScopeSwitch scope={editScope} onChange={setEditScope} />}
           {/* Tab bar */}
           <div
             style={{

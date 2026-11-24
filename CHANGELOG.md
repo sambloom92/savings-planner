@@ -8,6 +8,16 @@ Every change to Savings Planner, newest first. Each release is tagged `vX.Y.Z` o
 
 Versions before 1.0.0 are the early history, up to couple mode. Each pull request adds its entry here and bumps the version in `package.json`; the release is tagged automatically when it merges.
 
+## [1.6.0]
+
+### Added
+
+- A _Together / Just me_ switch for couples, to compare the household plan with where you'd stand on your own (say, if you split up) without changing any inputs. _Just me_ keeps your own pay, pensions and savings, takes your share of the mortgage, other debts, windfalls and one-off expenses (default 50%, set in the Household tab), and puts living costs and retirement spending at the one-person rate (default 72% of the household's, the same setting the survivor's plan uses). Monte Carlo follows the switch. On a phone it's in the ⋯ menu, and the summary strip says when _Just me_ is on (#48).
+
+### Changed
+
+- The header's household switch reads _Plan for: On my own / With a partner_ (it was _Just me / Couple_), since _Just me_ is now the view switch (#48).
+
 ## [1.5.1]
 
 ### Fixed
