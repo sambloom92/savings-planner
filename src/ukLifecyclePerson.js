@@ -338,6 +338,9 @@ export function createPerson(profile, pots, retirementOptions, currentYear) {
     dbPensions = [],
     studentLoanPlan = null,
     employmentChanges = [],
+    // Lump sum paid if the person dies while still working, as a multiple of
+    // salary (death-in-service; couple mode).
+    deathInServiceMultiple = 0,
   } = profile;
 
   assertPositiveInteger(currentAge, 'currentAge');
@@ -375,6 +378,13 @@ export function createPerson(profile, pots, retirementOptions, currentYear) {
     throw new TypeError(`studentLoanPlan '${studentLoanPlan}' is not a recognised plan`);
 
   const hoursFractionAtAge = buildHoursFraction(employmentChanges);
+  if (
+    typeof deathInServiceMultiple !== 'number' ||
+    !Number.isFinite(deathInServiceMultiple) ||
+    deathInServiceMultiple < 0 ||
+    deathInServiceMultiple > 20
+  )
+    throw new RangeError('deathInServiceMultiple must be between 0 and 20');
 
   // ── Pots ──────────────────────────────────────────────────────────────────
   const {
@@ -470,6 +480,7 @@ export function createPerson(profile, pots, retirementOptions, currentYear) {
     topUpStatePension,
     pensionAccessAge,
     hoursFractionAtAge,
+    deathInServiceMultiple,
     annuityCfg,
     uncrystallisedTaxFreeShare,
     spClaimAge,
