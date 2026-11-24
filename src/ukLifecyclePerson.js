@@ -50,6 +50,17 @@ export const LIFECYCLE_CONSTANTS = {
     qualifyingYearsForFull: 35,
     minimumQualifyingYears: 10,
     defaultStatePensionAge: 67,
+    // State pension age by year of birth (Pensions Acts 2007, 2011 and 2014):
+    // 66 if born before 6 April 1960 (rising through 66 and some months for
+    // births to March 1961), 67 for births from March 1961, and 68 for births
+    // from 6 April 1978 (phased in from 2044 for births from April 1977).
+    // Whole years: 66 to 1960, 67 for 1961–1977, 68 from 1978.
+    // Source: gov.uk/state-pension-age
+    ageByBirthYear: [
+      { bornFrom: -Infinity, age: 66 },
+      { bornFrom: 1961, age: 67 },
+      { bornFrom: 1978, age: 68 },
+    ],
     // New state pension deferral: +1% per 9 weeks deferred ≈ 5.78%/year (linear,
     // non-compounding), as a share of the pension at claim. Once paid, that extra
     // rises each year with CPI (not the state pension's own increases). Up to 52 weeks can instead
@@ -84,8 +95,33 @@ export const LIFECYCLE_CONSTANTS = {
     reliefAtSourceMinimumGross: 3_600,
     reliefAtSourceRate: 0.2,
     reliefAtSourceMaxAge: 75,
+    // From 6 April 2029, salary sacrifice into a pension saves National
+    // Insurance only on the first £2,000 a year; above that, the sacrificed pay
+    // is charged employee and employer NI as if it had been paid. Income tax
+    // relief is unchanged. Source: gov.uk/government/publications/
+    // changes-to-salary-sacrifice-for-pensions-from-april-2029
+    salarySacrificeNiCap: 2_000,
+    salarySacrificeNiCapFromYear: 2029,
+  },
+  tax: {
+    // Income tax and NI thresholds (the personal allowance, the higher- and
+    // additional-rate thresholds, the £100,000 taper point, and the NI
+    // thresholds) are frozen up to and including 2030/31 (Autumn Budgets 2025
+    // and 2026). After that they follow inflation, less any fiscal drag.
+    thresholdsFrozenThrough: 2030,
   },
 };
+
+/**
+ * The state pension age set by law for someone born in `birthYear`, in whole
+ * years (see LIFECYCLE_CONSTANTS.statePension.ageByBirthYear).
+ */
+export function legalStatePensionAge(birthYear) {
+  let age = 66;
+  for (const band of LIFECYCLE_CONSTANTS.statePension.ageByBirthYear)
+    if (birthYear >= band.bornFrom) age = band.age;
+  return age;
+}
 
 // UK income tax personal allowance (2026/27, frozen at £12,570)
 export const PERSONAL_ALLOWANCE = 12_570;
@@ -906,10 +942,27 @@ export function workingYearPay(P, age, year, i, yr, econ) {
   // Income tax covers taxable pay plus any state or DB pension; NI is on
   // earnings only, and the employee pays none from state pension age.
   const taxResult = calculateIncomeTax(thresholdIncome, econ.thresholdScale);
-  const niResult = calculateNationalInsurance(adjustedGross, econ.thresholdScale);
+  // From April 2029, salary sacrifice above £2,000 a year is pay again for NI.
+  const { salarySacrificeNiCap, salarySacrificeNiCapFromYear } = LIFECYCLE_CONSTANTS.pension;
+  const sacrificeNiable =
+    year >= salarySacrificeNiCapFromYear
+      ? round2(Math.max(0, employeeContrib - salarySacrificeNiCap))
+      : 0;
+  const niResult = calculateNationalInsurance(
+    round2(adjustedGross + sacrificeNiable),
+    econ.thresholdScale
+  );
   const incomeTax = taxResult.totalTax;
   const employeeNI = pastStatePensionAge ? 0 : niResult.employeeNI.total;
   const employerNI = niResult.employerNI.contribution; // informational
+  // The part of the employee's NI that's due to the cap.
+  const sacrificeExtraNI =
+    sacrificeNiable > 0 && !pastStatePensionAge
+      ? round2(
+          employeeNI -
+            calculateNationalInsurance(adjustedGross, econ.thresholdScale).employeeNI.total
+        )
+      : 0;
 
   // ── Student loan ────────────────────────────────────────────────────
   const { repayment: slRepayment, row: slRow } = studentLoanYear(P, year, adjustedGross, yr);
@@ -940,6 +993,8 @@ export function workingYearPay(P, age, year, i, yr, econ) {
     incomeTax,
     employeeNI,
     employerNI,
+    sacrificeNiable,
+    sacrificeExtraNI,
     niLowerEarningsLimit: niResult.employeeNI.lowerEarningsLimit,
     slRepayment,
     slRow,

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import {
   LIFECYCLE_CONSTANTS,
+  legalStatePensionAge,
   createPerson,
   recordStatePensionClaim,
   statePensionGrossAt,
@@ -119,6 +120,15 @@ describe('createPerson', () => {
 });
 
 describe('state pension', () => {
+  it('the legal state pension age by year of birth', () => {
+    assert.equal(legalStatePensionAge(1955), 66);
+    assert.equal(legalStatePensionAge(1960), 66);
+    assert.equal(legalStatePensionAge(1961), 67);
+    assert.equal(legalStatePensionAge(1977), 67);
+    assert.equal(legalStatePensionAge(1978), 68);
+    assert.equal(legalStatePensionAge(2000), 68);
+  });
+
   it('is nothing before the claim age', () => {
     const P = person({ niContributionYears: 35 });
     assert.equal(statePensionGrossAt(P, 66, 35, econ()), 0);

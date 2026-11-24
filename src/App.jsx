@@ -7,10 +7,12 @@ import {
   useCallback,
   createContext,
   useContext,
+  useSyncExternalStore,
   Fragment,
 } from 'react';
 import { createPortal } from 'react-dom';
 import { projectLifecycle, LIFECYCLE_CONSTANTS } from './ukLifecycle.js';
+import { legalStatePensionAge } from './ukLifecyclePerson.js';
 import { solveCoverGap } from './ukProtection.js';
 import { NI_THRESHOLDS } from './ukNationalInsurance.js';
 import {
@@ -20,7 +22,7 @@ import {
 } from './ukPension.js';
 import { runMonteCarlo } from './ukMonteCarlo.js';
 import { FanChart } from './FanChart.jsx';
-import { fmtGBPLarge } from './formatters.js';
+import { fmtGBPLarge, fmtWhole } from './formatters.js';
 import { illustrativeAnnuityRate } from './ukAnnuity.js';
 import { DB_CONSTANTS, dbPaymentFactor } from './ukDefinedBenefit.js';
 import { lifeExpectancy, survivalToAge } from './ukMortality.js';
@@ -30,7 +32,7 @@ import roadmapMarkdown from '../ROADMAP.md?raw';
 import packageJson from '../package.json';
 
 // ── Formatters ────────────────────────────────────────────────────────────────
-const fmtGBP = (n) => `£${Math.round(Math.abs(n)).toLocaleString('en-GB')}`;
+const fmtGBP = (n) => `£${fmtWhole(Math.abs(n))}`;
 const fmtPct = (n) => `${n.toFixed(1)}%`;
 const fmtAge = (n) => `${n} yrs`;
 const fmtYrs = (n) => `${n} yr${n === 1 ? '' : 's'}`;
@@ -72,6 +74,7 @@ const PERSON_KEYS = new Set([
   'grossIncome',
   'niContributionYears',
   'statePensionAge',
+  'statePensionAgeOverride',
   'statePensionDeferralYears',
   'topUpStatePension',
   'pensionAccessAge',
@@ -98,7 +101,8 @@ const PARTNER_DEFAULTS = {
   retirementAge: 65,
   grossIncome: 35_000,
   niContributionYears: 3,
-  statePensionAge: 67,
+  statePensionAge: 67, // set from the legal age unless overridden (see below)
+  statePensionAgeOverride: null,
   statePensionDeferralYears: 0,
   topUpStatePension: false,
   pensionAccessAge: 57,
@@ -173,7 +177,11 @@ const DEFAULTS = {
   grossIncome: 45_000,
   annualLivingExpenses: 20_000,
   niContributionYears: 3,
+  // State pension age: the legal age for your year of birth (from your current
+  // age), unless you choose one (statePensionAgeOverride). statePensionAge
+  // always holds the age in use.
   statePensionAge: 67,
+  statePensionAgeOverride: null,
   statePensionDeferralYears: 0,
   // How the state pension rises each April (household-wide): 'adjusted' = the
   // reform from April 2030 (triple lock until then); 'triple-lock' = the
@@ -320,14 +328,39 @@ const GUARDRAIL_PRESETS = {
 
 // Bring saved or pasted inputs up to date. The guardrails floor used to be its
 // own input (spendingFloor); it is now the shared essential-expenses figure.
+// The legal state pension age for someone of `currentAge` now.
+const legalSpaFor = (currentAge) => legalStatePensionAge(CURRENT_YEAR - currentAge);
+
+// Fill in each person's state pension age from the law unless they chose one.
+function withLegalStatePensionAge(s) {
+  const fix = (v) => {
+    const age = v.statePensionAgeOverride ?? legalSpaFor(v.currentAge);
+    return v.statePensionAge === age ? v : { ...v, statePensionAge: age };
+  };
+  const self = fix(s);
+  const partner = s.partner ? fix(s.partner) : s.partner;
+  return self === s && partner === s.partner ? s : { ...self, partner };
+}
+
+// Inputs saved before the state pension age followed the law: a saved 67 (the
+// old default) becomes "use the legal age"; anything else was chosen.
+const spaOverrideFrom = (v) =>
+  v.statePensionAgeOverride !== undefined
+    ? v.statePensionAgeOverride
+    : v.statePensionAge == null || v.statePensionAge === 67
+      ? null
+      : v.statePensionAge;
+
 function migrateInputs(saved) {
   const next = { ...saved };
+  next.statePensionAgeOverride = spaOverrideFrom(saved);
   if (next.essentialExpenses == null && next.spendingFloor != null) {
     next.essentialExpenses = next.spendingFloor;
   }
   delete next.spendingFloor;
   // Couple mode: fill in any partner fields added since the inputs were saved.
   next.partner = { ...PARTNER_DEFAULTS, ...(next.partner ?? {}) };
+  next.partner.statePensionAgeOverride = spaOverrideFrom(saved.partner ?? {});
   next.deathScenario = { ...DEFAULTS.deathScenario, ...(next.deathScenario ?? {}) };
   return next;
 }
@@ -621,7 +654,7 @@ function fmtGBPShort(n) {
   if (a >= 1_000_000) return `${sign}£${(a / 1_000_000).toFixed(2)}m`;
   if (a >= 100_000) return `${sign}£${Math.round(a / 1_000)}k`;
   if (a >= 10_000) return `${sign}£${(a / 1_000).toFixed(1)}k`;
-  return `${sign}£${Math.round(a).toLocaleString('en-GB')}`;
+  return `${sign}£${fmtWhole(a)}`;
 }
 
 // Panel over the compact layout, rising from the bottom or (side = 'right')
@@ -3196,8 +3229,39 @@ function TabContent({ tab, p, set, derived, topUp, annuity, dbSummary, scope = n
             max={70}
             step={1}
             format={fmtAge}
-            onChange={set('statePensionAge')}
-            help="Age at which your state pension begins. Currently 66 for most people, rising to 67 by 2028. If you retire earlier, state pension income starts later in the drawdown phase."
+            onChange={set('statePensionAgeOverride')}
+            help="Age at which your state pension begins. It starts at the age set by law for your year of birth: 66 if born before 1961, 67 if born 1961 to 1977, and 68 if born from 1978 (68 comes in between 2044 and 2046). Change it to plan for a different age — for example if a future review brings 68 forward. If you retire earlier, state pension income starts later in the drawdown phase."
+            annotation={() => {
+              const born = CURRENT_YEAR - p.currentAge;
+              const legal = legalSpaFor(p.currentAge);
+              if (p.statePensionAgeOverride == null)
+                return `Set by law for someone born in ${born}`;
+              return (
+                <>
+                  The law says {legal} for someone born in {born}
+                  {p.statePensionAgeOverride !== legal && (
+                    <>
+                      {' · '}
+                      <button
+                        type="button"
+                        onClick={() => set('statePensionAgeOverride')(null)}
+                        style={{
+                          background: 'none',
+                          border: 'none',
+                          padding: 0,
+                          color: 'var(--accent-gold)',
+                          cursor: 'pointer',
+                          font: 'inherit',
+                          textDecoration: 'underline',
+                        }}
+                      >
+                        use {legal}
+                      </button>
+                    </>
+                  )}
+                </>
+              );
+            }}
           />
           <Slider
             label="State Pension Deferral"
@@ -3772,7 +3836,7 @@ function TabContent({ tab, p, set, derived, topUp, annuity, dbSummary, scope = n
             format={fmtPct}
             onChange={set('fiscalDragPct')}
             allowInput
-            help={`How far income tax and NI thresholds drift from inflation each year. Band growth = inflation rate − fiscal drag.\n\n0%: bands rise with inflation — no change in real tax burden.\nPositive (e.g. +2%): bands grow slower than inflation — bracket creep pushes more income into higher bands over time. Setting this equal to the inflation rate models fully frozen bands.\nNegative (e.g. −1%): bands grow faster than inflation — real tax burden falls, as happened when the UK personal allowance was raised sharply in the 2010s.`}
+            help={`How far income tax and NI thresholds drift from inflation each year once the current freeze ends. The thresholds are frozen until April 2031 (Autumn Budgets 2025 and 2026), so this applies from 2031/32. Band growth = inflation rate − fiscal drag.\n\n0%: bands rise with inflation — no change in real tax burden.\nPositive (e.g. +2%): bands grow slower than inflation — bracket creep pushes more income into higher bands over time. Setting this equal to the inflation rate models fully frozen bands.\nNegative (e.g. −1%): bands grow faster than inflation — real tax burden falls, as happened when the UK personal allowance was raised sharply in the 2010s.`}
           />
           <InfoBox>
             Debt rates are set per-instrument in the Mortgage and Debts tabs. BoE rate also applies
@@ -4400,6 +4464,31 @@ function Divider() {
 
 // Year detail: one person's panel, a couple's (both alive), or a survivor's
 // year after a death (one person's panel with a note).
+// The year under the mouse on the chart. Held in a small store rather than in
+// App's state, so moving the mouse over the chart re-renders only the year
+// detail, not the whole page.
+function createHoverStore() {
+  let row = null;
+  const listeners = new Set();
+  return {
+    get: () => row,
+    set: (next) => {
+      if (next === row) return;
+      row = next;
+      for (const listener of listeners) listener();
+    },
+    subscribe: (listener) => {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+  };
+}
+
+function HoveredYearDetail({ store }) {
+  const row = useSyncExternalStore(store.subscribe, store.get);
+  return <YearDetailPanel row={row} />;
+}
+
 function YearDetailPanel({ row, mobile = false }) {
   if (row?.people && row.people.every((q) => q.status !== 'died'))
     return <CoupleYearDetail row={row} mobile={mobile} />;
@@ -4475,6 +4564,15 @@ function CoupleYearDetail({ row, mobile }) {
             value={fmtGBP(q.employeeNI)}
             color="#fb923c"
             indent={1}
+          />
+        )}
+        {(q.salarySacrificeExtraNI ?? 0) > 0 && (
+          <DetailLine
+            label="of which on sacrifice over £2,000"
+            value={fmtGBP(q.salarySacrificeExtraNI)}
+            color="#fb923c"
+            indent={2}
+            dim
           />
         )}
         {q.studentLoanRepayment > 0 && (
@@ -4712,6 +4810,15 @@ function SingleYearDetail({ row, mobile = false }) {
             color="#fb923c"
             indent={1}
           />
+          {(row.salarySacrificeExtraNI ?? 0) > 0 && (
+            <DetailLine
+              label="of which on sacrifice over £2,000"
+              value={fmtGBP(row.salarySacrificeExtraNI)}
+              color="#fb923c"
+              indent={2}
+              dim
+            />
+          )}
           {hasSL && (
             <DetailLine
               label="− Student loan"
@@ -5427,10 +5534,50 @@ function isTextEntry(el) {
   return false;
 }
 
+// ── Monte Carlo off the main thread ──────────────────────────────────────────
+// Runs the simulation in a Web Worker so the page stays responsive. Each call
+// returns a promise for that run's result; a newer call supersedes it — a run
+// still in progress is stopped (its worker terminated), and a superseded run's
+// promise never settles. Without Worker support it runs on the main thread.
+function useMonteCarloRunner() {
+  const workerRef = useRef(null);
+  const busyRef = useRef(false);
+  const latestRef = useRef(0);
+  useEffect(() => () => workerRef.current?.terminate(), []);
+  return useCallback((args) => {
+    const id = ++latestRef.current;
+    if (typeof Worker === 'undefined') return Promise.resolve().then(() => runMonteCarlo(...args));
+    if (busyRef.current) {
+      workerRef.current?.terminate();
+      workerRef.current = null;
+    }
+    workerRef.current ??= new Worker(new URL('./mcWorker.js', import.meta.url), {
+      type: 'module',
+    });
+    const worker = workerRef.current;
+    busyRef.current = true;
+    return new Promise((resolve, reject) => {
+      worker.onmessage = (event) => {
+        if (event.data.id !== id) return;
+        busyRef.current = false;
+        if (event.data.error) reject(new Error(event.data.error));
+        else resolve(event.data.result);
+      };
+      worker.onerror = (event) => {
+        busyRef.current = false;
+        workerRef.current = null;
+        worker.terminate();
+        reject(new Error(event.message || 'Monte Carlo worker failed'));
+      };
+      worker.postMessage({ id, args });
+    });
+  }, []);
+}
+
 // ── App ───────────────────────────────────────────────────────────────────────
 export default function App() {
   const {
-    state: p,
+    state: stored,
     set,
     setPartner,
     replace: replaceP,
@@ -5447,6 +5594,9 @@ export default function App() {
       return DEFAULTS;
     }
   });
+  // The inputs in use: the stored ones with each person's state pension age
+  // filled in from the law unless they chose one.
+  const p = useMemo(() => withLegalStatePensionAge(stored), [stored]);
   const [activeTab, setActiveTab] = useState('Personal');
   // The changelog panel, and whether this version is newer than the one last
   // seen on this device (a first visit counts as seen).
@@ -5492,7 +5642,7 @@ export default function App() {
   const [logScale, setLogScale] = useState(false);
   // 'all' = total pot incl. locked pension · 'available' = spendable now (pension only from access age)
   const [fundsView, setFundsView] = useState('all');
-  const [hoveredRow, setHoveredRow] = useState(null);
+  const [hoverStore] = useState(createHoverStore);
   const [copyMsg, setCopyMsg] = useState(null);
   const [pasteMsg, setPasteMsg] = useState(null);
   const [colorMode, setColorMode] = useState(() => localStorage.getItem('colorMode') ?? 'dark');
@@ -5739,9 +5889,12 @@ export default function App() {
   // A 150 ms debounce absorbs rapid slider changes.
   const [mcResults, setMcResults] = useState(null);
   const [mcPending, setMcPending] = useState(false);
+  const runMc = useMonteCarloRunner();
 
   useEffect(() => {
     const delay = chartTab === 'mc' ? 150 : 0;
+    // Results from a run started before the inputs changed are ignored.
+    let stale = false;
     const tid = setTimeout(() => {
       if (chartTab !== 'mc') {
         setMcResults(null);
@@ -5777,8 +5930,12 @@ export default function App() {
           annuity: buildAnnuity(p),
         };
 
-        setMcResults(
-          runMonteCarlo(mcProfile, mcRates, mcPots, mcRetOpts, {
+        runMc([
+          mcProfile,
+          mcRates,
+          mcPots,
+          mcRetOpts,
+          {
             trials: p.mcTrials,
             volatility: p.mcVolatility,
             bearFreq: p.mcBearFreq,
@@ -5791,16 +5948,30 @@ export default function App() {
             // Also report how securely the essential floor is met, not just the
             // full target — what an annuity or guardrails aim to protect.
             essentialFloorReal: Math.min(p.essentialExpenses, p.targetNetExpenses),
-          })
+          },
+        ]).then(
+          (result) => {
+            if (stale) return;
+            setMcResults(result);
+            setMcPending(false);
+          },
+          () => {
+            if (stale) return;
+            setMcResults(null);
+            setMcPending(false);
+          }
         );
       } catch {
         setMcResults(null);
+        setMcPending(false);
       }
-      setMcPending(false);
     }, delay);
 
-    return () => clearTimeout(tid);
-  }, [p, chartTab]);
+    return () => {
+      stale = true;
+      clearTimeout(tid);
+    };
+  }, [p, chartTab, runMc]);
 
   // ── Real-terms adjustment ──────────────────────────────────────────────────
   // Divides every monetary value by (1 + inflationRate)^(age − currentAge)
@@ -6850,9 +7021,7 @@ Use Available funds to see whether an early-retirement plan can bridge the gap u
           retirementAge={p.retirementAge}
           statePensionAge={p.statePensionAge}
           pensionAccessAge={p.pensionAccessAge}
-          onHoverRow={(row) => {
-            setHoveredRow(row ?? null);
-          }}
+          onHoverRow={(row) => hoverStore.set(row ?? null)}
           fourPctTarget={fourPctTarget}
           showDetails={true}
           colorMode={colorMode}
@@ -7176,7 +7345,7 @@ Use Available funds to see whether an early-retirement plan can bridge the gap u
             retirementAge={p.retirementAge}
             statePensionAge={p.statePensionAge}
             pensionAccessAge={p.pensionAccessAge}
-            onHoverRow={(row) => setHoveredRow(row ?? null)}
+            onHoverRow={(row) => hoverStore.set(row ?? null)}
             fourPctTarget={fourPctTarget}
             colorMode={colorMode}
             logScale={logScale}
@@ -8054,7 +8223,7 @@ Use Available funds to see whether an early-retirement plan can bridge the gap u
 
             {detChart}
 
-            <YearDetailPanel row={hoveredRow} />
+            <HoveredYearDetail store={hoverStore} />
           </div>
 
           {whatIfPanel}

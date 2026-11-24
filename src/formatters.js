@@ -5,6 +5,17 @@
  * App.jsx and FanChart.jsx (and any future canvas / worker context).
  */
 
+// One shared formatter for whole numbers with thousands separators. Creating
+// a formatter is costly, and toLocaleString creates one on every call — with
+// hundreds of figures on screen, re-rendered on every input change and chart
+// hover, that added up. Same output as Math.round(n).toLocaleString('en-GB').
+const WHOLE_NUMBER = new Intl.NumberFormat('en-GB');
+
+/** `n` rounded to a whole number, with thousands separators (123,456). */
+export function fmtWhole(n) {
+  return WHOLE_NUMBER.format(Math.round(n));
+}
+
 /**
  * Formats a GBP amount for display in tight spaces (chart labels, stat cards).
  *   ≥ £1m  → £1.23m
@@ -15,7 +26,7 @@ export function fmtGBPLarge(n) {
   const abs = Math.abs(n);
   const sign = n < 0 ? '-' : '';
   if (abs >= 1_000_000) return `${sign}£${(abs / 1_000_000).toFixed(2)}m`;
-  return `${sign}£${Math.round(abs).toLocaleString('en-GB')}`;
+  return `${sign}£${fmtWhole(abs)}`;
 }
 
 /**

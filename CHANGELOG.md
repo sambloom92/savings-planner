@@ -8,13 +8,28 @@ Every change to Savings Planner, newest first. Each release is tagged `vX.Y.Z` o
 
 Versions before 1.0.0 are the early history, up to couple mode. Each pull request adds its entry here and bumps the version in `package.json`; the release is tagged automatically when it merges.
 
-## [1.5.0]
+## [1.6.0]
 
 ### Added
 
 - State pension increases: a setting in the Personal tab to choose how the state pension rises each April (#34). The **adjusted lock** (the default) is the government's reform, confirmed in the Budget on 28 October 2026 but not yet law: the triple lock until April 2029, then from April 2030 the higher of CPI and 2.5%, or more to hold the pension's 2029/30 value relative to earnings. The **triple lock** keeps the current rule. The main projection is unchanged; Monte Carlo results are lower, because a year of inflation outpacing wages no longer ratchets the pension up for good.
 
-## [1.4.0]
+## [1.5.1]
+
+### Fixed
+
+- The app responds quickly again. Monte Carlo now runs in the background, so dragging a slider no longer freezes the page while each run finishes: in couple mode with 1,000 trials, a few seconds of dragging used to lock the page for several seconds at a time. A change made during a run now replaces it. Moving the mouse over the chart redraws only the year detail, and numbers are formatted with one shared formatter. Results are unchanged (#47).
+
+## [1.5.0]
+
+### Changed
+
+- Announced and legislated changes (#46):
+  - Income tax and NI thresholds stay frozen until April 2031, as the 2025 and 2026 Budgets set out, instead of rising with inflation from 2027. The fiscal drag setting applies from 2031/32. This means more tax than before in most plans.
+  - The state pension age follows the law for your year of birth: 66 if born before 1961, 67 for 1961–1977 and 68 from 1978. It was 67 for everyone. Scenarios saved with the old default of 67 switch to the legal age; any other age you chose is kept.
+  - From April 2029, salary sacrifice into a pension above £2,000 a year is charged employee NI. The year detail shows the extra.
+
+## [1.4.0] — 2026-11-24
 
 ### Added
 

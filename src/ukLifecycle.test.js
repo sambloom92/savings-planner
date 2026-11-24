@@ -425,6 +425,71 @@ describe('the CGT allowance is used every year', () => {
   });
 });
 
+describe('announced changes: frozen thresholds and the salary sacrifice NI cap', () => {
+  const steadyPay = { savingsRate: 0, wageGrowthRate: 0, inflationRate: 0.03 };
+  const byYear = (r) => Object.fromEntries(r.yearlyBreakdown.map((x) => [x.year, x]));
+
+  it('tax thresholds stay frozen to 2030/31, then rise with inflation', () => {
+    // £40,000 a year with no pension contributions: £5,486 of tax while the
+    // £12,570 allowance is frozen; in 2031/32 it rises 3% (to £12,947.10).
+    const profile = {
+      ...baseProfile,
+      currentYear: 2026,
+      retirementAge: 40,
+      employeePensionRate: 0,
+      employerPensionRate: 0,
+    };
+    const rows = byYear(projectLifecycle(profile, steadyPay));
+    for (const y of [2026, 2027, 2028, 2029, 2030]) assert.equal(rows[y].incomeTax, 5_486, `${y}`);
+    assertApprox(rows[2031].incomeTax, (40_000 - 12_570 * 1.03) * 0.2, '2031');
+    // Fiscal drag applies only after the freeze: drag equal to inflation keeps
+    // them frozen for good.
+    const dragged = byYear(projectLifecycle(profile, { ...steadyPay, fiscalDragRate: 0.03 }));
+    assert.equal(dragged[2031].incomeTax, 5_486);
+  });
+
+  it('from April 2029, salary sacrifice above £2,000 is charged NI', () => {
+    // £100,000 with 10% (£10,000) sacrificed. 2028/29: NI on £90,000 =
+    // £3,016 + 2% × £39,730 = £3,810.60. 2029/30: NI on £98,000 (£8,000 of the
+    // sacrifice is pay again) = £3,016 + 2% × £47,730 = £3,970.60: £160 more.
+    const r = projectLifecycle(
+      {
+        ...baseProfile,
+        currentYear: 2028,
+        currentAge: 40,
+        retirementAge: 45,
+        grossIncome: 100_000,
+        employeePensionRate: 0.1,
+      },
+      steadyPay
+    );
+    const rows = byYear(r);
+    assert.equal(rows[2028].employeeNI, 3_810.6);
+    assert.equal(rows[2028].salarySacrificeExtraNI, 0);
+    assert.equal(rows[2029].employeeNI, 3_970.6);
+    assert.equal(rows[2029].salarySacrificeNiable, 8_000);
+    assert.equal(rows[2029].salarySacrificeExtraNI, 160);
+    // Income tax relief is unchanged.
+    assert.equal(rows[2029].incomeTax, rows[2028].incomeTax);
+  });
+
+  it('£2,000 or less of salary sacrifice keeps its full NI saving', () => {
+    const r = projectLifecycle(
+      {
+        ...baseProfile,
+        currentYear: 2029,
+        currentAge: 40,
+        retirementAge: 45,
+        grossIncome: 40_000,
+        employeePensionRate: 0.05,
+      },
+      steadyPay
+    );
+    assert.equal(r.yearlyBreakdown[0].salarySacrificeExtraNI, 0);
+    assert.equal(r.yearlyBreakdown[0].salarySacrificeNiable, 0);
+  });
+});
+
 describe('wage growth', () => {
   it('year 0 uses the initial grossIncome unchanged', () => {
     const r = run({ ...baseProfile, retirementAge: 33 });
@@ -2250,7 +2315,7 @@ describe('state pension deferral and surplus', () => {
     ...baseProfile,
     currentAge: 64,
     retirementAge: 70,
-    grossIncome: 35_000, // salary + state pension stays within the basic-rate band
+    grossIncome: 30_000, // salary + state pension stays within the (frozen) basic-rate band
     annualLivingExpenses: 20_000,
     niContributionYears: 30,
   };
@@ -2655,10 +2720,10 @@ describe('defined benefit pensions', () => {
       { targetNetAnnualExpenses: 15_000, maxAge: 80 }
     );
     assertApprox(rowAt(r, 70).incomeTax, (20_000 - 12_570) * 0.2, 'age 70');
-    // Age 71: £20,400 after CPI; tax bands have also risen 2%.
+    // Age 71: £20,400 after CPI; tax bands are frozen (to 2030/31).
     const row = rowAt(r, 71);
     assertApprox(row.dbPension.gross, 20_400, 'gross');
-    assertApprox(row.dbPensionNet, 20_400 - (20_400 - 12_570 * 1.02) * 0.2, 'net');
+    assertApprox(row.dbPensionNet, 20_400 - (20_400 - 12_570) * 0.2, 'net');
     // Guaranteed income covers the £15,300 need, so nothing is drawn and the
     // surplus is saved.
     assert.equal(row.isaWithdrawal + row.giaWithdrawal + row.pensionDrawdown, 0);
