@@ -1148,6 +1148,10 @@ export function projectLifecycle(
       incomeTax: pay.incomeTax,
       employeeNI: pay.employeeNI,
       employerNI: pay.employerNI,
+      // From April 2029: salary sacrifice above £2,000 charged NI, and the
+      // employee NI that adds.
+      salarySacrificeNiable: pay.sacrificeNiable,
+      salarySacrificeExtraNI: pay.sacrificeExtraNI,
       studentLoanRepayment: pay.slRepayment,
       statePensionGross: pay.workingStatePension,
       dbPension: dbRowSummary(P, db),
@@ -2145,6 +2149,8 @@ export function projectLifecycle(
       annualAllowanceBreached: s.pay?.annualAllowanceBreached ?? false,
       incomeTax: s.incomeTax,
       employeeNI: s.pay?.employeeNI ?? 0,
+      salarySacrificeNiable: s.pay?.sacrificeNiable ?? 0,
+      salarySacrificeExtraNI: s.pay?.sacrificeExtraNI ?? 0,
       studentLoanRepayment: s.pay?.slRepayment ?? 0,
       statePensionGross: s.working ? s.pay.workingStatePension : s.spGross,
       dbPension: dbRowSummary(P, s.db),
@@ -2353,7 +2359,10 @@ export function projectLifecycle(
     const yrTriplelock = Math.max(yr.wageGrowthRate, yr.inflationRate, 0.025);
     if (i > 0) {
       econ.cumulInflation *= 1 + yr.inflationRate;
-      econ.thresholdScale *= 1 + yr.inflationRate - fiscalDragRate;
+      // Tax and NI thresholds are frozen to 2030/31; after that they follow
+      // inflation, less any fiscal drag.
+      if (year > LIFECYCLE_CONSTANTS.tax.thresholdsFrozenThrough)
+        econ.thresholdScale *= 1 + yr.inflationRate - fiscalDragRate;
       econ.cumulTriplelock *= 1 + yrTriplelock;
     }
     for (const P of alive) recordStatePensionClaim(P, P.currentAge + i, econ);

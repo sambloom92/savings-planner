@@ -11,6 +11,7 @@ import {
 } from 'react';
 import { createPortal } from 'react-dom';
 import { projectLifecycle, LIFECYCLE_CONSTANTS } from './ukLifecycle.js';
+import { legalStatePensionAge } from './ukLifecyclePerson.js';
 import { solveCoverGap } from './ukProtection.js';
 import { NI_THRESHOLDS } from './ukNationalInsurance.js';
 import {
@@ -72,6 +73,7 @@ const PERSON_KEYS = new Set([
   'grossIncome',
   'niContributionYears',
   'statePensionAge',
+  'statePensionAgeOverride',
   'statePensionDeferralYears',
   'topUpStatePension',
   'pensionAccessAge',
@@ -98,7 +100,8 @@ const PARTNER_DEFAULTS = {
   retirementAge: 65,
   grossIncome: 35_000,
   niContributionYears: 3,
-  statePensionAge: 67,
+  statePensionAge: 67, // set from the legal age unless overridden (see below)
+  statePensionAgeOverride: null,
   statePensionDeferralYears: 0,
   topUpStatePension: false,
   pensionAccessAge: 57,
@@ -173,7 +176,11 @@ const DEFAULTS = {
   grossIncome: 45_000,
   annualLivingExpenses: 20_000,
   niContributionYears: 3,
+  // State pension age: the legal age for your year of birth (from your current
+  // age), unless you choose one (statePensionAgeOverride). statePensionAge
+  // always holds the age in use.
   statePensionAge: 67,
+  statePensionAgeOverride: null,
   statePensionDeferralYears: 0,
   topUpStatePension: false, // auto-buy voluntary Class 3 NI years to reach the full 35
   pensionAccessAge: 57, // NMPA — earliest age the DC pension can be accessed
@@ -316,14 +323,39 @@ const GUARDRAIL_PRESETS = {
 
 // Bring saved or pasted inputs up to date. The guardrails floor used to be its
 // own input (spendingFloor); it is now the shared essential-expenses figure.
+// The legal state pension age for someone of `currentAge` now.
+const legalSpaFor = (currentAge) => legalStatePensionAge(CURRENT_YEAR - currentAge);
+
+// Fill in each person's state pension age from the law unless they chose one.
+function withLegalStatePensionAge(s) {
+  const fix = (v) => {
+    const age = v.statePensionAgeOverride ?? legalSpaFor(v.currentAge);
+    return v.statePensionAge === age ? v : { ...v, statePensionAge: age };
+  };
+  const self = fix(s);
+  const partner = s.partner ? fix(s.partner) : s.partner;
+  return self === s && partner === s.partner ? s : { ...self, partner };
+}
+
+// Inputs saved before the state pension age followed the law: a saved 67 (the
+// old default) becomes "use the legal age"; anything else was chosen.
+const spaOverrideFrom = (v) =>
+  v.statePensionAgeOverride !== undefined
+    ? v.statePensionAgeOverride
+    : v.statePensionAge == null || v.statePensionAge === 67
+      ? null
+      : v.statePensionAge;
+
 function migrateInputs(saved) {
   const next = { ...saved };
+  next.statePensionAgeOverride = spaOverrideFrom(saved);
   if (next.essentialExpenses == null && next.spendingFloor != null) {
     next.essentialExpenses = next.spendingFloor;
   }
   delete next.spendingFloor;
   // Couple mode: fill in any partner fields added since the inputs were saved.
   next.partner = { ...PARTNER_DEFAULTS, ...(next.partner ?? {}) };
+  next.partner.statePensionAgeOverride = spaOverrideFrom(saved.partner ?? {});
   next.deathScenario = { ...DEFAULTS.deathScenario, ...(next.deathScenario ?? {}) };
   return next;
 }
@@ -3191,8 +3223,39 @@ function TabContent({ tab, p, set, derived, topUp, annuity, dbSummary, scope = n
             max={70}
             step={1}
             format={fmtAge}
-            onChange={set('statePensionAge')}
-            help="Age at which your state pension begins. Currently 66 for most people, rising to 67 by 2028. If you retire earlier, state pension income starts later in the drawdown phase."
+            onChange={set('statePensionAgeOverride')}
+            help="Age at which your state pension begins. It starts at the age set by law for your year of birth: 66 if born before 1961, 67 if born 1961 to 1977, and 68 if born from 1978 (68 comes in between 2044 and 2046). Change it to plan for a different age — for example if a future review brings 68 forward. If you retire earlier, state pension income starts later in the drawdown phase."
+            annotation={() => {
+              const born = CURRENT_YEAR - p.currentAge;
+              const legal = legalSpaFor(p.currentAge);
+              if (p.statePensionAgeOverride == null)
+                return `Set by law for someone born in ${born}`;
+              return (
+                <>
+                  The law says {legal} for someone born in {born}
+                  {p.statePensionAgeOverride !== legal && (
+                    <>
+                      {' · '}
+                      <button
+                        type="button"
+                        onClick={() => set('statePensionAgeOverride')(null)}
+                        style={{
+                          background: 'none',
+                          border: 'none',
+                          padding: 0,
+                          color: 'var(--accent-gold)',
+                          cursor: 'pointer',
+                          font: 'inherit',
+                          textDecoration: 'underline',
+                        }}
+                      >
+                        use {legal}
+                      </button>
+                    </>
+                  )}
+                </>
+              );
+            }}
           />
           <Slider
             label="State Pension Deferral"
@@ -3751,7 +3814,7 @@ function TabContent({ tab, p, set, derived, topUp, annuity, dbSummary, scope = n
             format={fmtPct}
             onChange={set('fiscalDragPct')}
             allowInput
-            help={`How far income tax and NI thresholds drift from inflation each year. Band growth = inflation rate − fiscal drag.\n\n0%: bands rise with inflation — no change in real tax burden.\nPositive (e.g. +2%): bands grow slower than inflation — bracket creep pushes more income into higher bands over time. Setting this equal to the inflation rate models fully frozen bands.\nNegative (e.g. −1%): bands grow faster than inflation — real tax burden falls, as happened when the UK personal allowance was raised sharply in the 2010s.`}
+            help={`How far income tax and NI thresholds drift from inflation each year once the current freeze ends. The thresholds are frozen until April 2031 (Autumn Budgets 2025 and 2026), so this applies from 2031/32. Band growth = inflation rate − fiscal drag.\n\n0%: bands rise with inflation — no change in real tax burden.\nPositive (e.g. +2%): bands grow slower than inflation — bracket creep pushes more income into higher bands over time. Setting this equal to the inflation rate models fully frozen bands.\nNegative (e.g. −1%): bands grow faster than inflation — real tax burden falls, as happened when the UK personal allowance was raised sharply in the 2010s.`}
           />
           <InfoBox>
             Debt rates are set per-instrument in the Mortgage and Debts tabs. BoE rate also applies
@@ -4456,6 +4519,15 @@ function CoupleYearDetail({ row, mobile }) {
             indent={1}
           />
         )}
+        {(q.salarySacrificeExtraNI ?? 0) > 0 && (
+          <DetailLine
+            label="of which on sacrifice over £2,000"
+            value={fmtGBP(q.salarySacrificeExtraNI)}
+            color="#fb923c"
+            indent={2}
+            dim
+          />
+        )}
         {q.studentLoanRepayment > 0 && (
           <DetailLine
             label="− Student loan"
@@ -4691,6 +4763,15 @@ function SingleYearDetail({ row, mobile = false }) {
             color="#fb923c"
             indent={1}
           />
+          {(row.salarySacrificeExtraNI ?? 0) > 0 && (
+            <DetailLine
+              label="of which on sacrifice over £2,000"
+              value={fmtGBP(row.salarySacrificeExtraNI)}
+              color="#fb923c"
+              indent={2}
+              dim
+            />
+          )}
           {hasSL && (
             <DetailLine
               label="− Student loan"
@@ -5409,7 +5490,7 @@ function isTextEntry(el) {
 // ── App ───────────────────────────────────────────────────────────────────────
 export default function App() {
   const {
-    state: p,
+    state: stored,
     set,
     setPartner,
     replace: replaceP,
@@ -5426,6 +5507,9 @@ export default function App() {
       return DEFAULTS;
     }
   });
+  // The inputs in use: the stored ones with each person's state pension age
+  // filled in from the law unless they chose one.
+  const p = useMemo(() => withLegalStatePensionAge(stored), [stored]);
   const [activeTab, setActiveTab] = useState('Personal');
   // The changelog panel, and whether this version is newer than the one last
   // seen on this device (a first visit counts as seen).
