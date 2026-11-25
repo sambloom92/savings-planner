@@ -2,11 +2,37 @@
 
 Every change to Savings Planner, newest first. Each release is tagged `vX.Y.Z` on the commit that shipped it, and numbered by [Semantic Versioning](https://semver.org):
 
-- **Major** — saved scenarios or pasted JSON from an earlier version no longer load.
+- **Major** — the format of saved and copied JSON changes.
 - **Minor** — a new feature, or a change to the model that changes results.
 - **Patch** — fixes, wording and presentation.
 
 Versions before 1.0.0 are the early history, up to couple mode. Each pull request adds its entry here and bumps the version in `package.json`; the release is tagged automatically when it merges.
+
+## [2.0.0]
+
+### Changed
+
+- **The settings are laid out in four groups** across the top of the sidebar: **You**, **Partner** (with a partner), **Household** and **Assumptions** (#52).
+  - You and Partner have the same four tabs: Personal, Pension, State pension, Savings. They hold only that person's inputs, so nothing disappears when you switch between them.
+  - Household holds what you share: Spending, Home & debts, Events, Retirement, and with a partner, Couple and Protection.
+  - Assumptions holds Economy, Investments and Monte Carlo.
+  - Things that were in odd places have moved:
+    - all spending is under Spending
+    - sex (for life expectancy), working-hours changes and death-in-service are under Personal
+    - the student loan is under Savings
+    - spending guardrails are under Spending, and working longer if off track is under Retirement; both say they're Monte Carlo only
+  - The Bank of England base rate is set once, under Economy. A tracker mortgage or debt shows it, with a link there.
+- **Labels are in plain English and sentence case**, for example:
+  - _Retirement spending_ (was Target Net Annual Expenses)
+  - _Plan until age_ (was Model to Age)
+  - _Tax-free lump sum_ (was PCLS)
+  - _Amount originally invested_ (was GIA Cost Basis)
+  - _National Insurance years so far_ (was NI Qualifying Years)
+- **Saved and copied JSON follows the new layout** (schema version 2), with names that match the labels: `you.personal.salary`, `household.spending.retirementSpending`, `assumptions.economy.inflationPct`. JSON saved by earlier versions still loads, and plans saved in your browser carry over. JSON copied from 2.0.0 won't load in earlier versions.
+
+### Added
+
+- **Each of you chooses your own tax-free lump sum** (Pension tab); it was one choice for both. Plans saved before keep the old choice for both of you (#52).
 
 ## [1.7.1]
 

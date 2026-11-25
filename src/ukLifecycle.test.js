@@ -3272,6 +3272,48 @@ describe('couple mode — both alive', () => {
   });
 });
 
+describe('couple mode — a tax-free lump sum each', () => {
+  // Both retire at 60 with £100,000 pensions; the household default is to take it.
+  const flat = { savingsRate: 0, wageGrowthRate: 0, inflationRate: 0 };
+  const person = {
+    currentAge: 59,
+    retirementAge: 60,
+    grossIncome: 0,
+    employeePensionRate: 0,
+    employerPensionRate: 0,
+    niContributionYears: 35,
+    pensionAccessAge: 55,
+  };
+  const plan = (you, partner) =>
+    projectLifecycle(
+      {
+        ...person,
+        ...you,
+        currentYear: 2026,
+        annualLivingExpenses: 20_000,
+        partner: { ...person, ...partner, pots: { pensionBalance: 100_000 } },
+      },
+      flat,
+      { pensionBalance: 100_000 },
+      { targetNetAnnualExpenses: 20_000, maxAge: 70, takePCLS: true }
+    );
+  const lumpSums = (r) =>
+    r.yearlyBreakdown.find((x) => x.age === 60).people.map((p) => p.pclsLumpSum);
+
+  it('both follow the household choice by default', () => {
+    assert.deepEqual(lumpSums(plan({}, {})), [25_000, 25_000]);
+  });
+
+  it('each can choose their own', () => {
+    assert.deepEqual(lumpSums(plan({}, { takePCLS: false })), [25_000, 0]);
+    assert.deepEqual(lumpSums(plan({ takePCLS: false }, {})), [0, 25_000]);
+  });
+
+  it('rejects a choice that is not true or false', () => {
+    assert.throws(() => plan({ takePCLS: 'yes' }, {}), TypeError);
+  });
+});
+
 describe('couple mode — spending while one of you works', () => {
   // You retire at 61; your partner works until 60, when you are 70. Living
   // costs £40,000, retirement target £30,000.
