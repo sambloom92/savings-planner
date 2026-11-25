@@ -8,6 +8,15 @@ Every change to Savings Planner, newest first. Each release is tagged `vX.Y.Z` o
 
 Versions before 1.0.0 are the early history, up to couple mode. Each pull request adds its entry here and bumps the version in `package.json`; the release is tagged automatically when it merges.
 
+## [1.7.1]
+
+### Fixed
+
+- Monte Carlo is much faster, with the same results (#51):
+  - **Spending guardrails** were most of the work. Each retirement year of each trial, they worked out the sustainable spend by trying 30 spends, each projected to the end of the plan. They now prepare each year's figures once, and settle "cut, raise or hold" with one or two tries; the full 30-try search runs only when spending is right at a threshold, so every decision is unchanged.
+  - **Trials run on several processor cores at once**, in a pool of Web Workers, instead of one.
+  - For a couple planning to 110 with guardrails and 1,000 trials, a run took about 4 seconds in the browser and now takes about 1.4 on a 4-core computer, and less on one with more cores.
+
 ## [1.7.0]
 
 ### Changed

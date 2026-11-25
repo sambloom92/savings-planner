@@ -22,6 +22,7 @@ import {
   estimatePensionWithdrawalTax,
 } from './ukPension.js';
 import { runMonteCarlo } from './ukMonteCarlo.js';
+import { createMonteCarloPool } from './mcPool.js';
 import { FanChart } from './FanChart.jsx';
 import { fmtGBPLarge, fmtWhole } from './formatters.js';
 import { illustrativeAnnuityRate } from './ukAnnuity.js';
@@ -5638,43 +5639,28 @@ function HeaderSwitch({ label, options, value, onChange }) {
 }
 
 // ── Monte Carlo off the main thread ──────────────────────────────────────────
-// Runs the simulation in a Web Worker so the page stays responsive. Each call
-// returns a promise for that run's result; a newer call supersedes it — a run
-// still in progress is stopped (its worker terminated), and a superseded run's
-// promise never settles. Without Worker support it runs on the main thread.
+// Runs the simulation in a pool of Web Workers (mcPool.js), several trials at
+// once, so the page stays responsive and the run finishes sooner. Each call
+// returns a promise for that run's result; a newer call replaces it, and the
+// replaced run's promise rejects (the caller ignores it). Without Worker
+// support it runs on the main thread.
 function useMonteCarloRunner() {
-  const workerRef = useRef(null);
-  const busyRef = useRef(false);
-  const latestRef = useRef(0);
-  useEffect(() => () => workerRef.current?.terminate(), []);
+  const poolRef = useRef(null);
+  useEffect(() => () => poolRef.current?.dispose(), []);
   return useCallback((args) => {
-    const id = ++latestRef.current;
     if (typeof Worker === 'undefined') return Promise.resolve().then(() => runMonteCarlo(...args));
-    if (busyRef.current) {
-      workerRef.current?.terminate();
-      workerRef.current = null;
-    }
-    workerRef.current ??= new Worker(new URL('./mcWorker.js', import.meta.url), {
-      type: 'module',
+    poolRef.current ??= createMonteCarloPool({
+      size: monteCarloWorkerCount(),
+      createWorker: () => new Worker(new URL('./mcWorker.js', import.meta.url), { type: 'module' }),
     });
-    const worker = workerRef.current;
-    busyRef.current = true;
-    return new Promise((resolve, reject) => {
-      worker.onmessage = (event) => {
-        if (event.data.id !== id) return;
-        busyRef.current = false;
-        if (event.data.error) reject(new Error(event.data.error));
-        else resolve(event.data.result);
-      };
-      worker.onerror = (event) => {
-        busyRef.current = false;
-        workerRef.current = null;
-        worker.terminate();
-        reject(new Error(event.message || 'Monte Carlo worker failed'));
-      };
-      worker.postMessage({ id, args });
-    });
+    return poolRef.current.run(args);
   }, []);
+}
+
+// One worker per processor core, leaving one for the page (at most 8).
+function monteCarloWorkerCount() {
+  const cores = typeof navigator !== 'undefined' ? navigator.hardwareConcurrency || 2 : 2;
+  return Math.max(1, Math.min(8, cores - 1));
 }
 
 // ── App ───────────────────────────────────────────────────────────────────────

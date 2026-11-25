@@ -1,17 +1,13 @@
 /**
- * Runs the Monte Carlo simulation off the main thread, so the page stays
- * responsive while it works. The app sends { id, args } (runMonteCarlo's
- * arguments) and gets back { id, result } or { id, error }. To abandon a run,
- * the app stops this worker and starts a new one.
+ * One of the Monte Carlo pool's workers (mcPool.js): runs chunks of a run's
+ * trials, or summarises them, off the main thread.
  */
 
-import { runMonteCarlo } from './ukMonteCarlo.js';
+import { handleMonteCarloMessage } from './mcPool.js';
+
+const cache = { id: null, plan: null };
 
 self.onmessage = (event) => {
-  const { id, args } = event.data;
-  try {
-    self.postMessage({ id, result: runMonteCarlo(...args) });
-  } catch (err) {
-    self.postMessage({ id, error: String(err?.message ?? err) });
-  }
+  const { reply, transfer } = handleMonteCarloMessage(cache, event.data);
+  self.postMessage(reply, transfer);
 };
