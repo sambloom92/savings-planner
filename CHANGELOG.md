@@ -2,17 +2,52 @@
 
 Every change to Savings Planner, newest first. Each release is tagged `vX.Y.Z` on the commit that shipped it, and numbered by [Semantic Versioning](https://semver.org):
 
-- **Major** — saved scenarios or pasted JSON from an earlier version no longer load.
+- **Major** — the format of saved and copied JSON changes.
 - **Minor** — a new feature, or a change to the model that changes results.
 - **Patch** — fixes, wording and presentation.
 
 Versions before 1.0.0 are the early history, up to couple mode. Each pull request adds its entry here and bumps the version in `package.json`; the release is tagged automatically when it merges.
 
-## [1.8.0]
+## [2.1.0]
 
 ### Added
 
-- State pension increases: a setting in the Personal tab to choose how the state pension rises each April (#34). The **adjusted lock** (the default) is the government's reform, confirmed in the Budget on 28 October 2026 but not yet law: the triple lock until April 2029, then from April 2030 the higher of CPI and 2.5%, or more to hold the pension's 2029/30 value relative to earnings. The **triple lock** keeps the current rule. The main projection is unchanged; Monte Carlo results are lower, because a year of inflation outpacing wages no longer ratchets the pension up for good.
+- State pension increases: a setting in Assumptions › Economy to choose how the state pension rises each April (#34). The **adjusted lock** (the default) is the government's reform, confirmed in the Budget on 28 October 2026 but not yet law: the triple lock until April 2029, then from April 2030 the higher of CPI and 2.5%, or more to hold the pension's 2029/30 value relative to earnings. The **triple lock** keeps the current rule. The main projection is unchanged; Monte Carlo results are lower, because a year of inflation outpacing wages no longer ratchets the pension up for good.
+
+## [2.0.0]
+
+### Changed
+
+- **The settings are laid out in four groups** across the top of the sidebar: **You**, **Partner** (with a partner), **Household** and **Assumptions** (#52).
+  - You and Partner have the same four tabs: Personal, Pension, State pension, Savings. They hold only that person's inputs, so nothing disappears when you switch between them.
+  - Household holds what you share: Spending, Home & debts, Events, Retirement, and with a partner, Couple and Protection.
+  - Assumptions holds Economy, Investments and Monte Carlo.
+  - Things that were in odd places have moved:
+    - all spending is under Spending
+    - sex (for life expectancy), working-hours changes and death-in-service are under Personal
+    - the student loan is under Savings
+    - spending guardrails are under Spending, and working longer if off track is under Retirement; both say they're Monte Carlo only
+  - The Bank of England base rate is set once, under Economy. A tracker mortgage or debt shows it, with a link there.
+- **Labels are in plain English and sentence case**, for example:
+  - _Retirement spending_ (was Target Net Annual Expenses)
+  - _Plan until age_ (was Model to Age)
+  - _Tax-free lump sum_ (was PCLS)
+  - _Amount originally invested_ (was GIA Cost Basis)
+  - _National Insurance years so far_ (was NI Qualifying Years)
+- **Saved and copied JSON follows the new layout** (schema version 2), with names that match the labels: `you.personal.salary`, `household.spending.retirementSpending`, `assumptions.economy.inflationPct`. JSON saved by earlier versions still loads, and plans saved in your browser carry over. JSON copied from 2.0.0 won't load in earlier versions.
+
+### Added
+
+- **Each of you chooses your own tax-free lump sum** (Pension tab); it was one choice for both. Plans saved before keep the old choice for both of you (#52).
+
+## [1.7.1]
+
+### Fixed
+
+- Monte Carlo is much faster, with the same results (#51):
+  - **Spending guardrails** were most of the work. Each retirement year of each trial, they worked out the sustainable spend by trying 30 spends, each projected to the end of the plan. They now prepare each year's figures once, and settle "cut, raise or hold" with one or two tries; the full 30-try search runs only when spending is right at a threshold, so every decision is unchanged.
+  - **Trials run on several processor cores at once**, in a pool of Web Workers, instead of one.
+  - For a couple planning to 110 with guardrails and 1,000 trials, a run took about 4 seconds in the browser and now takes about 1.4 on a 4-core computer, and less on one with more cores.
 
 ## [1.7.0]
 
