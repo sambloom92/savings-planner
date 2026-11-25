@@ -260,6 +260,7 @@ function buildProfile(p, death = null) {
     annualLivingExpenses: p.annualLivingExpenses,
     windfalls: p.windfalls,
     oneOffExpenses: p.oneOffExpenses,
+    statePensionUprating: p.statePensionUprating,
   };
   if (p.householdMode !== 'couple') return profile;
   const pv = partnerView(p);
@@ -3345,7 +3346,7 @@ function TabContent({ tab, p, set, derived, topUp, annuity, dbSummary, couple = 
             step={1}
             format={fmtYrs}
             onChange={(v) => set('statePensionDeferralYears')(Math.max(0, Math.round(v)))}
-            help="Years to defer claiming your state pension past state pension age. Each deferred year adds about 5.8% of the pension at the time you claim (1% per 9 weeks, new state pension rules). That extra then rises with CPI each year, while the base pension keeps the triple lock. It takes roughly 17 years to earn back each year deferred, and under the new rules a partner can't inherit it — so it mainly suits people still working (especially higher-rate taxpayers) or expecting a long life. Deferring means drawing more from your pots in the gap years."
+            help="Years to defer claiming your state pension past state pension age. Each deferred year adds about 5.8% of the pension at the time you claim (1% per 9 weeks, new state pension rules). That extra then rises with CPI each year, while the base pension keeps its normal annual increases. It takes roughly 17 years to earn back each year deferred, and under the new rules a partner can't inherit it — so it mainly suits people still working (especially higher-rate taxpayers) or expecting a long life. Deferring means drawing more from your pots in the gap years."
           />
           <Toggle
             label="Top up with Class 3"
@@ -4001,6 +4002,20 @@ function TabContent({ tab, p, set, derived, topUp, annuity, dbSummary, couple = 
             onChange={set('wageGrowthPct')}
             allowInput
             help="Expected annual growth rate of your gross salary. Affects pension contributions, which are a percentage of salary. Can be negative to model pay cuts or career breaks."
+          />
+          <Toggle
+            label="State pension increases"
+            value={p.statePensionUprating}
+            optA={{ value: 'adjusted', label: 'Adjusted lock' }}
+            optB={{ value: 'triple-lock', label: 'Triple lock' }}
+            onChange={set('statePensionUprating')}
+            help={
+              'How the state pension rises each April.\n\n' +
+              'Adjusted lock: the government announced on 29 September 2026, and confirmed in the Budget on 28 October, that the triple lock continues up to the April 2029 increase. From April 2030 the pension rises by the higher of CPI inflation and 2.5%, or by more if needed to keep its value relative to average earnings at the 2029/30 level. It still keeps pace with earnings over time, but a year when inflation beats wages is no longer topped up again when wages catch up. Not yet law: the government says it will legislate this Parliament.\n\n' +
+              'Triple lock: the current rule. The pension rises by the highest of earnings growth, CPI inflation and 2.5% every year.\n\n' +
+              'With steady assumptions, as in the main chart, both give the same pension. The difference shows in Monte Carlo, where earnings and inflation vary from year to year.' +
+              (couple ? ' It applies to both of you.' : '')
+            }
           />
           <Slider
             label="Bank of England base rate"
@@ -6747,7 +6762,7 @@ Use Available funds to see whether an early-retirement plan can bridge the gap u
                     const from = Math.min(...paid.map((d) => d.startAge));
                     return `+ DB ${fmtGBPLarge(total)}/yr (today's £) from ${from}`;
                   })()}
-                  help="Your projected state pension, based on total NI qualifying years accrued by retirement (plus any voluntary Class 3 years bought via the top-up toggle). This is a real government entitlement (inflation-linked via triple lock), not an investment return. It offsets retirement expenses before drawing from personal pots. Any defined benefit pensions are shown below it, in today's money from when each starts; like the state pension, they're guaranteed income counted before your pots are drawn."
+                  help="Your projected state pension, based on total NI qualifying years accrued by retirement (plus any voluntary Class 3 years bought via the top-up toggle). This is a real government entitlement that rises each year at least in line with inflation (see State pension increases in Assumptions › Economy), not an investment return. It offsets retirement expenses before drawing from personal pots. Any defined benefit pensions are shown below it, in today's money from when each starts; like the state pension, they're guaranteed income counted before your pots are drawn."
                 />
               )}
             </div>

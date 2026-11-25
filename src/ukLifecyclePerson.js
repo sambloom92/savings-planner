@@ -15,8 +15,9 @@
  * next (e.g. fill every personal allowance before touching any ISA).
  *
  * Every function that takes `econ` reads the year's running economy factors:
- *   { cumulInflation, thresholdScale, cumulTriplelock }
- * (price index, tax-threshold index and triple-lock index since the start).
+ *   { cumulInflation, thresholdScale, statePensionIndex }
+ * (price index, tax-threshold index and state pension uprating index since the
+ * start: the triple lock, or the adjusted lock — see ukLifecycle.js).
  */
 
 import { calculateIncomeTax, calculateTaxableIncome } from './ukIncomeTax.js';
@@ -62,7 +63,7 @@ export const LIFECYCLE_CONSTANTS = {
     ],
     // New state pension deferral: +1% per 9 weeks deferred ≈ 5.78%/year (linear,
     // non-compounding), as a share of the pension at claim. Once paid, that extra
-    // rises each year with CPI (not the triple lock). Up to 52 weeks can instead
+    // rises each year with CPI (not the state pension's own increases). Up to 52 weeks can instead
     // be taken as a one-off arrears payment with no interest — not modelled.
     // Source: gov.uk/deferring-state-pension
     deferralUpliftPerYear: 0.0578,
@@ -70,6 +71,17 @@ export const LIFECYCLE_CONSTANTS = {
     // £18.40/week × 52). Today's money — inflated when paid. Each year bought
     // adds 1/35 of the full state pension. Source: gov.uk/voluntary-national-insurance-contributions
     class3AnnualCost: 956.8,
+    // The adjusted triple lock (announced 29 September 2026, confirmed in the
+    // Budget on 28 October 2026; not yet legislated). The triple lock applies
+    // up to the April 2029 increase. From April 2030 the basic and new state
+    // pension rise each year by the highest of CPI, 2.5%, or the amount needed
+    // to keep (or restore) their value relative to earnings at the 2029/30
+    // level — so earnings growth no longer ratchets them up on top of earlier
+    // inflation-led rises. Sources: gov.uk/government/publications/
+    // state-pension-uprating-analysis-2026/triple-lock-reform-factsheet;
+    // OBR Economic and fiscal outlook, October 2026, para 3.49.
+    adjustedTripleLockFromYear: 2030,
+    upratingFloor: 0.025, // the 2.5% minimum, under both rules
   },
   pension: {
     // Normal Minimum Pension Age (NMPA): earliest age a DC pension is accessible.
@@ -502,7 +514,7 @@ export function createPerson(profile, pots, retirementOptions, currentYear) {
 
   // State pension claim point (state pension age + any deferral). The extra
   // from deferring is fixed at claim as a share of the pension then payable and
-  // afterwards rises with CPI only; the base pension keeps the triple lock
+  // afterwards rises with CPI only; the base pension keeps its normal increases
   // (GOV.UK, "Defer your State Pension": annual increases). The running factors
   // are recorded as the projection passes the claim age; a claim before the
   // projection starts is treated as claimed at the start.
@@ -558,7 +570,7 @@ export function createPerson(profile, pots, retirementOptions, currentYear) {
       lumpSum: 0,
     })),
     spClaimCumInfl: spClaimAge <= currentAge ? 1 : null,
-    spClaimCumTriplelock: spClaimAge <= currentAge ? 1 : null,
+    spClaimStatePensionIndex: spClaimAge <= currentAge ? 1 : null,
 
     // ── Retirement (set by enterRetirement) ──
     retiredAt: null,
@@ -589,14 +601,14 @@ export function createPerson(profile, pots, retirementOptions, currentYear) {
 export function recordStatePensionClaim(P, age, econ) {
   if (age === P.spClaimAge) {
     P.spClaimCumInfl = econ.cumulInflation;
-    P.spClaimCumTriplelock = econ.cumulTriplelock;
+    P.spClaimStatePensionIndex = econ.statePensionIndex;
   }
 }
 
 /**
  * Nominal state pension payable in the year the projection is at `age`, from
- * the running inflation / triple-lock factors: nothing before the claim age
- * or below the minimum qualifying years; otherwise the triple-locked base plus
+ * the running inflation / state pension factors: nothing before the claim age
+ * or below the minimum qualifying years; otherwise the uprated base plus
  * any deferral extra (CPI-uprated since the claim). Used by both the working
  * and retirement phases — the pension is paid from the claim age whether or
  * not the person is still working.
@@ -606,10 +618,10 @@ export function statePensionGrossAt(P, age, qualifyingYears, econ) {
   const fullRate = computeStatePension(qualifyingYears); // 0 below the minimum
   if (fullRate <= 0) return 0;
   const claimInfl = P.spClaimCumInfl ?? econ.cumulInflation; // always recorded; defensive
-  const claimTriplelock = P.spClaimCumTriplelock ?? econ.cumulTriplelock;
+  const claimIndex = P.spClaimStatePensionIndex ?? econ.statePensionIndex;
   const deferralExtra =
-    fullRate * claimTriplelock * P.spDeferralExtraShare * (econ.cumulInflation / claimInfl);
-  return round2(fullRate * econ.cumulTriplelock + deferralExtra);
+    fullRate * claimIndex * P.spDeferralExtraShare * (econ.cumulInflation / claimInfl);
+  return round2(fullRate * econ.statePensionIndex + deferralExtra);
 }
 
 // ---------------------------------------------------------------------------
@@ -1349,7 +1361,9 @@ export function plannedGuaranteedGross(P, age, econ, spGross) {
       ? spGross
       : finalNiYears >= LIFECYCLE_CONSTANTS.statePension.minimumQualifyingYears
         ? round2(
-            computeStatePension(finalNiYears) * econ.cumulTriplelock * P.statePensionDeferralUplift
+            computeStatePension(finalNiYears) *
+              econ.statePensionIndex *
+              P.statePensionDeferralUplift
           )
         : 0;
   // Any DB pensions are guaranteed income too: count what they pay, or

@@ -62,10 +62,10 @@ const profile = {
 };
 const person = (overrides = {}, pots = {}, retirementOptions = null) =>
   createPerson({ ...profile, ...overrides }, pots, retirementOptions, 2026);
-const econ = (cumulInflation = 1, thresholdScale = 1, cumulTriplelock = 1) => ({
+const econ = (cumulInflation = 1, thresholdScale = 1, statePensionIndex = 1) => ({
   cumulInflation,
   thresholdScale,
-  cumulTriplelock,
+  statePensionIndex,
 });
 const baseYear = { wageGrowthRate: 0.03, inflationRate: 0.02, boeRate: 0.04 };
 const LSA = 268_275;

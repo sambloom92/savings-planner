@@ -48,6 +48,7 @@ const plan = {
   partnership: 'cohabiting',
   willsToEachOther: false,
   spendingWhileOneWorks: 'working',
+  statePensionUprating: 'triple-lock',
   spendingGuardrails: true,
   flexibleRetirement: true,
   lifePolicies: [{ ...LIFE_POLICY_NEW, label: 'Term', lifeOf: 'self', inTrust: false }],
@@ -152,6 +153,7 @@ it('writes choices as the words the settings use', () => {
   assert.equal(json.partner.personal.deathInServiceTimesSalary, 4);
   assert.equal(json.household.homeAndDebts.mortgage.rate, 'tracksBaseRate');
   assert.equal(json.household.spending.whileOneOfYouWorks, 'livingCosts');
+  assert.equal(json.assumptions.economy.statePensionIncreases, 'tripleLock');
   assert.equal(json.household.retirement.annuity.boughtFrom, 'partner');
   assert.equal(json.household.retirement.annuity.sizeTo, 'fixedIncome');
   assert.equal(json.household.couple.partnership, 'livingTogether');

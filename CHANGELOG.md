@@ -8,6 +8,12 @@ Every change to Savings Planner, newest first. Each release is tagged `vX.Y.Z` o
 
 Versions before 1.0.0 are the early history, up to couple mode. Each pull request adds its entry here and bumps the version in `package.json`; the release is tagged automatically when it merges.
 
+## [2.1.0]
+
+### Added
+
+- State pension increases: a setting in Assumptions › Economy to choose how the state pension rises each April (#34). The **adjusted lock** (the default) is the government's reform, confirmed in the Budget on 28 October 2026 but not yet law: the triple lock until April 2029, then from April 2030 the higher of CPI and 2.5%, or more to hold the pension's 2029/30 value relative to earnings. The **triple lock** keeps the current rule. The main projection is unchanged; Monte Carlo results are lower, because a year of inflation outpacing wages no longer ratchets the pension up for good.
+
 ## [2.0.0]
 
 ### Changed

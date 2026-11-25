@@ -246,6 +246,15 @@ function amortiseYear(balance, monthlyRate, monthlyPayment, monthlyOverpayment =
  *                                             target, 0–1. 0 (the default) keeps living costs
  *                                             until both have retired; 0.5 is halfway; 1
  *                                             switches to the target at the first retirement.
+ *   statePensionUprating?:  string,         - 'triple-lock' (default): each April the state
+ *                                             pension rises by the highest of earnings growth,
+ *                                             CPI and 2.5%. 'adjusted': the announced reform —
+ *                                             the triple lock up to April 2029, then from April
+ *                                             2030 the highest of CPI, 2.5%, or the rise needed
+ *                                             to hold its 2029/30 value relative to earnings.
+ *                                             With constant rates the two coincide; they differ
+ *                                             when earnings and inflation vary (Monte Carlo).
+ *                                             National policy, so shared by a couple.
  *   death?: {                               - "What if one of us dies?": the person ('self' or
  *     person: string,                         'partner') dies at the start of the year they
  *     age:    number                          would reach `age`; see ukEstate.js.
@@ -357,10 +366,14 @@ export function projectLifecycle(
     death = null,
     // Couple mode: life insurance policies (see policyInForce).
     lifePolicies = [],
+    // How the state pension rises each April (see uprateStatePension).
+    statePensionUprating = 'triple-lock',
   } = profile;
 
   if (!Number.isInteger(currentYear) || currentYear < 1990)
     throw new RangeError('currentYear must be an integer >= 1990');
+  if (statePensionUprating !== 'triple-lock' && statePensionUprating !== 'adjusted')
+    throw new RangeError("statePensionUprating must be 'triple-lock' or 'adjusted'");
 
   // ── The people ──────────────────────────────────────────────────────────
   // Their pay, pots, pension rights and retirement choices (ukLifecyclePerson.js).
@@ -1086,8 +1099,36 @@ export function projectLifecycle(
   const econ = {
     cumulInflation: 1, // product of (1 + inflRate) from year 1..i
     thresholdScale: 1, // product of (1 + inflRate - fiscalDragRate) from year 1..i
-    cumulTriplelock: 1, // product of (1 + max(wages,CPI,2.5%)) from year 1..i
+    // The state pension's increases since the start year (uprateStatePension).
+    statePensionIndex: 1,
   };
+
+  // Adjusted lock: average earnings since the start year, and the state
+  // pension's value relative to earnings in 2029/30, which it must then hold —
+  // fixed at the first adjusted increase.
+  let earningsIndex = 1;
+  let spEarningsRef = null;
+
+  /**
+   * One April increase to the state pension index, for the given year's rates
+   * and calendar year. Triple lock: the highest of earnings growth, CPI and
+   * 2.5%. Adjusted lock (from April 2030, when chosen): the highest of CPI and
+   * 2.5%, or more if needed to keep the pension's value relative to earnings at
+   * its 2029/30 level. That level, not each year's earnings growth, is the
+   * floor, so an inflation-led rise isn't topped up again when earnings later
+   * catch up.
+   */
+  function uprateStatePension(yr, calendarYear) {
+    const { adjustedTripleLockFromYear, upratingFloor } = LIFECYCLE_CONSTANTS.statePension;
+    const priceRise = Math.max(yr.inflationRate, upratingFloor);
+    const adjusted =
+      statePensionUprating === 'adjusted' && calendarYear >= adjustedTripleLockFromYear;
+    if (adjusted) spEarningsRef ??= econ.statePensionIndex / earningsIndex;
+    earningsIndex *= 1 + yr.wageGrowthRate;
+    econ.statePensionIndex = adjusted
+      ? Math.max(econ.statePensionIndex * (1 + priceRise), spEarningsRef * earningsIndex)
+      : econ.statePensionIndex * (1 + Math.max(yr.wageGrowthRate, priceRise));
+  }
 
   /** This year's rates: the base rates, merged with any override for year i. */
   function ratesForYear(i) {
@@ -1365,7 +1406,7 @@ export function projectLifecycle(
     const retThresholdScale = econ.thresholdScale;
 
     // State pension — nominal amount at this retirement year. The base grows
-    // from the 2026/27 rate by the triple lock, max(wageGrowth, CPI, 2.5%).
+    // from the 2026/27 rate by its yearly increases (uprateStatePension).
     // Deferral delays the start and adds ~5.78% of the pension at claim per
     // deferred year; that extra then rises with CPI only. Qualifying years
     // include any Class 3 years bought so far — all buying finishes before
@@ -2454,14 +2495,13 @@ export function projectLifecycle(
     // This year's rates and running products (i=0 leaves them at 1, matching
     // Math.pow(..., 0)=1).
     const yr = ratesForYear(i);
-    const yrTriplelock = Math.max(yr.wageGrowthRate, yr.inflationRate, 0.025);
     if (i > 0) {
       econ.cumulInflation *= 1 + yr.inflationRate;
       // Tax and NI thresholds are frozen to 2030/31; after that they follow
       // inflation, less any fiscal drag.
       if (year > LIFECYCLE_CONSTANTS.tax.thresholdsFrozenThrough)
         econ.thresholdScale *= 1 + yr.inflationRate - fiscalDragRate;
-      econ.cumulTriplelock *= 1 + yrTriplelock;
+      uprateStatePension(yr, year);
     }
     for (const P of alive) recordStatePensionClaim(P, P.currentAge + i, econ);
 
@@ -2499,6 +2539,7 @@ export function projectLifecycle(
   const studentLoanOutstanding = sumNow((P) => P.studentLoan?.balance ?? 0);
   // Nominal state pension at the age it first becomes payable, triple-lock grown from today.
   // Uses the base-rate triplelock for the summary figure (independent of yearlyRatesOverride).
+  // With constant rates the adjusted lock gives the same path, so this holds for both.
   const baseTriplelockForSummary = Math.max(wageGrowthRate, inflationRate, 0.025);
   const projectedStatePensionOf = (P) =>
     round2(

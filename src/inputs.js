@@ -82,6 +82,10 @@ export const DEFAULTS = {
   statePensionAge: 67,
   statePensionAgeOverride: null,
   statePensionDeferralYears: 0,
+  // How the state pension rises each April (household-wide): 'adjusted' = the
+  // reform from April 2030 (triple lock until then); 'triple-lock' = the
+  // current rule. They differ only when earnings and inflation vary.
+  statePensionUprating: 'adjusted',
   topUpStatePension: false, // auto-buy voluntary Class 3 NI years to reach the full 35
   pensionAccessAge: 57, // NMPA — earliest age the DC pension can be accessed
   sex: 'neutral', // mortality basis for the lifetime-solvency metric
@@ -393,6 +397,11 @@ const SHARED_FIELDS = [
   ['household.protection.lifeCover', 'lifePolicies', list(LIFE_FIELDS)],
   ['assumptions.economy.inflationPct', 'inflationPct'],
   ['assumptions.economy.wageGrowthPct', 'wageGrowthPct'],
+  [
+    'assumptions.economy.statePensionIncreases',
+    'statePensionUprating',
+    renamed({ adjusted: 'adjustedLock', 'triple-lock': 'tripleLock' }),
+  ],
   ['assumptions.economy.baseRatePct', 'boePct'],
   ['assumptions.economy.taxThresholdsLagInflationPct', 'fiscalDragPct'],
   ['assumptions.investments.equityReturnPct', 'equityReturnPct'],
