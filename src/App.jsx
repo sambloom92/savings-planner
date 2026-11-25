@@ -23,6 +23,14 @@ import {
 } from './ukPension.js';
 import { runMonteCarlo } from './ukMonteCarlo.js';
 import { createMonteCarloPool } from './mcPool.js';
+import {
+  DB_NEW_SCHEME,
+  DEFAULTS,
+  LIFE_POLICY_NEW,
+  PERSON_KEYS,
+  inputsFromJson,
+  inputsToJson,
+} from './inputs.js';
 import { FanChart } from './FanChart.jsx';
 import { fmtGBPLarge, fmtWhole } from './formatters.js';
 import { illustrativeAnnuityRate } from './ukAnnuity.js';
@@ -40,104 +48,55 @@ const fmtAge = (n) => `${n} yrs`;
 const fmtYrs = (n) => `${n} yr${n === 1 ? '' : 's'}`;
 
 // ── Constants ─────────────────────────────────────────────────────────────────
-const TABS = [
-  'Personal',
-  'Pension',
-  'Savings',
-  'Events',
-  'Mortgage',
-  'Debts',
-  'Rates',
-  'Retire',
-  'Simulation',
+// ── Settings layout ───────────────────────────────────────────────────────────
+// Four groups across the top — You, Partner (with a partner), Household and
+// Assumptions — each with its own tabs. You and Partner hold only that
+// person's inputs; Household what you share; Assumptions the economy, markets
+// and the simulation.
+const PERSON_TABS = ['Personal', 'Pension', 'State pension', 'Savings'];
+const SETTINGS_GROUPS = [
+  { scope: 'self', label: 'You', tabs: PERSON_TABS },
+  { scope: 'partner', label: 'Partner', tabs: PERSON_TABS, couple: true },
+  {
+    scope: 'household',
+    label: 'Household',
+    tabs: ['Spending', 'Home & debts', 'Events', 'Retirement', 'Couple', 'Protection'],
+  },
+  { scope: 'assumptions', label: 'Assumptions', tabs: ['Economy', 'Investments', 'Monte Carlo'] },
 ];
+// Tabs shown only when planning with a partner.
+const COUPLE_TABS = new Set(['Couple', 'Protection']);
+function tabsFor(scope, couple) {
+  const group = SETTINGS_GROUPS.find((g) => g.scope === scope) ?? SETTINGS_GROUPS[0];
+  return group.tabs.filter((t) => couple || !COUPLE_TABS.has(t));
+}
+// You and Partner share a tab (switching person keeps it); the other groups
+// remember their own.
+const tabGroup = (scope) => (scope === 'partner' ? 'self' : scope);
+const FIRST_TABS = { self: 'Personal', household: 'Spending', assumptions: 'Economy' };
 
 // One-line description of each settings tab, shown as a hover tooltip on its button.
 const TAB_HELP = {
-  Personal: 'Age, salary, living expenses, National Insurance and state pension',
-  Pension: 'Pension contributions (employee & employer), starting pot and access age',
-  Savings: 'Starting ISA and GIA balances, and GIA cost basis for CGT',
-  Events: 'One-off windfalls, expenses and working-hours changes at chosen ages',
-  Mortgage: 'Mortgage balance, term, type, interest rate and overpayments',
-  Debts: 'Unsecured debts (cards, loans) and student loan repayment plan',
-  Rates: 'Investment returns, wage growth, inflation, glide path and fiscal drag',
-  Retire: 'Retirement spending target, model horizon and tax-free lump sum',
-  Simulation: 'Monte Carlo settings (trials, volatility, downturns) and mortality basis',
-  Household: 'Couple mode: partnership type, wills and spending after a death',
-  Protection: 'Couple mode: life cover policies and what the survivor would need',
+  Personal: 'Age, sex, retirement age, salary, working-hours changes and death-in-service',
+  Pension:
+    'Workplace pension contributions, pension pot, access age, tax-free lump sum and defined benefit schemes',
+  'State pension': 'National Insurance years, state pension age, deferral and Class 3 top-up',
+  Savings: 'ISA and GIA balances, the amount invested in the GIA, and student loan',
+  Spending: 'Living costs while working, retirement spending, essential spending and guardrails',
+  'Home & debts': 'Mortgage and other debts',
+  Events: 'One-off windfalls and expenses at chosen ages',
+  Retirement: 'How long to plan for, a lifetime annuity, and working longer if off track',
+  Couple: 'Partnership, wills, spending on your own and your share of joint debts',
+  Protection: 'Life cover policies and what the survivor would need',
+  Economy: 'Inflation, wage growth, the Bank of England base rate and tax thresholds',
+  Investments: 'Equity and bond returns, equity allocation and the glide path',
+  'Monte Carlo': 'Trials, volatility, bear markets and crisis persistence',
 };
 
 // ── Couple mode ───────────────────────────────────────────────────────────────
-// The inputs that belong to one person. In couple mode the partner has their
-// own copy (p.partner); everything else is shared by the household.
-const PERSON_KEYS = new Set([
-  'currentAge',
-  'retirementAge',
-  'grossIncome',
-  'niContributionYears',
-  'statePensionAge',
-  'statePensionAgeOverride',
-  'statePensionDeferralYears',
-  'topUpStatePension',
-  'pensionAccessAge',
-  'sex',
-  'employmentChanges',
-  'employeePensionPct',
-  'employeePensionAuto',
-  'employerPensionPct',
-  'employerMatch',
-  'employerMatchThreshold',
-  'pensionBalance',
-  'dbPensions',
-  'isaBalance',
-  'giaBalance',
-  'giaCostBasis',
-  'studentLoanPlan',
-  'studentLoanBalance',
-  'studentLoanYears',
-  'deathInServiceMultiple',
-]);
-
-const PARTNER_DEFAULTS = {
-  currentAge: 28,
-  retirementAge: 65,
-  grossIncome: 35_000,
-  niContributionYears: 3,
-  statePensionAge: 67, // set from the legal age unless overridden (see below)
-  statePensionAgeOverride: null,
-  statePensionDeferralYears: 0,
-  topUpStatePension: false,
-  pensionAccessAge: 57,
-  sex: 'neutral',
-  employmentChanges: [],
-  employeePensionPct: 5,
-  employeePensionAuto: false,
-  employerPensionPct: 3,
-  employerMatch: false,
-  employerMatchThreshold: 5,
-  pensionBalance: 10_000,
-  dbPensions: [],
-  isaBalance: 5_000,
-  giaBalance: 0,
-  giaCostBasis: 0,
-  studentLoanPlan: '',
-  studentLoanBalance: 0,
-  studentLoanYears: 0,
-  deathInServiceMultiple: 0,
-};
-
 // The partner's inputs laid over the shared ones, so editors and helpers
 // written for one person work unchanged for the partner.
 const partnerView = (p) => ({ ...p, ...p.partner });
-
-// Settings tabs shown: a Household tab in couple mode, and only the per-person
-// tabs while editing the partner.
-const PARTNER_TABS = ['Personal', 'Pension', 'Savings', 'Events', 'Debts', 'Simulation'];
-function tabsFor(couple, scope) {
-  if (!couple) return TABS;
-  if (scope === 'partner') return PARTNER_TABS;
-  return [TABS[0], 'Household', 'Protection', ...TABS.slice(1)];
-}
 
 const PLAN_OPTIONS = [
   { value: '', label: 'None' },
@@ -173,127 +132,6 @@ const SERIES_HC = [
 // This is distinct from TAX_YEAR, the frozen 2026/27 tax regime the model uses.
 const CURRENT_YEAR = new Date().getFullYear();
 
-const DEFAULTS = {
-  currentAge: 28,
-  retirementAge: 65,
-  grossIncome: 45_000,
-  annualLivingExpenses: 20_000,
-  niContributionYears: 3,
-  // State pension age: the legal age for your year of birth (from your current
-  // age), unless you choose one (statePensionAgeOverride). statePensionAge
-  // always holds the age in use.
-  statePensionAge: 67,
-  statePensionAgeOverride: null,
-  statePensionDeferralYears: 0,
-  topUpStatePension: false, // auto-buy voluntary Class 3 NI years to reach the full 35
-  pensionAccessAge: 57, // NMPA — earliest age the DC pension can be accessed
-  sex: 'neutral', // mortality basis for the lifetime-solvency metric
-  windfalls: [],
-  oneOffExpenses: [],
-  employmentChanges: [],
-  employeePensionPct: 5,
-  employeePensionAuto: false, // when true, employee % is solved for tax-optimality
-  employerPensionPct: 3,
-  employerMatch: false, // when true, employer pays its rate only if employee ≥ threshold
-  employerMatchThreshold: 5, // employee % required to earn the full employer contribution
-  pensionBalance: 10_000,
-  // Defined benefit schemes (see DB_NEW_SCHEME for the fields of each).
-  dbPensions: [],
-  equityReturnPct: 7,
-  bondReturnPct: 3,
-  preRetirementEquityPct: 80,
-  postRetirementEquityPct: 40,
-  glideStartYears: 10,
-  glideEndYears: 5,
-  isaBalance: 5_000,
-  giaBalance: 0,
-  giaCostBasis: 0,
-  mortgageBalance: 200_000,
-  mortgageTermYears: 25,
-  mortgageType: 'repayment',
-  mortgageOverpayment: 0,
-  mortgageStartAge: 28, // clamped to ≥ currentAge by the engine; = "already started"
-  unsecuredBalance: 5_000,
-  unsecuredMonthly: 200,
-  studentLoanPlan: '',
-  studentLoanBalance: 0,
-  studentLoanYears: 0,
-  wageGrowthPct: 3,
-  mortgageRateType: 'fixed', // 'fixed' or 'boe'
-  mortgageRatePct: 4.5,
-  mortgageSpreadPct: 1.5,
-  unsecuredRateType: 'fixed', // 'fixed' or 'boe'
-  unsecuredRatePct: 10.0,
-  unsecuredSpreadPct: 15.0,
-  boePct: 3.75, // Bank Rate, September 2026 (bankofengland.co.uk)
-  inflationPct: 2.5,
-  fiscalDragPct: 0,
-  // Retirement
-  maxAge: 90,
-  targetNetExpenses: 30_000,
-  // Essential (non-negotiable) net spending, today's money — shared by the
-  // guardrails floor and the annuity's "cover essential spending" sizing.
-  essentialExpenses: 20_000,
-  takePCLS: true,
-  // Lifetime annuity: one purchase, sized by an income target in today's money.
-  // Applies to both the deterministic projection and Monte Carlo.
-  annuityEnabled: false,
-  annuityPurchaseAge: 75,
-  annuitySizing: 'essential', // 'essential' (cover essentials) | 'fixed' (set income)
-  annuityIncome: 10_000, // 'fixed' sizing: gross annual income, today's money
-  annuityInflationLinked: true,
-  annuityRatePct: null, // your quote (%); null → illustrative rate for the age and type
-  // Monte Carlo settings
-  mcTrials: 200,
-  mcVolatility: 1.0,
-  mcBearFreq: 12,
-  mcBearSeverity: 0.15,
-  mcCrisisPersistence: 0.6,
-  // Flexible retirement (Monte Carlo only): postpone retirement in trials that
-  // are clearly off track at the target age, up to the cap, before retiring.
-  flexibleRetirement: false,
-  maxRetirementDelayYears: 3,
-  // Spending guardrails (Monte Carlo only): flex retirement spending toward the
-  // sustainable level within a floor (essential expenses, above) and ceiling (%
-  // of target; 100 = recovery-only). Sensitivity picks the drift band + step size.
-  spendingGuardrails: false,
-  spendingCeilingPct: 100,
-  guardrailSensitivity: 'standard', // 'gentle' | 'standard' | 'responsive'
-  // Couple mode: plan for two. The partner's own inputs live in `partner`.
-  householdMode: 'single', // 'single' | 'couple'
-  partner: PARTNER_DEFAULTS,
-  partnership: 'married', // 'married' (also civil partners) | 'cohabiting'
-  willsToEachOther: true, // cohabiting only
-  // Household spending after a death, % of the couple's (Retirement Living
-  // Standards 2026: a one-person budget is 72% of a two-person one).
-  survivorSpendingPct: 72,
-  // Couple mode, "Just me" view: your share of the mortgage, other debts and
-  // one-off events if you were on your own.
-  yourSharePct: 50,
-  // Household spending while one of you has retired and the other works:
-  // 'working' (living costs), 'halfway' or 'retirement' (the retirement target).
-  spendingWhileOneWorks: 'halfway',
-  annuityOwner: 'self', // whose pension buys the annuity
-  // "What if one of us dies?" on the deterministic chart.
-  deathScenario: { enabled: false, person: 'partner', age: 80 },
-  // Protection (couple mode): death-in-service (× salary, per person) and
-  // life cover policies (see LIFE_POLICY_NEW).
-  deathInServiceMultiple: 0,
-  lifePolicies: [],
-};
-
-// A new life cover policy in the Protection tab.
-const LIFE_POLICY_NEW = {
-  label: '',
-  enabled: true,
-  type: 'level', // 'level' | 'decreasing' | 'wholeOfLife'
-  lifeOf: 'self', // 'self' | 'partner' | 'joint' (pays on the first death)
-  sumAssured: 250_000,
-  termYears: 25,
-  monthlyPremium: 25,
-  inTrust: true,
-  payTo: 'savings', // 'savings' | 'mortgage'
-};
 const LIFE_POLICY_TYPES = [
   { value: 'level', label: 'Level term' },
   { value: 'decreasing', label: 'Decreasing term' },
@@ -330,8 +168,6 @@ const GUARDRAIL_PRESETS = {
   responsive: { band: 0.15, step: 0.1 },
 };
 
-// Bring saved or pasted inputs up to date. The guardrails floor used to be its
-// own input (spendingFloor); it is now the shared essential-expenses figure.
 // The legal state pension age for someone of `currentAge` now.
 const legalSpaFor = (currentAge) => legalStatePensionAge(CURRENT_YEAR - currentAge);
 
@@ -344,29 +180,6 @@ function withLegalStatePensionAge(s) {
   const self = fix(s);
   const partner = s.partner ? fix(s.partner) : s.partner;
   return self === s && partner === s.partner ? s : { ...self, partner };
-}
-
-// Inputs saved before the state pension age followed the law: a saved 67 (the
-// old default) becomes "use the legal age"; anything else was chosen.
-const spaOverrideFrom = (v) =>
-  v.statePensionAgeOverride !== undefined
-    ? v.statePensionAgeOverride
-    : v.statePensionAge == null || v.statePensionAge === 67
-      ? null
-      : v.statePensionAge;
-
-function migrateInputs(saved) {
-  const next = { ...saved };
-  next.statePensionAgeOverride = spaOverrideFrom(saved);
-  if (next.essentialExpenses == null && next.spendingFloor != null) {
-    next.essentialExpenses = next.spendingFloor;
-  }
-  delete next.spendingFloor;
-  // Couple mode: fill in any partner fields added since the inputs were saved.
-  next.partner = { ...PARTNER_DEFAULTS, ...(next.partner ?? {}) };
-  next.partner.statePensionAgeOverride = spaOverrideFrom(saved.partner ?? {});
-  next.deathScenario = { ...DEFAULTS.deathScenario, ...(next.deathScenario ?? {}) };
-  return next;
 }
 
 // Engine options for the planned annuity (null when off). Essential sizing
@@ -408,6 +221,7 @@ function personProfile(v) {
     studentLoanPlan: v.studentLoanPlan || null,
     employmentChanges: v.employmentChanges,
     deathInServiceMultiple: v.deathInServiceMultiple ?? 0,
+    takePCLS: v.takePCLS ?? true,
   };
 }
 
@@ -487,29 +301,6 @@ function effectiveEmployeePensionRate(p) {
 }
 
 // ── Defined benefit schemes ──────────────────────────────────────────────────
-// A new scheme card's starting values (UI form; buildDbPensions converts).
-const DB_NEW_SCHEME = {
-  label: '',
-  enabled: true,
-  status: 'active',
-  pension: 5_000,
-  accrualDenominator: 54,
-  memberContributionPct: 8,
-  inServiceRevaluation: 'cpi+1.5',
-  normalPensionAge: 67,
-  paymentAge: 67,
-  earlyReductionPct: 5,
-  lateIncreasePct: 5,
-  deferredIncreases: 'cpi',
-  paymentIncreases: 'cpi',
-  lumpSum: 'none',
-  commutationFactor: 12,
-  automaticLumpSum: 0,
-  // Couple mode: survivor's pension on the member's death.
-  survivorPensionPct: 50,
-  survivorUnmarried: 'yes',
-};
-
 const DB_STATUS_OPTIONS = [
   { value: 'active', label: 'Still building it up' },
   { value: 'deferred', label: 'Left the scheme' },
@@ -1182,11 +973,11 @@ function VersionButton({ onClick, unseen }) {
 }
 
 // Couple mode: whose settings the sidebar is editing.
-function ScopeSwitch({ scope, onChange }) {
+function ScopeSwitch({ scope, onChange, couple }) {
   return (
     <div
       role="tablist"
-      aria-label="Whose settings"
+      aria-label="Settings"
       style={{
         display: 'flex',
         gap: 4,
@@ -1195,10 +986,7 @@ function ScopeSwitch({ scope, onChange }) {
         flexShrink: 0,
       }}
     >
-      {[
-        { value: 'self', label: 'You' },
-        { value: 'partner', label: 'Partner' },
-      ].map(({ value, label }) => {
+      {SETTINGS_GROUPS.filter((g) => couple || !g.couple).map(({ scope: value, label }) => {
         const active = scope === value;
         return (
           <button
@@ -1228,7 +1016,7 @@ function ScopeSwitch({ scope, onChange }) {
 }
 
 // Section picker for the compact inputs pane: previous / dropdown / next.
-function SectionPicker({ value, onChange, tabs = TABS }) {
+function SectionPicker({ value, onChange, tabs }) {
   const i = tabs.indexOf(value);
   const step = (d) => onChange(tabs[(i + d + tabs.length) % tabs.length]);
   return (
@@ -2065,7 +1853,7 @@ const eventIntroStyle = {
 
 // Shared bordered card for a single life event: label + ON/OFF toggle + remove,
 // with the event's value inputs supplied as children. Used by every editor in
-// the Events tab (windfalls, one-off expenses, working-hours changes).
+// Household › Events (windfalls, one-off expenses) and each person's working-hours changes.
 function EventCard({ accent, enabled, label, placeholder, onLabel, onToggle, onRemove, children }) {
   return (
     <div
@@ -2320,48 +2108,36 @@ function WorkingHoursSection({ p, events, onChange, accent }) {
           </EventCard>
         );
       })}
-      <AddEventButton onClick={add} label="+ Add Hours Change" />
+      <AddEventButton onClick={add} label="+ Add hours change" />
     </div>
   );
 }
 
-function EventsEditor({ p, set, scope = null }) {
-  // Windfalls and one-off expenses belong to the household; working-hours
-  // changes to whoever's settings are being edited.
-  const household = scope !== 'partner';
+// The household's windfalls and one-off expenses (Household › Events).
+function EventsEditor({ p, set }) {
   return (
     <>
-      {household && (
-        <>
-          <EventSection
-            p={p}
-            events={p.windfalls ?? []}
-            onChange={set('windfalls')}
-            title="Windfalls"
-            accent="var(--accent-gold)"
-            intro="One-off amounts added to your GIA at a given age — an inheritance, asset sale, or gift. Enter amounts in today's money, net of any fees and taxes; they are inflated to the event year."
-            help="The full amount counts as cost basis (no phantom gains), and the yearly bed-and-ISA sweep migrates it into ISA headroom over time. Windfalls are marked ▲ on the chart. In Monte Carlo mode each trial inflates the amount along its own inflation path. Use the ON/OFF toggle to include or exclude an event without deleting it — handy for before/after comparisons. To model downsizing, enter the expected net proceeds here — see the README for why property itself is not tracked."
-            placeholder="Label (e.g. Inheritance)"
-            addLabel="+ Add Windfall"
-          />
-          <EventSection
-            p={p}
-            events={p.oneOffExpenses ?? []}
-            onChange={set('oneOffExpenses')}
-            title="One-off Expenses"
-            accent="#f43f5e"
-            intro="One-off costs paid from your pots at a given age — a house deposit, wedding, or helping children. Enter amounts in today's money; they are inflated to the event year."
-            help="Funded in tax-efficiency order: first from that year's unallocated savings (no tax event), then the GIA (CGT-aware, using the annual exempt amount), then the ISA. The pension is never touched — it is inaccessible before retirement. In retirement the expense joins that year's drawdown need. If your pots can't cover it, the gap is reported as a shortfall rather than borrowed. Expenses are marked ▼ on the chart. Use the ON/OFF toggle to include or exclude an event without deleting it. Pair a deposit here with a mortgage start age (Mortgage tab) to model a future property purchase."
-            placeholder="Label (e.g. House deposit)"
-            addLabel="+ Add Expense"
-          />
-        </>
-      )}
-      <WorkingHoursSection
+      <EventSection
         p={p}
-        events={p.employmentChanges ?? []}
-        onChange={set('employmentChanges')}
-        accent="#2dd4bf"
+        events={p.windfalls ?? []}
+        onChange={set('windfalls')}
+        title="Windfalls"
+        accent="var(--accent-gold)"
+        intro="One-off amounts added to your GIA at a given age — an inheritance, asset sale, or gift. Enter amounts in today's money, net of any fees and taxes; they are inflated to the event year."
+        help="The full amount counts as cost basis (no phantom gains), and the yearly bed-and-ISA sweep migrates it into ISA headroom over time. Windfalls are marked ▲ on the chart. In Monte Carlo mode each trial inflates the amount along its own inflation path. Use the ON/OFF toggle to include or exclude an event without deleting it — handy for before/after comparisons. To model downsizing, enter the expected net proceeds here — see the README for why property itself is not tracked."
+        placeholder="Label (e.g. Inheritance)"
+        addLabel="+ Add windfall"
+      />
+      <EventSection
+        p={p}
+        events={p.oneOffExpenses ?? []}
+        onChange={set('oneOffExpenses')}
+        title="One-off expenses"
+        accent="#f43f5e"
+        intro="One-off costs paid from your pots at a given age — a house deposit, wedding, or helping children. Enter amounts in today's money; they are inflated to the event year."
+        help="Funded in tax-efficiency order: first from that year's unallocated savings (no tax event), then the GIA (CGT-aware, using the annual exempt amount), then the ISA. The pension is never touched — it is inaccessible before retirement. In retirement the expense joins that year's drawdown need. If your pots can't cover it, the gap is reported as a shortfall rather than borrowed. Expenses are marked ▼ on the chart. Use the ON/OFF toggle to include or exclude an event without deleting it. Pair a deposit here with a mortgage start age (Household › Home & debts) to model a future property purchase."
+        placeholder="Label (e.g. House deposit)"
+        addLabel="+ Add expense"
       />
     </>
   );
@@ -2463,7 +2239,7 @@ function LifePoliciesEditor({ p, set }) {
     <>
       <InfoBox>
         What would the survivor have if one of you died? Add any life cover you hold;
-        death-in-service is set per person on the Pension tab. Then switch on What if one of us
+        death-in-service is set in each person's Personal tab. Then switch on What if one of us
         dies? under the chart to see the payouts and the cover gap — how much more cover the
         survivor would need.
       </InfoBox>
@@ -2912,7 +2688,7 @@ function AutoContributionReadout({ p }) {
               fontWeight: 500,
             }}
           >
-            Employee Contribution
+            Your rate
           </span>
           <span
             style={{
@@ -3034,7 +2810,7 @@ function TopUpReadout({ p, topUp }) {
     if (bridge <= 0) {
       msg =
         'No years bought: you reach state pension age at (or before) retirement, so there are no ' +
-        'bridge years to fill. Add pre-retirement gap years to NI Qualifying Years instead.';
+        'bridge years to fill. Add pre-retirement gap years to National Insurance years so far instead.';
     } else if (reachable < minY) {
       msg =
         `No years bought: even filling every available year you'd reach only ${reachable}/${full}, ` +
@@ -3204,16 +2980,49 @@ function AnnuityControls({ p, set, annuity }) {
   );
 }
 
-// `scope` is null in single mode; in couple mode 'self' or 'partner' — whose
-// settings are shown. Household settings are hidden while editing the partner.
-function TabContent({ tab, p, set, derived, topUp, annuity, dbSummary, scope = null }) {
-  const household = scope !== 'partner';
+// The Bank of England base rate a tracker follows: set once, under
+// Assumptions › Economy, and shown read-only where a rate tracks it.
+function BaseRateNote({ rate, goTo }) {
+  return (
+    <div
+      style={{
+        marginTop: -8,
+        marginBottom: 16,
+        fontSize: 11,
+        color: 'var(--text-muted)',
+        fontFamily: 'var(--font-body)',
+      }}
+    >
+      Bank of England base rate: {fmtPct(rate)}, set in{' '}
+      <button
+        type="button"
+        onClick={() => goTo?.('assumptions', 'Economy')}
+        style={{
+          background: 'none',
+          border: 'none',
+          padding: 0,
+          color: 'var(--accent-gold)',
+          cursor: 'pointer',
+          font: 'inherit',
+          textDecoration: 'underline',
+        }}
+      >
+        Assumptions › Economy
+      </button>
+    </div>
+  );
+}
+
+// The settings for one tab. Person tabs (You, Partner) get that person's
+// inputs as `p` / `set`; the Household and Assumptions tabs the shared ones.
+// `couple`: planning with a partner. `goTo(scope, tab)` opens another tab.
+function TabContent({ tab, p, set, derived, topUp, annuity, dbSummary, couple = false, goTo }) {
   switch (tab) {
     case 'Personal':
       return (
         <>
           <Slider
-            label="Current Age"
+            label="Current age"
             value={p.currentAge}
             min={18}
             max={60}
@@ -3226,674 +3035,13 @@ function TabContent({ tab, p, set, derived, topUp, annuity, dbSummary, scope = n
             allowInput
             help="Your current age in whole years. The projection runs from this age to your model horizon."
           />
-          <Slider
-            label="Retirement Age"
-            value={p.retirementAge}
-            min={p.currentAge + 1}
-            max={80}
-            step={1}
-            format={fmtAge}
-            onChange={(v) => set('retirementAge')(Math.max(v, p.currentAge + 1))}
-            allowInput
-            help="The age at which you plan to stop working. From this point the model switches to drawdown mode, spending from your pots to meet your target expenses."
-          />
-          <Slider
-            label="Gross Annual Salary"
-            value={p.grossIncome}
-            min={15_000}
-            max={300_000}
-            step={1_000}
-            format={fmtGBP}
-            onChange={set('grossIncome')}
-            allowInput
-            help="Your pre-tax annual salary. Used to calculate pension contributions (employee and employer). Wage growth applies annually."
-          />
-          {household && (
-            <Slider
-              label={scope ? 'Household Living Expenses' : 'Pre-Retirement Living Expenses'}
-              value={p.annualLivingExpenses}
-              min={0}
-              max={80_000}
-              step={500}
-              format={fmtGBP}
-              onChange={set('annualLivingExpenses')}
-              allowInput
-              help="Your annual non-debt living costs during the working years, in today's money — food, utilities, transport, insurance, leisure, etc. Do not include mortgage or debt repayments; those are entered separately. This amount is inflated each year to keep real purchasing power constant. Annual savings are derived automatically as: net take-home − debt payments − living expenses. Retirement spending is a separate parameter in the Retire tab; in couple mode, the Household tab sets the spending while one of you is retired and the other works."
-            />
-          )}
-          {household && <DerivedSavingsReadout derived={derived} />}
-          <Slider
-            label="NI Qualifying Years"
-            value={p.niContributionYears}
-            min={0}
-            max={35}
-            step={1}
-            format={fmtYrs}
-            onChange={set('niContributionYears')}
-            help={`National Insurance qualifying years already accrued before the projection starts. Each working year above the Lower Earnings Limit (${fmtGBP(NI_THRESHOLDS.employee.lowerEarningsLimit)} in 2026/27) adds one year, up to your state pension age. Full state pension requires 35 qualifying years; at least 10 are needed for any entitlement. To model buying voluntary Class 3 years for the gap between retirement and state pension age, use the State Pension Top-up toggle below (it costs and funds them automatically). For gaps from before now, add those years here — each adds 1/35th of the full pension for life.`}
-          />
-          <Slider
-            label="State Pension Age"
-            value={p.statePensionAge}
-            min={60}
-            max={70}
-            step={1}
-            format={fmtAge}
-            onChange={set('statePensionAgeOverride')}
-            help="Age at which your state pension begins. It starts at the age set by law for your year of birth: 66 if born before 1961, 67 if born 1961 to 1977, and 68 if born from 1978 (68 comes in between 2044 and 2046). Change it to plan for a different age — for example if a future review brings 68 forward. If you retire earlier, state pension income starts later in the drawdown phase."
-            annotation={() => {
-              const born = CURRENT_YEAR - p.currentAge;
-              const legal = legalSpaFor(p.currentAge);
-              if (p.statePensionAgeOverride == null)
-                return `Set by law for someone born in ${born}`;
-              return (
-                <>
-                  The law says {legal} for someone born in {born}
-                  {p.statePensionAgeOverride !== legal && (
-                    <>
-                      {' · '}
-                      <button
-                        type="button"
-                        onClick={() => set('statePensionAgeOverride')(null)}
-                        style={{
-                          background: 'none',
-                          border: 'none',
-                          padding: 0,
-                          color: 'var(--accent-gold)',
-                          cursor: 'pointer',
-                          font: 'inherit',
-                          textDecoration: 'underline',
-                        }}
-                      >
-                        use {legal}
-                      </button>
-                    </>
-                  )}
-                </>
-              );
-            }}
-          />
-          <Slider
-            label="State Pension Deferral"
-            value={p.statePensionDeferralYears}
-            min={0}
-            max={10}
-            step={1}
-            format={fmtYrs}
-            onChange={(v) => set('statePensionDeferralYears')(Math.max(0, Math.round(v)))}
-            help="Years to defer claiming your state pension past state pension age. Each deferred year adds about 5.8% of the pension at the time you claim (1% per 9 weeks, new state pension rules). That extra then rises with CPI each year, while the base pension keeps the triple lock. It takes roughly 17 years to earn back each year deferred, and under the new rules a partner can't inherit it — so it mainly suits people still working (especially higher-rate taxpayers) or expecting a long life. Deferring means drawing more from your pots in the gap years."
-          />
-          <Toggle
-            label="State Pension Top-up (Class 3)"
-            value={p.topUpStatePension ? 'on' : 'off'}
-            optA={{ value: 'off', label: 'Off' }}
-            optB={{ value: 'on', label: 'Auto top-up' }}
-            onChange={(v) => set('topUpStatePension')(v === 'on')}
-            help={`Off: your state pension reflects only the NI years you accrue by retirement. Auto top-up: the app buys voluntary Class 3 contributions to fill the gap toward the full 35 qualifying years — for the years between retirement and state pension age (when the gaps arise), and only if it can reach the 10-year minimum. Each year costs about ${fmtGBP(LIFECYCLE_CONSTANTS.statePension.class3AnnualCost)} (2026/27), funded from your pots like any other spending, so it buys fewer years if you can't afford them, and never fabricates money. It recalculates automatically whenever you change your inputs. Gaps from before retirement aren't modelled here — add those to NI Qualifying Years above. Informational, not advice; check your own forecast at gov.uk/check-state-pension.`}
-          />
-          {p.topUpStatePension && <TopUpReadout p={p} topUp={topUp} />}
-        </>
-      );
-
-    case 'Pension':
-      return (
-        <>
-          {/* Employer contribution first — it's an input the employee optimiser uses. */}
-          <Toggle
-            label="Employer Contribution Type"
-            value={p.employerMatch ? 'matched' : 'fixed'}
-            optA={{ value: 'fixed', label: 'Fixed' }}
-            optB={{ value: 'matched', label: 'Matched' }}
-            onChange={(v) => set('employerMatch')(v === 'matched')}
-            help="Fixed: your employer always contributes the percentage below, regardless of what you pay in. Matched: your employer pays that percentage only if you contribute at least the required minimum (set below), and nothing if you fall short. This captures real schemes — including non-1:1 and tiered offers — by their best rung: the smallest employee contribution that unlocks the largest employer one (e.g. put in 6% to get 12%). Auto mode assumes you take the full offer."
-          />
-          <Slider
-            label={p.employerMatch ? 'Employer Contribution (max)' : 'Employer Contribution'}
-            value={p.employerPensionPct}
-            min={0}
-            max={20}
-            step={0.5}
-            format={fmtPct}
-            onChange={set('employerPensionPct')}
-            color="#4f8ef7"
-            allowInput
-            help={
-              p.employerMatch
-                ? "The maximum your employer contributes, as a percentage of gross salary — paid in full once you meet the required employee minimum below, and not at all if you fall short (partial tiers are not modelled). It's free money added on top of your salary."
-                : "Your employer's pension contribution as a percentage of your gross salary. This is paid on top of your salary and doesn't cost you anything directly — sometimes called 'free money'."
-            }
-          />
-          {p.employerMatch && (
-            <Slider
-              label="Employee Contribution Required"
-              value={p.employerMatchThreshold}
-              min={0}
-              max={20}
-              step={0.5}
-              format={fmtPct}
-              onChange={set('employerMatchThreshold')}
-              color="#4f8ef7"
-              allowInput
-              help="The minimum you must contribute to receive the full employer contribution above. For a tiered scheme, enter the employee percentage for the top tier you'll take (e.g. 6% to earn 12%). Your employee contribution is floored at this minimum in both Manual and Auto modes, since contributing less would forfeit the whole employer contribution."
-            />
-          )}
-          <Toggle
-            label="Contribution Mode"
-            value={p.employeePensionAuto ? 'auto' : 'manual'}
-            optA={{ value: 'manual', label: 'Manual' }}
-            optB={{ value: 'auto', label: 'Auto (tax-optimal)' }}
-            onChange={(v) => set('employeePensionAuto')(v === 'auto')}
-            help="Manual: set your salary-sacrifice percentage yourself. Auto (tax-optimal): the app solves for the employee contribution that protects your tax-free personal allowance — it brings your taxable income down to £100,000, the point above which the allowance tapers away (an effective 60% marginal rate up to £125,140). It uses your salary, your employer contribution and the £60,000 annual allowance (tapered for high earners), and never sacrifices below the personal allowance. If your income is already below £100,000 there is nothing to protect, so it recommends 0%. When your employer contribution is Matched, it also contributes at least the required minimum to earn the full employer contribution. Based on today's salary and 2026/27 thresholds; affordability is not considered."
-          />
-          {p.employeePensionAuto ? (
-            <AutoContributionReadout p={p} />
-          ) : (
-            <Slider
-              label="Employee Contribution"
-              value={manualEmployeePensionPct(p)}
-              min={p.employerMatch ? p.employerMatchThreshold : 0}
-              max={50}
-              step={0.5}
-              format={fmtPct}
-              onChange={(v) =>
-                set('employeePensionPct')(
-                  p.employerMatch ? Math.max(v, p.employerMatchThreshold) : v
-                )
-              }
-              color="#4f8ef7"
-              allowInput
-              help={
-                p.employerMatch
-                  ? `Your pension contribution as a percentage of gross salary, paid via salary sacrifice (income tax + NI relief). It can't go below the ${fmtPct(p.employerMatchThreshold)} your employer requires for its match: contributing less would forfeit the whole employer contribution, so it's floored at the required minimum.`
-                  : 'Your pension contribution as a percentage of gross salary, paid via salary sacrifice. This reduces your taxable income, saving income tax and National Insurance.'
-              }
-            />
-          )}
-          {!p.employeePensionAuto && <ManualAllowanceWarning p={p} />}
-          <Slider
-            label="Starting Balance"
-            value={p.pensionBalance}
-            min={0}
-            max={500_000}
-            step={1_000}
-            format={fmtGBP}
-            onChange={set('pensionBalance')}
-            color="#4f8ef7"
-            allowInput
-            help="Your current pension pot value. This is your defined contribution (DC) pension — the pot you own, not a final salary (DB) scheme. Grows with investment returns each year."
-          />
-          <Slider
-            label="Access Age"
-            value={p.pensionAccessAge}
-            min={50}
-            max={60}
-            step={1}
-            format={fmtAge}
-            onChange={set('pensionAccessAge')}
-            color="#4f8ef7"
-            allowInput
-            help="The earliest age you can access your defined-contribution pension — the Normal Minimum Pension Age. It's 55 today, rising to 57 from April 2028, so 57 is the safe default for anyone retiring in the years ahead. If you retire before this age, the model can't touch your pension yet: it bridges spending from your ISA and GIA until you reach it, taking any tax-free lump sum then, and shows a shortfall if those pots run dry first. Marked on the chart alongside your retirement and state pension ages."
-          />
-          <InfoBox>
-            Contributions are via salary sacrifice, reducing both income tax and employee NI. Annual
-            allowance: £60,000. PCLS (tax-free lump sum): up to 25%. Pension accessible from age{' '}
-            {p.pensionAccessAge}.
-          </InfoBox>
-          {scope && (
-            <Slider
-              label="Death-in-service"
-              value={p.deathInServiceMultiple ?? 0}
-              min={0}
-              max={10}
-              step={1}
-              format={(v) => (v > 0 ? `${v}× salary` : 'None')}
-              onChange={(v) => set('deathInServiceMultiple')(Math.min(20, Math.max(0, v)))}
-              allowInput
-              help="A lump sum your employer's scheme pays if you die while working there, as a multiple of salary (often 2× to 4×; check your scheme booklet). Paid to your partner, normally outside your estate, so no inheritance tax. It stops when you stop working."
-            />
-          )}
-          <SecHead>Defined Benefit Pensions</SecHead>
-          <DbPensionsEditor p={p} set={set} dbSummary={dbSummary} />
-        </>
-      );
-
-    case 'Savings':
-      return (
-        <>
-          <SecHead>ISA</SecHead>
-          <Slider
-            label="Starting ISA Balance"
-            value={p.isaBalance}
-            min={0}
-            max={250_000}
-            step={1_000}
-            format={fmtGBP}
-            onChange={set('isaBalance')}
-            color="#34d399"
-            allowInput
-            help="Your current Individual Savings Account (ISA) balance. ISA growth is completely tax-free and withdrawals are not taxed, making it the most efficient savings vehicle after pension."
-          />
-          <SecHead>GIA</SecHead>
-          <Slider
-            label="Starting GIA Balance"
-            value={p.giaBalance}
-            min={0}
-            max={250_000}
-            step={1_000}
-            format={fmtGBP}
-            onChange={(v) => {
-              set('giaBalance')(v);
-              if (p.giaCostBasis > v) set('giaCostBasis')(v);
-            }}
-            color="#e8b84b"
-            allowInput
-            help="Your current General Investment Account balance. Unlike an ISA, growth here is subject to Capital Gains Tax (CGT) when you sell. Sometimes called a 'trading account' or 'dealing account'."
-          />
-          <Slider
-            label="GIA Cost Basis"
-            value={Math.min(p.giaCostBasis, p.giaBalance)}
-            min={0}
-            max={Math.max(p.giaBalance, 1)}
-            step={100}
-            format={fmtGBP}
-            onChange={set('giaCostBasis')}
-            color="#e8b84b"
-            allowInput
-            help="The total amount you originally invested in your GIA — your 'book cost'. Used to calculate capital gains. Example: if you invested £10,000 and it grew to £15,000, your cost basis is £10,000 and the gain is £5,000."
-          />
-          <InfoBox>
-            ISA fills first (£20,000/yr limit) — excess goes to GIA. CGT annual exempt amount:
-            £3,000, used every year: moving GIA into the ISA and sales use it first, and the rest is
-            used at the year end by realising gains and reinvesting, so they're never taxed. Basic
-            rate 18%, higher rate 24%.
-          </InfoBox>
-        </>
-      );
-
-    case 'Events':
-      return <EventsEditor p={p} set={set} scope={scope} />;
-
-    case 'Mortgage': {
-      const effectiveMortgageRate =
-        p.mortgageRateType === 'boe' ? p.boePct + p.mortgageSpreadPct : p.mortgageRatePct;
-      return (
-        <>
-          <Slider
-            label="Outstanding Balance"
-            value={p.mortgageBalance}
-            min={0}
-            max={1_000_000}
-            step={5_000}
-            format={fmtGBP}
-            onChange={set('mortgageBalance')}
-            color="#f43f5e"
-            allowInput
-            help="Your remaining mortgage balance. Set to £0 to exclude the mortgage from the projection. Interest and capital repayment are modelled monthly using the interest rate below. Note: only the mortgage (the debt) is modelled — your home's value is deliberately not tracked as an asset. The mortgage is a fixed cash-flow commitment regardless of house prices, while home equity is illiquid and not treated as a drawable pot. To model downsizing, add the expected net proceeds to your ISA/GIA balances in a separate scenario."
-          />
-          <Slider
-            label="Remaining Term"
-            value={p.mortgageTermYears}
-            min={1}
-            max={40}
-            step={1}
-            format={fmtYrs}
-            onChange={set('mortgageTermYears')}
-            color="#f43f5e"
-            help="Years remaining on your mortgage. The monthly payment is calculated from this term and the interest rate below. Overpayments reduce the balance faster but don't change the required payment."
-          />
-          <Slider
-            label="Start Age"
-            value={Math.max(p.mortgageStartAge ?? p.currentAge, p.currentAge)}
-            min={p.currentAge}
-            max={p.maxAge}
-            step={1}
-            format={fmtAge}
-            onChange={set('mortgageStartAge')}
-            color="#f43f5e"
-            help="Age the mortgage begins. Leave at your current age for an existing mortgage. Set a future age to model a planned property purchase: no payments or balance exist before then, and the balance above (today's money) is inflated to the purchase year, since house prices and loan sizes move with the economy. Pair it with a one-off expense in the Events tab for the deposit."
-          />
-          <Toggle
-            label="Mortgage Type"
-            value={p.mortgageType}
-            optA={{ value: 'repayment', label: 'Repayment' }}
-            optB={{ value: 'interest-only', label: 'Interest Only' }}
-            onChange={set('mortgageType')}
-            help="Repayment: capital reduces each month until the mortgage is fully paid off at the end of the term. Interest-only: you pay only interest each month and the full balance remains at term end."
-          />
-          <Slider
-            label="Monthly Overpayment"
-            value={p.mortgageOverpayment}
-            min={0}
-            max={2_000}
-            step={25}
-            format={fmtGBP}
-            onChange={set('mortgageOverpayment')}
-            color="#f43f5e"
-            allowInput
-            help="Extra amount paid toward your mortgage each month, on top of the required payment. Overpayments reduce the outstanding balance faster, saving interest over the life of the mortgage."
-          />
-          <SecHead>Interest Rate</SecHead>
-          <Toggle
-            label="Rate type"
-            value={p.mortgageRateType}
-            optA={{ value: 'fixed', label: 'Fixed rate' }}
-            optB={{ value: 'boe', label: 'BoE + spread' }}
-            onChange={set('mortgageRateType')}
-            help="Fixed: a constant rate (e.g. a fixed-term deal). BoE + spread: a tracker mortgage whose rate moves with the Bank of England base rate plus a fixed margin (e.g. BoE + 1.5%)."
-          />
-          {p.mortgageRateType === 'fixed' ? (
-            <Slider
-              label="Mortgage Interest Rate"
-              value={p.mortgageRatePct}
-              min={0}
-              max={15}
-              step={0.1}
-              format={fmtPct}
-              onChange={set('mortgageRatePct')}
-              color="#f43f5e"
-              allowInput
-              help="Fixed annual interest rate on your mortgage."
-            />
-          ) : (
-            <>
-              <Slider
-                label="BoE Base Rate"
-                value={p.boePct}
-                min={-5}
-                max={10}
-                step={0.1}
-                format={fmtPct}
-                onChange={set('boePct')}
-                allowInput
-                help="Bank of England base rate. Also used for Plan 1 student loan interest (capped at RPI or BoE+1%)."
-              />
-              <Slider
-                label="Mortgage Spread above BoE"
-                value={p.mortgageSpreadPct}
-                min={0}
-                max={10}
-                step={0.1}
-                format={fmtPct}
-                onChange={set('mortgageSpreadPct')}
-                color="#f43f5e"
-                allowInput
-                help={`Fixed margin added to the BoE base rate to give your tracker mortgage rate. Effective rate: ${fmtPct(p.boePct)} + ${fmtPct(p.mortgageSpreadPct)} = ${fmtPct(effectiveMortgageRate)}.`}
-              />
-            </>
-          )}
-          {p.mortgageBalance === 0 && (
-            <InfoBox>Set a balance above £0 to include a mortgage in the projection.</InfoBox>
-          )}
-        </>
-      );
-    }
-
-    case 'Debts': {
-      const effectiveUnsecuredRate =
-        p.unsecuredRateType === 'boe' ? p.boePct + p.unsecuredSpreadPct : p.unsecuredRatePct;
-      return (
-        <>
-          {household && (
-            <>
-              <SecHead>Unsecured Debt</SecHead>
-              <Slider
-                label="Outstanding Balance"
-                value={p.unsecuredBalance}
-                min={0}
-                max={100_000}
-                step={500}
-                format={fmtGBP}
-                onChange={set('unsecuredBalance')}
-                color="#fb923c"
-                allowInput
-                help="Total balance of unsecured debts such as credit cards, personal loans, or overdrafts. Interest accrues monthly at the rate set below."
-              />
-              <Slider
-                label="Monthly Payment"
-                value={p.unsecuredMonthly}
-                min={0}
-                max={3_000}
-                step={25}
-                format={fmtGBP}
-                onChange={set('unsecuredMonthly')}
-                color="#fb923c"
-                allowInput
-                help="Your monthly payment toward unsecured debts. Must exceed the monthly interest charge for the balance to reduce over time. When the debt is repaid, payments stop automatically."
-              />
-              <Toggle
-                label="Rate type"
-                value={p.unsecuredRateType}
-                optA={{ value: 'fixed', label: 'Fixed rate' }}
-                optB={{ value: 'boe', label: 'BoE + spread' }}
-                onChange={set('unsecuredRateType')}
-                help="Fixed: a constant rate (e.g. a personal loan). BoE + spread: a variable-rate product that tracks the Bank of England base rate (e.g. a tracker credit card or overdraft)."
-              />
-              {p.unsecuredRateType === 'fixed' ? (
-                <Slider
-                  label="Interest Rate"
-                  value={p.unsecuredRatePct}
-                  min={0}
-                  max={40}
-                  step={0.1}
-                  format={fmtPct}
-                  onChange={set('unsecuredRatePct')}
-                  color="#fb923c"
-                  allowInput
-                  help="Fixed annual interest rate on your unsecured debts (credit cards, personal loans, overdrafts)."
-                />
-              ) : (
-                <>
-                  <Slider
-                    label="BoE Base Rate"
-                    value={p.boePct}
-                    min={-5}
-                    max={10}
-                    step={0.1}
-                    format={fmtPct}
-                    onChange={set('boePct')}
-                    allowInput
-                    help="Bank of England base rate. Also used for Plan 1 student loan interest (capped at RPI or BoE+1%), and for any BoE-tracker mortgage."
-                  />
-                  <Slider
-                    label="Spread above BoE"
-                    value={p.unsecuredSpreadPct}
-                    min={0}
-                    max={35}
-                    step={0.1}
-                    format={fmtPct}
-                    onChange={set('unsecuredSpreadPct')}
-                    color="#fb923c"
-                    allowInput
-                    help={`Fixed margin added to the BoE base rate for your unsecured debts. Effective rate: ${fmtPct(p.boePct)} + ${fmtPct(p.unsecuredSpreadPct)} = ${fmtPct(effectiveUnsecuredRate)}.`}
-                  />
-                </>
-              )}
-            </>
-          )}
-          <SecHead>Student Loan</SecHead>
-          <Select
-            label="Repayment Plan"
-            value={p.studentLoanPlan}
-            options={PLAN_OPTIONS}
-            onChange={set('studentLoanPlan')}
-            help="Your student loan repayment plan, determined by when and where you studied. Repayments are income-contingent (a percentage of earnings above a threshold) and the balance is written off after the plan term regardless of how much remains."
-          />
-          {p.studentLoanPlan && (
-            <>
-              <Slider
-                label="Outstanding Balance"
-                value={p.studentLoanBalance}
-                min={0}
-                max={150_000}
-                step={1_000}
-                format={fmtGBP}
-                onChange={set('studentLoanBalance')}
-                color="#a78bfa"
-                allowInput
-                help="Your remaining student loan balance. Interest accrues annually at a rate linked to inflation and (for Plan 1) the BoE base rate. The balance is written off when the plan term expires."
-              />
-              <Slider
-                label="Years Already Repaying"
-                value={p.studentLoanYears}
-                min={0}
-                max={30}
-                step={1}
-                format={fmtYrs}
-                onChange={set('studentLoanYears')}
-                color="#a78bfa"
-                help="How many years you have already been making student loan repayments. Used to calculate how many years remain until write-off. Plan 1: 25 years. Plan 2/4: 30 years. Postgrad: 30 years."
-              />
-              <InfoBox>
-                Repayments are income-contingent. Interest is linked to inflation + BoE rate
-                (plan-dependent). Balance is written off after the plan term.
-              </InfoBox>
-            </>
-          )}
-        </>
-      );
-    }
-
-    case 'Rates': {
-      const preEq = p.preRetirementEquityPct / 100;
-      const postEq = p.postRetirementEquityPct / 100;
-      const eq = p.equityReturnPct / 100;
-      const bd = p.bondReturnPct / 100;
-      const blendedRateText = `Effective blended rate: ${((preEq * eq + (1 - preEq) * bd) * 100).toFixed(2)}% pre-retirement → ${((postEq * eq + (1 - postEq) * bd) * 100).toFixed(2)}% post-retirement`;
-      return (
-        <>
-          <Slider
-            label="Wage Growth Rate"
-            value={p.wageGrowthPct}
-            min={-5}
-            max={10}
-            step={0.1}
-            format={fmtPct}
-            onChange={set('wageGrowthPct')}
-            allowInput
-            help="Expected annual growth rate of your gross salary. Affects pension contributions, which are a percentage of salary. Can be negative to model pay cuts or career breaks."
-          />
-          <Slider
-            label="Equity return"
-            value={p.equityReturnPct}
-            min={0}
-            max={15}
-            step={0.1}
-            format={fmtPct}
-            onChange={set('equityReturnPct')}
-            allowInput
-            help="Expected long-run annualised return on the equity portion of your portfolio (e.g. a global index fund), expressed as a geometric mean (CAGR) across a full economic cycle — the same figure you would find in historical data covering booms and recessions. Long-run UK/global equity average is roughly 7–8% nominal. Combined with your equity allocation below to give an effective blended rate used in both the deterministic and Monte Carlo projections."
-          />
-          <Slider
-            label="Bond / cash return"
-            value={p.bondReturnPct}
-            min={0}
-            max={10}
-            step={0.1}
-            format={fmtPct}
-            onChange={set('bondReturnPct')}
-            allowInput
-            help="Expected long-run annualised return on the bond or cash portion of your portfolio (e.g. gilts, money-market funds), expressed as a geometric mean (CAGR) across a full economic cycle. UK gilt yields have historically been 2–4% nominal. Combined with your equity allocation below to give an effective blended rate used in both the deterministic and Monte Carlo projections."
-          />
-          <Slider
-            label="Pre-retirement equity allocation"
-            value={p.preRetirementEquityPct}
-            min={0}
-            max={100}
-            step={1}
-            format={(v) => `${v}%`}
-            onChange={set('preRetirementEquityPct')}
-            allowInput
-            help="Percentage of your portfolio in equities during the accumulation phase (before the glide path begins). The remainder is in bonds/cash. A typical growth portfolio holds 70–100% equities."
-          />
-          <Slider
-            label="Post-retirement equity allocation"
-            value={p.postRetirementEquityPct}
-            min={0}
-            max={100}
-            step={1}
-            format={(v) => `${v}%`}
-            onChange={set('postRetirementEquityPct')}
-            allowInput
-            help="Percentage of your portfolio in equities once the glide path is fully complete. The remainder is in bonds/cash. A typical cautious retirement portfolio holds 30–50% equities to reduce sequence-of-returns risk."
-          />
-          <InfoBox>{blendedRateText}</InfoBox>
-          <Slider
-            label="Glide path: start (years before retirement)"
-            value={p.glideStartYears}
-            min={0}
-            max={30}
-            step={1}
-            format={(v) => `${v} yr${v !== 1 ? 's' : ''}`}
-            onChange={set('glideStartYears')}
-            allowInput
-            help="How many years before your retirement date to begin shifting from the pre-retirement to the post-retirement allocation. E.g. 10 means de-risking starts at retirementAge − 10. Set to 0 to start the transition only at retirement. If this puts the start before your current age, the glide path is already in progress and rates are interpolated accordingly."
-          />
-          <Slider
-            label="Glide path: end (years after retirement)"
-            value={p.glideEndYears}
-            min={0}
-            max={15}
-            step={1}
-            format={(v) => `${v} yr${v !== 1 ? 's' : ''}`}
-            onChange={set('glideEndYears')}
-            allowInput
-            help="How many years after your retirement date the glide path finishes, reaching the full post-retirement allocation. E.g. 5 means fully de-risked by retirementAge + 5. Set to 0 for an instant switch at retirement."
-          />
-          <Slider
-            label="Inflation Rate"
-            value={p.inflationPct}
-            min={-5}
-            max={10}
-            step={0.1}
-            format={fmtPct}
-            onChange={set('inflationPct')}
-            allowInput
-            help="Expected annual price inflation (CPI or RPI). Affects retirement expenses (which grow with inflation), student loan interest, and the real value of your annual savings. Can be negative for deflation scenarios."
-          />
-          <Slider
-            label="BoE Base Rate"
-            value={p.boePct}
-            min={-5}
-            max={10}
-            step={0.1}
-            format={fmtPct}
-            onChange={set('boePct')}
-            allowInput
-            help="Bank of England base rate. Used for Plan 1 student loan interest (capped at RPI or BoE+1%), and as the base for any BoE-tracker mortgage or unsecured debt rates set in the Mortgage and Debts tabs. Student loan interest is always floored at 0%."
-          />
-          <Slider
-            label="Fiscal Drag"
-            value={p.fiscalDragPct}
-            min={-5}
-            max={5}
-            step={0.1}
-            format={fmtPct}
-            onChange={set('fiscalDragPct')}
-            allowInput
-            help={`How far income tax and NI thresholds drift from inflation each year once the current freeze ends. The thresholds are frozen until April 2031 (Autumn Budgets 2025 and 2026), so this applies from 2031/32. Band growth = inflation rate − fiscal drag.\n\n0%: bands rise with inflation — no change in real tax burden.\nPositive (e.g. +2%): bands grow slower than inflation — bracket creep pushes more income into higher bands over time. Setting this equal to the inflation rate models fully frozen bands.\nNegative (e.g. −1%): bands grow faster than inflation — real tax burden falls, as happened when the UK personal allowance was raised sharply in the 2010s.`}
-          />
-          <InfoBox>
-            Debt rates are set per-instrument in the Mortgage and Debts tabs. BoE rate also applies
-            to Plan 1/4 student loan interest. All figures are nominal (not inflation-adjusted).
-          </InfoBox>
-        </>
-      );
-    }
-
-    case 'Simulation':
-      return (
-        <>
-          {household && (
-            <InfoBox>
-              These settings control the Monte Carlo simulation. Switch to the Monte Carlo tab in
-              the chart to run it.
-            </InfoBox>
-          )}
           {/* Sex — mortality basis for the lifetime-solvency metric */}
           <div style={{ marginBottom: 16 }}>
             <div
               style={{
                 display: 'flex',
+                flexWrap: 'wrap',
+                gap: 6,
                 justifyContent: 'space-between',
                 alignItems: 'center',
                 marginBottom: 6,
@@ -3908,9 +3056,9 @@ function TabContent({ tab, p, set, derived, topUp, annuity, dbSummary, scope = n
                   alignItems: 'center',
                 }}
               >
-                Sex (for survival)
+                Sex (for life expectancy)
                 <HelpTip
-                  title="Sex (for survival)"
+                  title="Sex (for life expectancy)"
                   text="Sets the death rates used for the lifetime-solvency figure — the chance of never running out of money while you're alive. They come from the ONS projected life tables (2024-based) for your sex and year of birth, so they include the improvements in life expectancy ONS expects in the years ahead. Women live longer on average, which means more exposure to late shortfalls. 'Neutral' averages the male and female rates. This affects only the lifetime-solvency number, never the projection itself or the fan bands. It's a population average, not your individual health."
                 />
               </span>
@@ -3952,330 +3100,811 @@ function TabContent({ tab, p, set, derived, topUp, annuity, dbSummary, scope = n
             </div>
             <LifeExpectancyReadout p={p} />
           </div>
-          {household && (
+          <Slider
+            label="Retirement age"
+            value={p.retirementAge}
+            min={p.currentAge + 1}
+            max={80}
+            step={1}
+            format={fmtAge}
+            onChange={(v) => set('retirementAge')(Math.max(v, p.currentAge + 1))}
+            allowInput
+            help="The age at which you plan to stop working. From this point the model switches to drawdown mode, spending from your pots to meet your target expenses."
+          />
+          <Slider
+            label="Salary (before tax)"
+            value={p.grossIncome}
+            min={15_000}
+            max={300_000}
+            step={1_000}
+            format={fmtGBP}
+            onChange={set('grossIncome')}
+            allowInput
+            help="Your pre-tax annual salary. Used to calculate pension contributions (employee and employer). Wage growth applies annually."
+          />
+          <WorkingHoursSection
+            p={p}
+            events={p.employmentChanges ?? []}
+            onChange={set('employmentChanges')}
+            accent="#2dd4bf"
+          />
+          {couple && (
+            <Slider
+              label="Death-in-service"
+              value={p.deathInServiceMultiple ?? 0}
+              min={0}
+              max={10}
+              step={1}
+              format={(v) => (v > 0 ? `${v}× salary` : 'None')}
+              onChange={(v) => set('deathInServiceMultiple')(Math.min(20, Math.max(0, v)))}
+              allowInput
+              help="A lump sum your employer's scheme pays if you die while working there, as a multiple of salary (often 2× to 4×; check your scheme booklet). Paid to your partner, normally outside your estate, so no inheritance tax. It stops when you stop working."
+            />
+          )}
+        </>
+      );
+
+    case 'Pension':
+      return (
+        <>
+          {/* Employer contribution first — it's an input the employee optimiser uses. */}
+          <Toggle
+            label="Employer contribution"
+            value={p.employerMatch ? 'matched' : 'fixed'}
+            optA={{ value: 'fixed', label: 'Fixed' }}
+            optB={{ value: 'matched', label: 'Matched' }}
+            onChange={(v) => set('employerMatch')(v === 'matched')}
+            help="Fixed: your employer always contributes the percentage below, regardless of what you pay in. Matched: your employer pays that percentage only if you contribute at least the required minimum (set below), and nothing if you fall short. This captures real schemes — including non-1:1 and tiered offers — by their best rung: the smallest employee contribution that unlocks the largest employer one (e.g. put in 6% to get 12%). Auto mode assumes you take the full offer."
+          />
+          <Slider
+            label={p.employerMatch ? 'Employer rate (max)' : 'Employer rate'}
+            value={p.employerPensionPct}
+            min={0}
+            max={20}
+            step={0.5}
+            format={fmtPct}
+            onChange={set('employerPensionPct')}
+            color="#4f8ef7"
+            allowInput
+            help={
+              p.employerMatch
+                ? "The maximum your employer contributes, as a percentage of gross salary — paid in full once you meet the required employee minimum below, and not at all if you fall short (partial tiers are not modelled). It's free money added on top of your salary."
+                : "Your employer's pension contribution as a percentage of your gross salary. This is paid on top of your salary and doesn't cost you anything directly — sometimes called 'free money'."
+            }
+          />
+          {p.employerMatch && (
+            <Slider
+              label="Your rate to get the match"
+              value={p.employerMatchThreshold}
+              min={0}
+              max={20}
+              step={0.5}
+              format={fmtPct}
+              onChange={set('employerMatchThreshold')}
+              color="#4f8ef7"
+              allowInput
+              help="The minimum you must contribute to receive the full employer contribution above. For a tiered scheme, enter the employee percentage for the top tier you'll take (e.g. 6% to earn 12%). Your employee contribution is floored at this minimum in both Manual and Auto modes, since contributing less would forfeit the whole employer contribution."
+            />
+          )}
+          <Toggle
+            label="Your contribution"
+            value={p.employeePensionAuto ? 'auto' : 'manual'}
+            optA={{ value: 'manual', label: 'Manual' }}
+            optB={{ value: 'auto', label: 'Auto (tax-optimal)' }}
+            onChange={(v) => set('employeePensionAuto')(v === 'auto')}
+            help="Manual: set your salary-sacrifice percentage yourself. Auto (tax-optimal): the app solves for the employee contribution that protects your tax-free personal allowance — it brings your taxable income down to £100,000, the point above which the allowance tapers away (an effective 60% marginal rate up to £125,140). It uses your salary, your employer contribution and the £60,000 annual allowance (tapered for high earners), and never sacrifices below the personal allowance. If your income is already below £100,000 there is nothing to protect, so it recommends 0%. When your employer contribution is Matched, it also contributes at least the required minimum to earn the full employer contribution. Based on today's salary and 2026/27 thresholds; affordability is not considered."
+          />
+          {p.employeePensionAuto ? (
+            <AutoContributionReadout p={p} />
+          ) : (
+            <Slider
+              label="Your rate"
+              value={manualEmployeePensionPct(p)}
+              min={p.employerMatch ? p.employerMatchThreshold : 0}
+              max={50}
+              step={0.5}
+              format={fmtPct}
+              onChange={(v) =>
+                set('employeePensionPct')(
+                  p.employerMatch ? Math.max(v, p.employerMatchThreshold) : v
+                )
+              }
+              color="#4f8ef7"
+              allowInput
+              help={
+                p.employerMatch
+                  ? `Your pension contribution as a percentage of gross salary, paid via salary sacrifice (income tax + NI relief). It can't go below the ${fmtPct(p.employerMatchThreshold)} your employer requires for its match: contributing less would forfeit the whole employer contribution, so it's floored at the required minimum.`
+                  : 'Your pension contribution as a percentage of gross salary, paid via salary sacrifice. This reduces your taxable income, saving income tax and National Insurance.'
+              }
+            />
+          )}
+          {!p.employeePensionAuto && <ManualAllowanceWarning p={p} />}
+          <Slider
+            label="Pension pot"
+            value={p.pensionBalance}
+            min={0}
+            max={500_000}
+            step={1_000}
+            format={fmtGBP}
+            onChange={set('pensionBalance')}
+            color="#4f8ef7"
+            allowInput
+            help="Your current pension pot value. This is your defined contribution (DC) pension — the pot you own, not a final salary (DB) scheme. Grows with investment returns each year."
+          />
+          <Slider
+            label="Pension access age"
+            value={p.pensionAccessAge}
+            min={50}
+            max={60}
+            step={1}
+            format={fmtAge}
+            onChange={set('pensionAccessAge')}
+            color="#4f8ef7"
+            allowInput
+            help="The earliest age you can access your defined-contribution pension — the Normal Minimum Pension Age. It's 55 today, rising to 57 from April 2028, so 57 is the safe default for anyone retiring in the years ahead. If you retire before this age, the model can't touch your pension yet: it bridges spending from your ISA and GIA until you reach it, taking any tax-free lump sum then, and shows a shortfall if those pots run dry first. Marked on the chart alongside your retirement and state pension ages."
+          />
+          <InfoBox>
+            Contributions are via salary sacrifice, reducing both income tax and employee NI. Annual
+            allowance: £60,000. PCLS (tax-free lump sum): up to 25%. Pension accessible from age{' '}
+            {p.pensionAccessAge}.
+          </InfoBox>
+          <SecHead>Tax-free lump sum</SecHead>
+          <Toggle
+            label="Take the lump sum at retirement"
+            value={p.takePCLS ? 'yes' : 'no'}
+            optA={{ value: 'yes', label: 'Yes' }}
+            optB={{ value: 'no', label: 'No' }}
+            onChange={(v) => set('takePCLS')(v === 'yes')}
+            help={
+              p.takePCLS
+                ? 'Lump sum taken upfront: 25% of the pension (capped at £268,275) is paid out tax-free at retirement; the rest is drawn down as fully taxable income.'
+                : 'Phased withdrawals (UFPLS): the pension stays uncrystallised; each withdrawal is 25% tax-free + 75% taxable income until the £268,275 lifetime allowance is exhausted.'
+            }
+          />
+          <InfoBox collapsible>
+            {
+              'PCLS (Pension Commencement Lump Sum) is a one-off tax-free payment taken when you crystallise your pension at retirement, capped at 25% of the pot or £268,275 lifetime — whichever is lower.\n\n'
+            }
+            {
+              'Yes — the full 25% lump sum is paid out immediately. The cash goes into your ISA first (up to £20k/year), with any surplus added to your GIA at cost. The remaining 75% of the pension is then drawn down as fully taxable income each year.\n\n'
+            }
+            {
+              'No — the pension stays uncrystallised and is accessed via UFPLS (Uncrystallised Fund Pension Lump Sum Payments). Each individual withdrawal is split 25% tax-free + 75% taxable income, with the cumulative tax-free portion tracked against the same £268,275 lifetime Lump Sum Allowance. Once that allowance is exhausted, 100% of each withdrawal becomes taxable.\n\n'
+            }
+            {
+              'Drawdown order each year: tax-free pension (within personal allowance) → CGT-exempt GIA harvest → ISA → taxable GIA → taxable pension.\n\n'
+            }
+            {
+              "Comparing the two: pension balances are shown before income tax. Taking the lump sum moves 25% of the pot into your ISA/GIA and leaves the rest fully taxable, while without it 25% of the pot can still come out tax-free. So two pots of the same size aren't worth the same. To compare the choices, use the ≈ after-tax figures on the result cards, or the shortfall and success-rate results (which already include all tax), rather than the pre-tax balances."
+            }
+          </InfoBox>
+          <SecHead>Defined benefit schemes</SecHead>
+          <DbPensionsEditor p={p} set={set} dbSummary={dbSummary} />
+        </>
+      );
+
+    case 'State pension':
+      return (
+        <>
+          <Slider
+            label="National Insurance years so far"
+            value={p.niContributionYears}
+            min={0}
+            max={35}
+            step={1}
+            format={fmtYrs}
+            onChange={set('niContributionYears')}
+            help={`National Insurance qualifying years already accrued before the projection starts. Each working year above the Lower Earnings Limit (${fmtGBP(NI_THRESHOLDS.employee.lowerEarningsLimit)} in 2026/27) adds one year, up to your state pension age. Full state pension requires 35 qualifying years; at least 10 are needed for any entitlement. To model buying voluntary Class 3 years for the gap between retirement and state pension age, use Top up with Class 3, below (it costs and funds them automatically). For gaps from before now, add those years here — each adds 1/35th of the full pension for life.`}
+          />
+          <Slider
+            label="State pension age"
+            value={p.statePensionAge}
+            min={60}
+            max={70}
+            step={1}
+            format={fmtAge}
+            onChange={set('statePensionAgeOverride')}
+            help="Age at which your state pension begins. It starts at the age set by law for your year of birth: 66 if born before 1961, 67 if born 1961 to 1977, and 68 if born from 1978 (68 comes in between 2044 and 2046). Change it to plan for a different age — for example if a future review brings 68 forward. If you retire earlier, state pension income starts later in the drawdown phase."
+            annotation={() => {
+              const born = CURRENT_YEAR - p.currentAge;
+              const legal = legalSpaFor(p.currentAge);
+              if (p.statePensionAgeOverride == null)
+                return `Set by law for someone born in ${born}`;
+              return (
+                <>
+                  The law says {legal} for someone born in {born}
+                  {p.statePensionAgeOverride !== legal && (
+                    <>
+                      {' · '}
+                      <button
+                        type="button"
+                        onClick={() => set('statePensionAgeOverride')(null)}
+                        style={{
+                          background: 'none',
+                          border: 'none',
+                          padding: 0,
+                          color: 'var(--accent-gold)',
+                          cursor: 'pointer',
+                          font: 'inherit',
+                          textDecoration: 'underline',
+                        }}
+                      >
+                        use {legal}
+                      </button>
+                    </>
+                  )}
+                </>
+              );
+            }}
+          />
+          <Slider
+            label="Defer claiming by"
+            value={p.statePensionDeferralYears}
+            min={0}
+            max={10}
+            step={1}
+            format={fmtYrs}
+            onChange={(v) => set('statePensionDeferralYears')(Math.max(0, Math.round(v)))}
+            help="Years to defer claiming your state pension past state pension age. Each deferred year adds about 5.8% of the pension at the time you claim (1% per 9 weeks, new state pension rules). That extra then rises with CPI each year, while the base pension keeps the triple lock. It takes roughly 17 years to earn back each year deferred, and under the new rules a partner can't inherit it — so it mainly suits people still working (especially higher-rate taxpayers) or expecting a long life. Deferring means drawing more from your pots in the gap years."
+          />
+          <Toggle
+            label="Top up with Class 3"
+            value={p.topUpStatePension ? 'on' : 'off'}
+            optA={{ value: 'off', label: 'Off' }}
+            optB={{ value: 'on', label: 'Auto top-up' }}
+            onChange={(v) => set('topUpStatePension')(v === 'on')}
+            help={`Off: your state pension reflects only the NI years you accrue by retirement. Auto top-up: the app buys voluntary Class 3 contributions to fill the gap toward the full 35 qualifying years — for the years between retirement and state pension age (when the gaps arise), and only if it can reach the 10-year minimum. Each year costs about ${fmtGBP(LIFECYCLE_CONSTANTS.statePension.class3AnnualCost)} (2026/27), funded from your pots like any other spending, so it buys fewer years if you can't afford them, and never fabricates money. It recalculates automatically whenever you change your inputs. Gaps from before retirement aren't modelled here — add those to National Insurance years so far, above. Informational, not advice; check your own forecast at gov.uk/check-state-pension.`}
+          />
+          {p.topUpStatePension && <TopUpReadout p={p} topUp={topUp} />}
+        </>
+      );
+
+    case 'Savings':
+      return (
+        <>
+          <SecHead>ISA</SecHead>
+          <Slider
+            label="ISA balance"
+            value={p.isaBalance}
+            min={0}
+            max={250_000}
+            step={1_000}
+            format={fmtGBP}
+            onChange={set('isaBalance')}
+            color="#34d399"
+            allowInput
+            help="Your current Individual Savings Account (ISA) balance. ISA growth is completely tax-free and withdrawals are not taxed, making it the most efficient savings vehicle after pension."
+          />
+          <SecHead>GIA</SecHead>
+          <Slider
+            label="GIA balance"
+            value={p.giaBalance}
+            min={0}
+            max={250_000}
+            step={1_000}
+            format={fmtGBP}
+            onChange={(v) => {
+              set('giaBalance')(v);
+              if (p.giaCostBasis > v) set('giaCostBasis')(v);
+            }}
+            color="#e8b84b"
+            allowInput
+            help="Your current General Investment Account balance. Unlike an ISA, growth here is subject to Capital Gains Tax (CGT) when you sell. Sometimes called a 'trading account' or 'dealing account'."
+          />
+          <Slider
+            label="Amount originally invested"
+            value={Math.min(p.giaCostBasis, p.giaBalance)}
+            min={0}
+            max={Math.max(p.giaBalance, 1)}
+            step={100}
+            format={fmtGBP}
+            onChange={set('giaCostBasis')}
+            color="#e8b84b"
+            allowInput
+            help="The total amount you originally invested in your GIA — your 'book cost'. Used to calculate capital gains. Example: if you invested £10,000 and it grew to £15,000, your cost basis is £10,000 and the gain is £5,000."
+          />
+          <InfoBox>
+            ISA fills first (£20,000/yr limit) — excess goes to GIA. CGT annual exempt amount:
+            £3,000, used every year: moving GIA into the ISA and sales use it first, and the rest is
+            used at the year end by realising gains and reinvesting, so they're never taxed. Basic
+            rate 18%, higher rate 24%.
+          </InfoBox>
+          <SecHead>Student loan</SecHead>
+          <Select
+            label="Plan"
+            value={p.studentLoanPlan}
+            options={PLAN_OPTIONS}
+            onChange={set('studentLoanPlan')}
+            help="Your student loan repayment plan, determined by when and where you studied. Repayments are income-contingent (a percentage of earnings above a threshold) and the balance is written off after the plan term regardless of how much remains."
+          />
+          {p.studentLoanPlan && (
             <>
               <Slider
-                label="Trials"
-                value={p.mcTrials}
-                min={50}
-                max={1000}
-                step={50}
-                format={(v) => `${v}`}
-                onChange={set('mcTrials')}
+                label="Outstanding balance"
+                value={p.studentLoanBalance}
+                min={0}
+                max={150_000}
+                step={1_000}
+                format={fmtGBP}
+                onChange={set('studentLoanBalance')}
+                color="#a78bfa"
                 allowInput
-                help="Number of independent lifecycle projections to run. More trials give smoother percentile bands but take longer to compute. 200–500 is a good balance for interactive use."
+                help="Your remaining student loan balance. Interest accrues annually at a rate linked to inflation and (for Plan 1) the BoE base rate. The balance is written off when the plan term expires."
               />
               <Slider
-                label="Volatility"
-                value={p.mcVolatility}
-                min={0.1}
-                max={3}
-                step={0.1}
-                format={(v) => `${v.toFixed(1)}×`}
-                onChange={set('mcVolatility')}
-                allowInput
-                help={
-                  'Scales the standard deviation of the random rate shocks. At 1× (default): investment returns ±8 pp per year (1 sd), macro rates ±0.8 pp.\n\n' +
-                  'Each year draws fresh rates — this models both sequence-of-returns risk and year-to-year market volatility.\n\n' +
-                  'At 1×: p90 trial ≈ base + 8 pp in a given year, p10 ≈ base − 8 pp. Increase for a wider fan, decrease for a narrower one.'
-                }
-              />
-              <Slider
-                label="Bear market frequency"
-                value={p.mcBearFreq}
-                min={4}
+                label="Years repaying so far"
+                value={p.studentLoanYears}
+                min={0}
                 max={30}
                 step={1}
-                format={(v) => `every ${v} yrs`}
-                onChange={set('mcBearFreq')}
-                allowInput
-                help={
-                  'Average number of years between bear markets (market downturns lasting 1–3 years).\n\n' +
-                  'At 12 years (default): roughly matches post-war UK/US history. At 4–6 years: more crisis-prone, similar to the 1970s or emerging markets. At 20–30 years: unusually calm conditions.\n\n' +
-                  'Changing this setting does not alter the long-run expected return — the simulation compensates so the median trial still tracks your chosen return rates. What it does affect is the shape of the fan: more frequent bear markets means more sequence-of-returns risk and a wider spread between p10 and p90.'
-                }
+                format={fmtYrs}
+                onChange={set('studentLoanYears')}
+                color="#a78bfa"
+                help="How many years you have already been making student loan repayments. Used to calculate how many years remain until write-off. Plan 1: 25 years. Plan 2/4: 30 years. Postgrad: 30 years."
               />
-              <Slider
-                label="Bear market severity"
-                value={p.mcBearSeverity}
-                min={0.02}
-                max={0.4}
-                step={0.01}
-                format={(v) => `−${(v * 100).toFixed(0)} pp`}
-                // Stored as a fraction but shown in percentage points, so manual
-                // entry ("20") is read back as 0.20 rather than 20.
-                parse={(s) => Math.abs(parseFloat(s.replace(/[^0-9.-]/g, ''))) / 100}
-                onChange={set('mcBearSeverity')}
-                allowInput
-                help={
-                  'How much a bear market cuts annual investment returns during the downturn.\n\n' +
-                  'At −15 pp (default): a moderate recession where returns drop roughly 15 pp below the long-run average for 1–2 years. At −30 pp: severe crash conditions (2008-style). At −5 pp: a mild correction only.\n\n' +
-                  'Like frequency, changing severity does not shift the long-run expected return — the simulation compensates so the median remains anchored to your return rate sliders. Higher severity widens the fan and increases the chance of a bad sequence of returns early in retirement.'
-                }
-              />
-              {/* Crisis persistence toggle */}
-              <div style={{ marginBottom: 10 }}>
-                <div
-                  style={{
-                    display: 'flex',
-                    justifyContent: 'space-between',
-                    alignItems: 'center',
-                    marginBottom: 6,
-                  }}
-                >
-                  <span
-                    style={{
-                      fontSize: 12,
-                      fontFamily: 'var(--font-body)',
-                      color: 'var(--text-secondary)',
-                    }}
-                  >
-                    Crisis persistence
-                  </span>
-                  <div
-                    style={{
-                      display: 'flex',
-                      background: 'var(--bg-input)',
-                      border: '1px solid var(--border)',
-                      borderRadius: 5,
-                      overflow: 'hidden',
-                    }}
-                  >
-                    {[
-                      { label: 'Short', value: 0.3 },
-                      { label: 'Medium', value: 0.6 },
-                      { label: 'Long', value: 0.8 },
-                    ].map(({ label, value }) => (
-                      <button
-                        key={value}
-                        onClick={() => set('mcCrisisPersistence')(value)}
-                        style={{
-                          padding: '3px 9px',
-                          background:
-                            p.mcCrisisPersistence === value ? 'var(--accent-gold)' : 'transparent',
-                          border: 'none',
-                          color:
-                            p.mcCrisisPersistence === value
-                              ? 'var(--accent-gold-text)'
-                              : 'var(--text-secondary)',
-                          fontFamily: 'var(--font-mono)',
-                          fontSize: 10,
-                          fontWeight: 600,
-                          letterSpacing: '0.05em',
-                          cursor: 'pointer',
-                          transition: 'all 0.15s',
-                          whiteSpace: 'nowrap',
-                        }}
-                      >
-                        {label}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-                <p
-                  style={{
-                    fontSize: 11,
-                    color: 'var(--text-muted)',
-                    fontFamily: 'var(--font-body)',
-                    lineHeight: 1.5,
-                  }}
-                >
-                  How long elevated volatility lingers after a bear market ends. Short: volatility
-                  normalises within 1–2 years. Long: unsettled conditions persist for 5+ years, as
-                  in the aftermath of 2008.
-                </p>
-              </div>
-              <SecHead>Flexible Retirement Date</SecHead>
-              <Toggle
-                label="Postpone if off track"
-                value={p.flexibleRetirement ? 'yes' : 'no'}
-                optA={{ value: 'yes', label: 'On' }}
-                optB={{ value: 'no', label: 'Off' }}
-                onChange={(v) => set('flexibleRetirement')(v === 'yes')}
-                help="Models a realistic behavioural response: in trials where the plan is clearly off track at your target age (e.g. a downturn just wiped out part of your ISA), keep working a few more years to let things recover rather than retiring into the shortfall. Only affects the Monte Carlo fan and solvency figures — the central projection still retires at your target."
-              />
-              {p.flexibleRetirement && (
-                <Slider
-                  label="Max years to postpone"
-                  value={p.maxRetirementDelayYears}
-                  min={1}
-                  max={10}
-                  step={1}
-                  format={(v) => `${v} yr${v === 1 ? '' : 's'}`}
-                  onChange={set('maxRetirementDelayYears')}
-                  allowInput
-                  help="The most any trial will delay retirement past your target age. Each trial stops as soon as the plan looks fundable under central assumptions, so most delay less than this — the cap only bites in the worst trials."
-                />
-              )}
-              <InfoBox collapsible>
-                {
-                  'Each Monte Carlo trial checks, at your target retirement age, whether it can fund your target spending for the rest of the plan using central (expected) return assumptions — no peeking at the trial’s own future market path.\n\n'
-                }
-                {
-                  'If not, it works one more year and re-checks, up to the cap. Trials that are on track retire exactly on time; only the ones knocked off course by a bad run postpone. This lifts the lower fan bands and lifetime-solvency figure, reflecting that a real person would rarely retire straight into an obvious shortfall.\n\n'
-                }
-                {
-                  'The de-risking glide path stays anchored to your original target age (it can’t depend on a retirement date that itself depends on returns), and the delay never looks into the future — it reacts only to what has already happened by that age.'
-                }
-              </InfoBox>
-              <SecHead>Spending Guardrails</SecHead>
-              <Toggle
-                label="Flex spending in retirement"
-                value={p.spendingGuardrails ? 'yes' : 'no'}
-                optA={{ value: 'yes', label: 'On' }}
-                optB={{ value: 'no', label: 'Off' }}
-                onChange={(v) => set('spendingGuardrails')(v === 'yes')}
-                help="Models a retiree who adjusts spending to conditions: trim when the pot has fallen behind what it can sustainably support, restore (and optionally raise) when ahead — bounded by a hard floor and a ceiling. Only affects the Monte Carlo fan and solvency; the central projection always spends the target."
-              />
-              {p.spendingGuardrails && (
-                <>
-                  {/* Floor = the shared essential-expenses input (Retire tab) */}
-                  <div style={{ marginBottom: 20 }}>
-                    <div
-                      style={{
-                        display: 'flex',
-                        justifyContent: 'space-between',
-                        alignItems: 'center',
-                        marginBottom: 4,
-                      }}
-                    >
-                      <span
-                        style={{
-                          display: 'flex',
-                          alignItems: 'center',
-                          color: 'var(--text-secondary)',
-                          fontSize: 11,
-                          letterSpacing: '0.07em',
-                          textTransform: 'uppercase',
-                          fontWeight: 500,
-                        }}
-                      >
-                        Spending floor
-                        <HelpTip
-                          title="Spending floor"
-                          text="The level guardrails will never cut below: your essential expenses, set in the Retire tab (shared with the annuity's 'cover essential spending' option). Below it a bad trial counts as a genuine shortfall; above it, a squeeze is modelled as reduced spending rather than ruin."
-                        />
-                      </span>
-                      <span
-                        style={{
-                          color: 'var(--text-primary)',
-                          fontFamily: 'var(--font-mono)',
-                          fontSize: 12,
-                          fontWeight: 500,
-                        }}
-                      >
-                        {fmtGBP(Math.min(p.essentialExpenses, p.targetNetExpenses))}
-                      </span>
-                    </div>
-                    <div
-                      style={{
-                        color: 'var(--text-muted)',
-                        fontSize: 11,
-                        fontFamily: 'var(--font-body)',
-                      }}
-                    >
-                      Your essential expenses ·{' '}
-                      {Math.round(
-                        (100 * Math.min(p.essentialExpenses, p.targetNetExpenses)) /
-                          (p.targetNetExpenses || 1)
-                      )}
-                      % of target · set in the Retire tab
-                    </div>
-                  </div>
-                  <Slider
-                    label="Spending ceiling"
-                    value={p.spendingCeilingPct}
-                    min={100}
-                    max={150}
-                    step={5}
-                    format={(v) => `${v}%`}
-                    annotation={(v) =>
-                      v > 100
-                        ? `${fmtGBP((v / 100) * p.targetNetExpenses)} — prosperity rule on`
-                        : 'Recovery only — raises never exceed your target'
-                    }
-                    onChange={set('spendingCeilingPct')}
-                    allowInput
-                    help="The most guardrails will let spending rise to in good times, as a percentage of your target. At 100% (recovery only), raises can restore earlier cuts but never exceed your target — surpluses accrue as a bigger cushion. Above 100% turns on the prosperity rule: strong markets let you spend more, up to this cap (mildly worsens solvency, since spending a surplus re-exposes it). Type a value directly to go beyond the slider range."
-                  />
-                  {/* Sensitivity preset (band + step) */}
-                  <div style={{ marginBottom: 20 }}>
-                    <div style={{ marginBottom: 6, display: 'flex', alignItems: 'center' }}>
-                      <span
-                        style={{
-                          color: 'var(--text-secondary)',
-                          fontSize: 11,
-                          letterSpacing: '0.07em',
-                          textTransform: 'uppercase',
-                          fontWeight: 500,
-                        }}
-                      >
-                        Sensitivity
-                      </span>
-                      <HelpTip
-                        title="Sensitivity"
-                        text="How reactive the guardrails are. Gentle: a wide tolerance band and small 5% steps — spending moves rarely and slowly. Responsive: a narrow band and larger steps — spending tracks the sustainable level more tightly. Standard sits between."
-                      />
-                    </div>
-                    <div
-                      style={{
-                        display: 'flex',
-                        borderRadius: 6,
-                        overflow: 'hidden',
-                        border: '1px solid var(--border-bright)',
-                      }}
-                    >
-                      {[
-                        { value: 'gentle', label: 'Gentle' },
-                        { value: 'standard', label: 'Standard' },
-                        { value: 'responsive', label: 'Responsive' },
-                      ].map((opt) => (
-                        <button
-                          key={opt.value}
-                          onClick={() => set('guardrailSensitivity')(opt.value)}
-                          style={{
-                            flex: 1,
-                            padding: '7px 10px',
-                            background:
-                              p.guardrailSensitivity === opt.value
-                                ? 'var(--accent-gold)'
-                                : 'var(--bg-input)',
-                            color:
-                              p.guardrailSensitivity === opt.value
-                                ? 'var(--accent-gold-text)'
-                                : 'var(--text-secondary)',
-                            border: 'none',
-                            cursor: 'pointer',
-                            fontFamily: 'var(--font-body)',
-                            fontSize: 12,
-                            fontWeight: p.guardrailSensitivity === opt.value ? 600 : 400,
-                            transition: 'all 0.15s',
-                          }}
-                        >
-                          {opt.label}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                </>
-              )}
-              <InfoBox collapsible>
-                {
-                  'Each year of each Monte Carlo trial, the model checks what constant spending your current pot could sustain for the rest of the plan under central assumptions — accounting for the state pension and pension-access age, and never peeking at the trial’s own future returns.\n\n'
-                }
-                {
-                  'If your spending has drifted above that sustainable level it is trimmed a step; if it is comfortably below, it is restored (up to the ceiling). Cuts stop at your essential-expenses floor. This converts many would-be shortfalls into survivable spending squeezes, so lifetime solvency rises — at the cost of a lower realised standard of living in the bad trials, which the spending fan and summary make explicit.'
-                }
+              <InfoBox>
+                Repayments are income-contingent. Interest is linked to inflation + BoE rate
+                (plan-dependent). Balance is written off after the plan term.
               </InfoBox>
             </>
           )}
         </>
       );
 
-    case 'Protection':
-      return <LifePoliciesEditor p={p} set={set} />;
+    case 'Spending':
+      return (
+        <>
+          <Slider
+            label="Living costs while working"
+            value={p.annualLivingExpenses}
+            min={0}
+            max={80_000}
+            step={500}
+            format={fmtGBP}
+            onChange={set('annualLivingExpenses')}
+            allowInput
+            help="Your annual non-debt living costs during the working years, in today's money — food, utilities, transport, insurance, leisure, etc. Do not include mortgage or debt repayments; those are entered separately. This amount is inflated each year to keep real purchasing power constant. Annual savings are derived automatically as: net take-home − debt payments − living expenses. Retirement spending is set below, and with a partner so is the spending while one of you is retired and the other works."
+          />
+          <DerivedSavingsReadout derived={derived} />
+          <Slider
+            label="Retirement spending"
+            value={p.targetNetExpenses}
+            min={5_000}
+            max={150_000}
+            step={1_000}
+            format={fmtGBP}
+            onChange={set('targetNetExpenses')}
+            allowInput
+            help="Your desired annual living costs in retirement, in today's money (food, utilities, leisure, etc.) — exclude mortgage and debt payments, which are modelled separately on top of this figure. The model inflates this each year to maintain the same purchasing power. State pension income offsets it before drawing from your pots."
+          />
+          <Slider
+            label="Essential spending"
+            value={Math.min(p.essentialExpenses, p.targetNetExpenses)}
+            min={5_000}
+            max={p.targetNetExpenses}
+            step={500}
+            format={fmtGBP}
+            annotation={(v) =>
+              `${Math.round((100 * v) / (p.targetNetExpenses || 1))}% of target · today's money`
+            }
+            onChange={(v) =>
+              set('essentialExpenses')(Math.max(0, Math.min(v, p.targetNetExpenses)))
+            }
+            allowInput
+            help="The non-negotiable part of your target — housing upkeep, food, utilities, insurance. It is the floor that spending guardrails never cut below (below), and the income an annuity secures when sized to 'Essentials'. Monte Carlo reports how securely it is met for life. In today's money; capped at your target."
+          />
+          {couple && (
+            <Toggle
+              label="Spending while one of you works"
+              value={p.spendingWhileOneWorks}
+              optA={{ value: 'working', label: 'Living costs' }}
+              optB={{ value: 'halfway', label: 'Halfway' }}
+              optC={{ value: 'retirement', label: 'Retirement' }}
+              onChange={set('spendingWhileOneWorks')}
+              note={`${fmtGBP(spendingWhileOneWorksAmount(p))} a year in today's money, from the first of you retiring to the second`}
+              help={
+                'What the household spends once one of you has retired and the other still works. Before then it spends your living costs while working; once you have both retired, your retirement spending (both above).\n\n' +
+                "Living costs: nothing changes until you've both retired. Halfway (the default): half the change happens when each of you retires. Retirement: spending drops to the retirement target as soon as the first of you retires.\n\n" +
+                'This matters most when you retire years apart. If the household keeps spending its working-life budget, the extra years of pay go on that spending, so working longer may barely improve the plan.'
+              }
+            />
+          )}
+          <SecHead>Spending guardrails</SecHead>
+          <Toggle
+            label="Flex spending in retirement (Monte Carlo)"
+            value={p.spendingGuardrails ? 'yes' : 'no'}
+            optA={{ value: 'yes', label: 'On' }}
+            optB={{ value: 'no', label: 'Off' }}
+            onChange={(v) => set('spendingGuardrails')(v === 'yes')}
+            help="Models a retiree who adjusts spending to conditions: trim when the pot has fallen behind what it can sustainably support, restore (and optionally raise) when ahead — bounded by a hard floor and a ceiling. Only affects the Monte Carlo fan and solvency; the central projection always spends the target."
+          />
+          {p.spendingGuardrails && (
+            <>
+              {/* Floor = the shared essential spending (above) */}
+              <div style={{ marginBottom: 20 }}>
+                <div
+                  style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                    marginBottom: 4,
+                  }}
+                >
+                  <span
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      color: 'var(--text-secondary)',
+                      fontSize: 11,
+                      letterSpacing: '0.07em',
+                      textTransform: 'uppercase',
+                      fontWeight: 500,
+                    }}
+                  >
+                    Spending floor
+                    <HelpTip
+                      title="Spending floor"
+                      text="The level guardrails will never cut below: your essential spending, set above (shared with the annuity's 'cover essential spending' option). Below it a bad trial counts as a genuine shortfall; above it, a squeeze is modelled as reduced spending rather than ruin."
+                    />
+                  </span>
+                  <span
+                    style={{
+                      color: 'var(--text-primary)',
+                      fontFamily: 'var(--font-mono)',
+                      fontSize: 12,
+                      fontWeight: 500,
+                    }}
+                  >
+                    {fmtGBP(Math.min(p.essentialExpenses, p.targetNetExpenses))}
+                  </span>
+                </div>
+                <div
+                  style={{
+                    color: 'var(--text-muted)',
+                    fontSize: 11,
+                    fontFamily: 'var(--font-body)',
+                  }}
+                >
+                  Your essential expenses ·{' '}
+                  {Math.round(
+                    (100 * Math.min(p.essentialExpenses, p.targetNetExpenses)) /
+                      (p.targetNetExpenses || 1)
+                  )}
+                  % of target · set above
+                </div>
+              </div>
+              <Slider
+                label="Spending ceiling"
+                value={p.spendingCeilingPct}
+                min={100}
+                max={150}
+                step={5}
+                format={(v) => `${v}%`}
+                annotation={(v) =>
+                  v > 100
+                    ? `${fmtGBP((v / 100) * p.targetNetExpenses)} — prosperity rule on`
+                    : 'Recovery only — raises never exceed your target'
+                }
+                onChange={set('spendingCeilingPct')}
+                allowInput
+                help="The most guardrails will let spending rise to in good times, as a percentage of your target. At 100% (recovery only), raises can restore earlier cuts but never exceed your target — surpluses accrue as a bigger cushion. Above 100% turns on the prosperity rule: strong markets let you spend more, up to this cap (mildly worsens solvency, since spending a surplus re-exposes it). Type a value directly to go beyond the slider range."
+              />
+              {/* Sensitivity preset (band + step) */}
+              <div style={{ marginBottom: 20 }}>
+                <div style={{ marginBottom: 6, display: 'flex', alignItems: 'center' }}>
+                  <span
+                    style={{
+                      color: 'var(--text-secondary)',
+                      fontSize: 11,
+                      letterSpacing: '0.07em',
+                      textTransform: 'uppercase',
+                      fontWeight: 500,
+                    }}
+                  >
+                    Sensitivity
+                  </span>
+                  <HelpTip
+                    title="Sensitivity"
+                    text="How reactive the guardrails are. Gentle: a wide tolerance band and small 5% steps — spending moves rarely and slowly. Responsive: a narrow band and larger steps — spending tracks the sustainable level more tightly. Standard sits between."
+                  />
+                </div>
+                <div
+                  style={{
+                    display: 'flex',
+                    borderRadius: 6,
+                    overflow: 'hidden',
+                    border: '1px solid var(--border-bright)',
+                  }}
+                >
+                  {[
+                    { value: 'gentle', label: 'Gentle' },
+                    { value: 'standard', label: 'Standard' },
+                    { value: 'responsive', label: 'Responsive' },
+                  ].map((opt) => (
+                    <button
+                      key={opt.value}
+                      onClick={() => set('guardrailSensitivity')(opt.value)}
+                      style={{
+                        flex: 1,
+                        padding: '7px 10px',
+                        background:
+                          p.guardrailSensitivity === opt.value
+                            ? 'var(--accent-gold)'
+                            : 'var(--bg-input)',
+                        color:
+                          p.guardrailSensitivity === opt.value
+                            ? 'var(--accent-gold-text)'
+                            : 'var(--text-secondary)',
+                        border: 'none',
+                        cursor: 'pointer',
+                        fontFamily: 'var(--font-body)',
+                        fontSize: 12,
+                        fontWeight: p.guardrailSensitivity === opt.value ? 600 : 400,
+                        transition: 'all 0.15s',
+                      }}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </>
+          )}
+          <InfoBox collapsible>
+            {
+              'Each year of each Monte Carlo trial, the model checks what constant spending your current pot could sustain for the rest of the plan under central assumptions — accounting for the state pension and pension-access age, and never peeking at the trial’s own future returns.\n\n'
+            }
+            {
+              'If your spending has drifted above that sustainable level it is trimmed a step; if it is comfortably below, it is restored (up to the ceiling). Cuts stop at your essential-expenses floor. This converts many would-be shortfalls into survivable spending squeezes, so lifetime solvency rises — at the cost of a lower realised standard of living in the bad trials, which the spending fan and summary make explicit.'
+            }
+          </InfoBox>
+        </>
+      );
 
-    case 'Household':
+    case 'Home & debts': {
+      const effectiveMortgageRate =
+        p.mortgageRateType === 'boe' ? p.boePct + p.mortgageSpreadPct : p.mortgageRatePct;
+      const effectiveUnsecuredRate =
+        p.unsecuredRateType === 'boe' ? p.boePct + p.unsecuredSpreadPct : p.unsecuredRatePct;
+      return (
+        <>
+          <SecHead>Mortgage</SecHead>
+          <Slider
+            label="Outstanding balance"
+            value={p.mortgageBalance}
+            min={0}
+            max={1_000_000}
+            step={5_000}
+            format={fmtGBP}
+            onChange={set('mortgageBalance')}
+            color="#f43f5e"
+            allowInput
+            help="Your remaining mortgage balance. Set to £0 to exclude the mortgage from the projection. Interest and capital repayment are modelled monthly using the interest rate below. Note: only the mortgage (the debt) is modelled — your home's value is deliberately not tracked as an asset. The mortgage is a fixed cash-flow commitment regardless of house prices, while home equity is illiquid and not treated as a drawable pot. To model downsizing, add the expected net proceeds to your ISA/GIA balances in a separate scenario."
+          />
+          <Slider
+            label="Remaining term"
+            value={p.mortgageTermYears}
+            min={1}
+            max={40}
+            step={1}
+            format={fmtYrs}
+            onChange={set('mortgageTermYears')}
+            color="#f43f5e"
+            help="Years remaining on your mortgage. The monthly payment is calculated from this term and the interest rate below. Overpayments reduce the balance faster but don't change the required payment."
+          />
+          <Slider
+            label="Start age"
+            value={Math.max(p.mortgageStartAge ?? p.currentAge, p.currentAge)}
+            min={p.currentAge}
+            max={p.maxAge}
+            step={1}
+            format={fmtAge}
+            onChange={set('mortgageStartAge')}
+            color="#f43f5e"
+            help="Age the mortgage begins. Leave at your current age for an existing mortgage. Set a future age to model a planned property purchase: no payments or balance exist before then, and the balance above (today's money) is inflated to the purchase year, since house prices and loan sizes move with the economy. Pair it with a one-off expense in Household › Events for the deposit."
+          />
+          <Toggle
+            label="Type"
+            value={p.mortgageType}
+            optA={{ value: 'repayment', label: 'Repayment' }}
+            optB={{ value: 'interest-only', label: 'Interest only' }}
+            onChange={set('mortgageType')}
+            help="Repayment: capital reduces each month until the mortgage is fully paid off at the end of the term. Interest-only: you pay only interest each month and the full balance remains at term end."
+          />
+          <Slider
+            label="Monthly overpayment"
+            value={p.mortgageOverpayment}
+            min={0}
+            max={2_000}
+            step={25}
+            format={fmtGBP}
+            onChange={set('mortgageOverpayment')}
+            color="#f43f5e"
+            allowInput
+            help="Extra amount paid toward your mortgage each month, on top of the required payment. Overpayments reduce the outstanding balance faster, saving interest over the life of the mortgage."
+          />
+          <Toggle
+            label="Rate type"
+            value={p.mortgageRateType}
+            optA={{ value: 'fixed', label: 'Fixed' }}
+            optB={{ value: 'boe', label: 'Tracks base rate' }}
+            onChange={set('mortgageRateType')}
+            help="Fixed: a constant rate (e.g. a fixed-term deal). BoE + spread: a tracker mortgage whose rate moves with the Bank of England base rate plus a fixed margin (e.g. BoE + 1.5%)."
+          />
+          {p.mortgageRateType === 'fixed' ? (
+            <Slider
+              label="Interest rate"
+              value={p.mortgageRatePct}
+              min={0}
+              max={15}
+              step={0.1}
+              format={fmtPct}
+              onChange={set('mortgageRatePct')}
+              color="#f43f5e"
+              allowInput
+              help="Fixed annual interest rate on your mortgage."
+            />
+          ) : (
+            <>
+              <BaseRateNote rate={p.boePct} goTo={goTo} />
+              <Slider
+                label="Spread above base rate"
+                value={p.mortgageSpreadPct}
+                min={0}
+                max={10}
+                step={0.1}
+                format={fmtPct}
+                onChange={set('mortgageSpreadPct')}
+                color="#f43f5e"
+                allowInput
+                help={`Fixed margin added to the BoE base rate to give your tracker mortgage rate. Effective rate: ${fmtPct(p.boePct)} + ${fmtPct(p.mortgageSpreadPct)} = ${fmtPct(effectiveMortgageRate)}.`}
+              />
+            </>
+          )}
+          {p.mortgageBalance === 0 && (
+            <InfoBox>Set a balance above £0 to include a mortgage in the projection.</InfoBox>
+          )}
+          <SecHead>Other debts</SecHead>
+          <Slider
+            label="Outstanding balance"
+            value={p.unsecuredBalance}
+            min={0}
+            max={100_000}
+            step={500}
+            format={fmtGBP}
+            onChange={set('unsecuredBalance')}
+            color="#fb923c"
+            allowInput
+            help="Total balance of unsecured debts such as credit cards, personal loans, or overdrafts. Interest accrues monthly at the rate set below."
+          />
+          <Slider
+            label="Monthly payment"
+            value={p.unsecuredMonthly}
+            min={0}
+            max={3_000}
+            step={25}
+            format={fmtGBP}
+            onChange={set('unsecuredMonthly')}
+            color="#fb923c"
+            allowInput
+            help="Your monthly payment toward unsecured debts. Must exceed the monthly interest charge for the balance to reduce over time. When the debt is repaid, payments stop automatically."
+          />
+          <Toggle
+            label="Rate type"
+            value={p.unsecuredRateType}
+            optA={{ value: 'fixed', label: 'Fixed' }}
+            optB={{ value: 'boe', label: 'Tracks base rate' }}
+            onChange={set('unsecuredRateType')}
+            help="Fixed: a constant rate (e.g. a personal loan). BoE + spread: a variable-rate product that tracks the Bank of England base rate (e.g. a tracker credit card or overdraft)."
+          />
+          {p.unsecuredRateType === 'fixed' ? (
+            <Slider
+              label="Interest rate"
+              value={p.unsecuredRatePct}
+              min={0}
+              max={40}
+              step={0.1}
+              format={fmtPct}
+              onChange={set('unsecuredRatePct')}
+              color="#fb923c"
+              allowInput
+              help="Fixed annual interest rate on your unsecured debts (credit cards, personal loans, overdrafts)."
+            />
+          ) : (
+            <>
+              <BaseRateNote rate={p.boePct} goTo={goTo} />
+              <Slider
+                label="Spread above base rate"
+                value={p.unsecuredSpreadPct}
+                min={0}
+                max={35}
+                step={0.1}
+                format={fmtPct}
+                onChange={set('unsecuredSpreadPct')}
+                color="#fb923c"
+                allowInput
+                help={`Fixed margin added to the BoE base rate for your unsecured debts. Effective rate: ${fmtPct(p.boePct)} + ${fmtPct(p.unsecuredSpreadPct)} = ${fmtPct(effectiveUnsecuredRate)}.`}
+              />
+            </>
+          )}
+        </>
+      );
+    }
+
+    case 'Events':
+      return <EventsEditor p={p} set={set} />;
+
+    case 'Retirement':
+      return (
+        <>
+          <Slider
+            label="Plan until age"
+            value={p.maxAge}
+            min={Math.max(p.retirementAge + 1, 70)}
+            max={100}
+            step={1}
+            format={fmtAge}
+            onChange={(v) => set('maxAge')(Math.max(v, p.retirementAge + 1))}
+            allowInput
+            help="The age to which the retirement drawdown is projected. Use this as your planning horizon. UK average life expectancy is ~82, but financial planning often uses 90–100 to guard against longevity risk."
+          />
+          <SecHead>Lifetime annuity</SecHead>
+          <Toggle
+            label="Buy a lifetime annuity"
+            value={p.annuityEnabled ? 'yes' : 'no'}
+            optA={{ value: 'yes', label: 'Yes' }}
+            optB={{ value: 'no', label: 'No' }}
+            onChange={(v) => set('annuityEnabled')(v === 'yes')}
+            help="Convert part of your pension into an income guaranteed for life, bought once at the age you choose. A plan decision, so it applies to the central projection as well as Monte Carlo."
+          />
+          {couple && p.annuityEnabled && (
+            <Toggle
+              label="Bought from"
+              value={p.annuityOwner}
+              optA={{ value: 'self', label: 'Your pension' }}
+              optB={{ value: 'partner', label: "Partner's" }}
+              onChange={set('annuityOwner')}
+              help="Whose pension pot buys the annuity. It's a single-life annuity, so it stops when that person dies. Sizing to cover essential spending counts both your guaranteed incomes."
+            />
+          )}
+          {p.annuityEnabled && <AnnuityControls p={p} set={set} annuity={annuity} />}
+          <SecHead>Flexible retirement</SecHead>
+          <Toggle
+            label="Work longer if off track (Monte Carlo)"
+            value={p.flexibleRetirement ? 'yes' : 'no'}
+            optA={{ value: 'yes', label: 'On' }}
+            optB={{ value: 'no', label: 'Off' }}
+            onChange={(v) => set('flexibleRetirement')(v === 'yes')}
+            help="Models a realistic behavioural response: in trials where the plan is clearly off track at your target age (e.g. a downturn just wiped out part of your ISA), keep working a few more years to let things recover rather than retiring into the shortfall. Only affects the Monte Carlo fan and solvency figures — the central projection still retires at your target."
+          />
+          {p.flexibleRetirement && (
+            <Slider
+              label="For up to"
+              value={p.maxRetirementDelayYears}
+              min={1}
+              max={10}
+              step={1}
+              format={(v) => `${v} yr${v === 1 ? '' : 's'}`}
+              onChange={set('maxRetirementDelayYears')}
+              allowInput
+              help="The most any trial will delay retirement past your target age. Each trial stops as soon as the plan looks fundable under central assumptions, so most delay less than this — the cap only bites in the worst trials."
+            />
+          )}
+          <InfoBox collapsible>
+            {
+              'Each Monte Carlo trial checks, at your target retirement age, whether it can fund your target spending for the rest of the plan using central (expected) return assumptions — no peeking at the trial’s own future market path.\n\n'
+            }
+            {
+              'If not, it works one more year and re-checks, up to the cap. Trials that are on track retire exactly on time; only the ones knocked off course by a bad run postpone. This lifts the lower fan bands and lifetime-solvency figure, reflecting that a real person would rarely retire straight into an obvious shortfall.\n\n'
+            }
+            {
+              'The de-risking glide path stays anchored to your original target age (it can’t depend on a retirement date that itself depends on returns), and the delay never looks into the future — it reacts only to what has already happened by that age.'
+            }
+          </InfoBox>
+        </>
+      );
+
+    case 'Couple':
       return (
         <>
           <InfoBox>
@@ -4313,20 +3942,6 @@ function TabContent({ tab, p, set, derived, topUp, annuity, dbSummary, scope = n
               )}
             </>
           )}
-          <Toggle
-            label="Spending while one of you works"
-            value={p.spendingWhileOneWorks}
-            optA={{ value: 'working', label: 'Living costs' }}
-            optB={{ value: 'halfway', label: 'Halfway' }}
-            optC={{ value: 'retirement', label: 'Retirement' }}
-            onChange={set('spendingWhileOneWorks')}
-            note={`${fmtGBP(spendingWhileOneWorksAmount(p))} a year in today's money, from the first of you retiring to the second`}
-            help={
-              'What the household spends once one of you has retired and the other still works. Before then it spends your living costs (Personal tab); once you have both retired, your retirement target (Retire tab).\n\n' +
-              "Living costs: nothing changes until you've both retired. Halfway (the default): half the change happens when each of you retires. Retirement: spending drops to the retirement target as soon as the first of you retires.\n\n" +
-              'This matters most when you retire years apart. If the household keeps spending its working-life budget, the extra years of pay go on that spending, so working longer may barely improve the plan.'
-            }
-          />
           <Slider
             label="Spending on your own"
             value={p.survivorSpendingPct}
@@ -4359,97 +3974,280 @@ function TabContent({ tab, p, set, derived, topUp, annuity, dbSummary, scope = n
         </>
       );
 
-    case 'Retire':
+    case 'Protection':
+      return <LifePoliciesEditor p={p} set={set} />;
+
+    case 'Economy':
       return (
         <>
           <Slider
-            label="Target Net Annual Expenses"
-            value={p.targetNetExpenses}
-            min={5_000}
-            max={150_000}
-            step={1_000}
-            format={fmtGBP}
-            onChange={set('targetNetExpenses')}
+            label="Inflation"
+            value={p.inflationPct}
+            min={-5}
+            max={10}
+            step={0.1}
+            format={fmtPct}
+            onChange={set('inflationPct')}
             allowInput
-            help="Your desired annual living costs in retirement, in today's money (food, utilities, leisure, etc.) — exclude mortgage and debt payments, which are modelled separately on top of this figure. The model inflates this each year to maintain the same purchasing power. State pension income offsets it before drawing from your pots."
+            help="Expected annual price inflation (CPI or RPI). Affects retirement expenses (which grow with inflation), student loan interest, and the real value of your annual savings. Can be negative for deflation scenarios."
           />
           <Slider
-            label="Essential Annual Expenses"
-            value={Math.min(p.essentialExpenses, p.targetNetExpenses)}
-            min={5_000}
-            max={p.targetNetExpenses}
-            step={500}
-            format={fmtGBP}
-            annotation={(v) =>
-              `${Math.round((100 * v) / (p.targetNetExpenses || 1))}% of target · today's money`
-            }
-            onChange={(v) =>
-              set('essentialExpenses')(Math.max(0, Math.min(v, p.targetNetExpenses)))
-            }
+            label="Wage growth"
+            value={p.wageGrowthPct}
+            min={-5}
+            max={10}
+            step={0.1}
+            format={fmtPct}
+            onChange={set('wageGrowthPct')}
             allowInput
-            help="The non-negotiable part of your target — housing upkeep, food, utilities, insurance. It is the floor that spending guardrails never cut below (Simulation tab), and the income an annuity secures when sized to 'Essentials'. Monte Carlo reports how securely it is met for life. In today's money; capped at your target."
+            help="Expected annual growth rate of your gross salary. Affects pension contributions, which are a percentage of salary. Can be negative to model pay cuts or career breaks."
           />
           <Slider
-            label="Model to Age"
-            value={p.maxAge}
-            min={Math.max(p.retirementAge + 1, 70)}
+            label="Bank of England base rate"
+            value={p.boePct}
+            min={-5}
+            max={10}
+            step={0.1}
+            format={fmtPct}
+            onChange={set('boePct')}
+            allowInput
+            help="Bank of England base rate. Used for Plan 1 student loan interest (capped at RPI or BoE+1%), and as the base for any BoE-tracker mortgage or other debt rates set in Household › Home & debts. Student loan interest is always floored at 0%."
+          />
+          <Slider
+            label="Tax thresholds lag inflation by"
+            value={p.fiscalDragPct}
+            min={-5}
+            max={5}
+            step={0.1}
+            format={fmtPct}
+            onChange={set('fiscalDragPct')}
+            allowInput
+            help={`How far income tax and NI thresholds drift from inflation each year once the current freeze ends. The thresholds are frozen until April 2031 (Autumn Budgets 2025 and 2026), so this applies from 2031/32. Band growth = inflation rate − fiscal drag.\n\n0%: bands rise with inflation — no change in real tax burden.\nPositive (e.g. +2%): bands grow slower than inflation — bracket creep pushes more income into higher bands over time. Setting this equal to the inflation rate models fully frozen bands.\nNegative (e.g. −1%): bands grow faster than inflation — real tax burden falls, as happened when the UK personal allowance was raised sharply in the 2010s.`}
+          />
+          <InfoBox>
+            Debt rates are set per debt in Household › Home & debts. BoE rate also applies to Plan
+            1/4 student loan interest. All figures are nominal (not inflation-adjusted).
+          </InfoBox>
+        </>
+      );
+
+    case 'Investments': {
+      const preEq = p.preRetirementEquityPct / 100;
+      const postEq = p.postRetirementEquityPct / 100;
+      const eq = p.equityReturnPct / 100;
+      const bd = p.bondReturnPct / 100;
+      const blendedRateText = `Effective blended rate: ${((preEq * eq + (1 - preEq) * bd) * 100).toFixed(2)}% pre-retirement → ${((postEq * eq + (1 - postEq) * bd) * 100).toFixed(2)}% post-retirement`;
+      return (
+        <>
+          <Slider
+            label="Equity return"
+            value={p.equityReturnPct}
+            min={0}
+            max={15}
+            step={0.1}
+            format={fmtPct}
+            onChange={set('equityReturnPct')}
+            allowInput
+            help="Expected long-run annualised return on the equity portion of your portfolio (e.g. a global index fund), expressed as a geometric mean (CAGR) across a full economic cycle — the same figure you would find in historical data covering booms and recessions. Long-run UK/global equity average is roughly 7–8% nominal. Combined with your equity allocation below to give an effective blended rate used in both the deterministic and Monte Carlo projections."
+          />
+          <Slider
+            label="Bond / cash return"
+            value={p.bondReturnPct}
+            min={0}
+            max={10}
+            step={0.1}
+            format={fmtPct}
+            onChange={set('bondReturnPct')}
+            allowInput
+            help="Expected long-run annualised return on the bond or cash portion of your portfolio (e.g. gilts, money-market funds), expressed as a geometric mean (CAGR) across a full economic cycle. UK gilt yields have historically been 2–4% nominal. Combined with your equity allocation below to give an effective blended rate used in both the deterministic and Monte Carlo projections."
+          />
+          <Slider
+            label="Equities before retirement"
+            value={p.preRetirementEquityPct}
+            min={0}
             max={100}
             step={1}
-            format={fmtAge}
-            onChange={(v) => set('maxAge')(Math.max(v, p.retirementAge + 1))}
+            format={(v) => `${v}%`}
+            onChange={set('preRetirementEquityPct')}
             allowInput
-            help="The age to which the retirement drawdown is projected. Use this as your planning horizon. UK average life expectancy is ~82, but financial planning often uses 90–100 to guard against longevity risk."
+            help="Percentage of your portfolio in equities during the accumulation phase (before the glide path begins). The remainder is in bonds/cash. A typical growth portfolio holds 70–100% equities."
           />
-          <SecHead>Pension Commencement Lump Sum</SecHead>
-          <Toggle
-            label="Take PCLS at Retirement"
-            value={p.takePCLS ? 'yes' : 'no'}
-            optA={{ value: 'yes', label: 'Yes' }}
-            optB={{ value: 'no', label: 'No' }}
-            onChange={(v) => set('takePCLS')(v === 'yes')}
-            help={
-              p.takePCLS
-                ? 'Lump sum taken upfront: 25% of the pension (capped at £268,275) is paid out tax-free at retirement; the rest is drawn down as fully taxable income.'
-                : 'Phased withdrawals (UFPLS): the pension stays uncrystallised; each withdrawal is 25% tax-free + 75% taxable income until the £268,275 lifetime allowance is exhausted.'
-            }
+          <Slider
+            label="Equities after retirement"
+            value={p.postRetirementEquityPct}
+            min={0}
+            max={100}
+            step={1}
+            format={(v) => `${v}%`}
+            onChange={set('postRetirementEquityPct')}
+            allowInput
+            help="Percentage of your portfolio in equities once the glide path is fully complete. The remainder is in bonds/cash. A typical cautious retirement portfolio holds 30–50% equities to reduce sequence-of-returns risk."
           />
-          <InfoBox collapsible>
-            {
-              'PCLS (Pension Commencement Lump Sum) is a one-off tax-free payment taken when you crystallise your pension at retirement, capped at 25% of the pot or £268,275 lifetime — whichever is lower.\n\n'
-            }
-            {
-              'Yes — the full 25% lump sum is paid out immediately. The cash goes into your ISA first (up to £20k/year), with any surplus added to your GIA at cost. The remaining 75% of the pension is then drawn down as fully taxable income each year.\n\n'
-            }
-            {
-              'No — the pension stays uncrystallised and is accessed via UFPLS (Uncrystallised Fund Pension Lump Sum Payments). Each individual withdrawal is split 25% tax-free + 75% taxable income, with the cumulative tax-free portion tracked against the same £268,275 lifetime Lump Sum Allowance. Once that allowance is exhausted, 100% of each withdrawal becomes taxable.\n\n'
-            }
-            {
-              'Drawdown order each year: tax-free pension (within personal allowance) → CGT-exempt GIA harvest → ISA → taxable GIA → taxable pension.\n\n'
-            }
-            {
-              "Comparing the two: pension balances are shown before income tax. Taking the lump sum moves 25% of the pot into your ISA/GIA and leaves the rest fully taxable, while without it 25% of the pot can still come out tax-free. So two pots of the same size aren't worth the same. To compare the choices, use the ≈ after-tax figures on the result cards, or the shortfall and success-rate results (which already include all tax), rather than the pre-tax balances."
-            }
+          <InfoBox>{blendedRateText}</InfoBox>
+          <Slider
+            label="Glide path starts (years before retirement)"
+            value={p.glideStartYears}
+            min={0}
+            max={30}
+            step={1}
+            format={(v) => `${v} yr${v !== 1 ? 's' : ''}`}
+            onChange={set('glideStartYears')}
+            allowInput
+            help="How many years before your retirement date to begin shifting from the pre-retirement to the post-retirement allocation. E.g. 10 means de-risking starts at retirementAge − 10. Set to 0 to start the transition only at retirement. If this puts the start before your current age, the glide path is already in progress and rates are interpolated accordingly."
+          />
+          <Slider
+            label="Glide path ends (years after retirement)"
+            value={p.glideEndYears}
+            min={0}
+            max={15}
+            step={1}
+            format={(v) => `${v} yr${v !== 1 ? 's' : ''}`}
+            onChange={set('glideEndYears')}
+            allowInput
+            help="How many years after your retirement date the glide path finishes, reaching the full post-retirement allocation. E.g. 5 means fully de-risked by retirementAge + 5. Set to 0 for an instant switch at retirement."
+          />
+        </>
+      );
+    }
+
+    case 'Monte Carlo':
+      return (
+        <>
+          <InfoBox>
+            These settings control the Monte Carlo simulation. Switch to the Monte Carlo tab in the
+            chart to run it.
           </InfoBox>
-          <SecHead>Lifetime Annuity</SecHead>
-          <Toggle
-            label="Buy a lifetime annuity"
-            value={p.annuityEnabled ? 'yes' : 'no'}
-            optA={{ value: 'yes', label: 'Yes' }}
-            optB={{ value: 'no', label: 'No' }}
-            onChange={(v) => set('annuityEnabled')(v === 'yes')}
-            help="Convert part of your pension into an income guaranteed for life, bought once at the age you choose. A plan decision, so it applies to the central projection as well as Monte Carlo."
+          <Slider
+            label="Trials"
+            value={p.mcTrials}
+            min={50}
+            max={1000}
+            step={50}
+            format={(v) => `${v}`}
+            onChange={set('mcTrials')}
+            allowInput
+            help="Number of independent lifecycle projections to run. More trials give smoother percentile bands but take longer to compute. 200–500 is a good balance for interactive use."
           />
-          {scope && p.annuityEnabled && (
-            <Toggle
-              label="Bought from"
-              value={p.annuityOwner}
-              optA={{ value: 'self', label: 'Your pension' }}
-              optB={{ value: 'partner', label: "Partner's" }}
-              onChange={set('annuityOwner')}
-              help="Whose pension pot buys the annuity. It's a single-life annuity, so it stops when that person dies. Sizing to cover essential spending counts both your guaranteed incomes."
-            />
-          )}
-          {p.annuityEnabled && <AnnuityControls p={p} set={set} annuity={annuity} />}
+          <Slider
+            label="Volatility"
+            value={p.mcVolatility}
+            min={0.1}
+            max={3}
+            step={0.1}
+            format={(v) => `${v.toFixed(1)}×`}
+            onChange={set('mcVolatility')}
+            allowInput
+            help={
+              'Scales the standard deviation of the random rate shocks. At 1× (default): investment returns ±8 pp per year (1 sd), macro rates ±0.8 pp.\n\n' +
+              'Each year draws fresh rates — this models both sequence-of-returns risk and year-to-year market volatility.\n\n' +
+              'At 1×: p90 trial ≈ base + 8 pp in a given year, p10 ≈ base − 8 pp. Increase for a wider fan, decrease for a narrower one.'
+            }
+          />
+          <Slider
+            label="A bear market every"
+            value={p.mcBearFreq}
+            min={4}
+            max={30}
+            step={1}
+            format={(v) => `${v} yrs`}
+            onChange={set('mcBearFreq')}
+            allowInput
+            help={
+              'Average number of years between bear markets (market downturns lasting 1–3 years).\n\n' +
+              'At 12 years (default): roughly matches post-war UK/US history. At 4–6 years: more crisis-prone, similar to the 1970s or emerging markets. At 20–30 years: unusually calm conditions.\n\n' +
+              'Changing this setting does not alter the long-run expected return — the simulation compensates so the median trial still tracks your chosen return rates. What it does affect is the shape of the fan: more frequent bear markets means more sequence-of-returns risk and a wider spread between p10 and p90.'
+            }
+          />
+          <Slider
+            label="Bear market severity"
+            value={p.mcBearSeverity}
+            min={0.02}
+            max={0.4}
+            step={0.01}
+            format={(v) => `−${(v * 100).toFixed(0)} pp`}
+            // Stored as a fraction but shown in percentage points, so manual
+            // entry ("20") is read back as 0.20 rather than 20.
+            parse={(s) => Math.abs(parseFloat(s.replace(/[^0-9.-]/g, ''))) / 100}
+            onChange={set('mcBearSeverity')}
+            allowInput
+            help={
+              'How much a bear market cuts annual investment returns during the downturn.\n\n' +
+              'At −15 pp (default): a moderate recession where returns drop roughly 15 pp below the long-run average for 1–2 years. At −30 pp: severe crash conditions (2008-style). At −5 pp: a mild correction only.\n\n' +
+              'Like frequency, changing severity does not shift the long-run expected return — the simulation compensates so the median remains anchored to your return rate sliders. Higher severity widens the fan and increases the chance of a bad sequence of returns early in retirement.'
+            }
+          />
+          {/* Crisis persistence toggle */}
+          <div style={{ marginBottom: 10 }}>
+            <div
+              style={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                marginBottom: 6,
+              }}
+            >
+              <span
+                style={{
+                  fontSize: 12,
+                  fontFamily: 'var(--font-body)',
+                  color: 'var(--text-secondary)',
+                }}
+              >
+                Crisis persistence
+              </span>
+              <div
+                style={{
+                  display: 'flex',
+                  background: 'var(--bg-input)',
+                  border: '1px solid var(--border)',
+                  borderRadius: 5,
+                  overflow: 'hidden',
+                }}
+              >
+                {[
+                  { label: 'Short', value: 0.3 },
+                  { label: 'Medium', value: 0.6 },
+                  { label: 'Long', value: 0.8 },
+                ].map(({ label, value }) => (
+                  <button
+                    key={value}
+                    onClick={() => set('mcCrisisPersistence')(value)}
+                    style={{
+                      padding: '3px 9px',
+                      background:
+                        p.mcCrisisPersistence === value ? 'var(--accent-gold)' : 'transparent',
+                      border: 'none',
+                      color:
+                        p.mcCrisisPersistence === value
+                          ? 'var(--accent-gold-text)'
+                          : 'var(--text-secondary)',
+                      fontFamily: 'var(--font-mono)',
+                      fontSize: 10,
+                      fontWeight: 600,
+                      letterSpacing: '0.05em',
+                      cursor: 'pointer',
+                      transition: 'all 0.15s',
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <p
+              style={{
+                fontSize: 11,
+                color: 'var(--text-muted)',
+                fontFamily: 'var(--font-body)',
+                lineHeight: 1.5,
+              }}
+            >
+              How long elevated volatility lingers after a bear market ends. Short: volatility
+              normalises within 1–2 years. Long: unsettled conditions persist for 5+ years, as in
+              the aftermath of 2008.
+            </p>
+          </div>
         </>
       );
 
@@ -5678,7 +5476,7 @@ export default function App() {
   } = useHistory(() => {
     try {
       const saved = localStorage.getItem('inputs');
-      return saved ? { ...DEFAULTS, ...migrateInputs(JSON.parse(saved)) } : DEFAULTS;
+      return saved ? inputsFromJson(JSON.parse(saved)) : DEFAULTS;
     } catch {
       return DEFAULTS;
     }
@@ -5686,7 +5484,7 @@ export default function App() {
   // The inputs in use: the stored ones with each person's state pension age
   // filled in from the law unless they chose one.
   const p = useMemo(() => withLegalStatePensionAge(stored), [stored]);
-  const [activeTab, setActiveTab] = useState('Personal');
+  const [tabByGroup, setTabByGroup] = useState(FIRST_TABS);
   // The changelog panel, and whether this version is newer than the one last
   // seen on this device (a first visit counts as seen).
   const [infoPanel, setInfoPanel] = useState(null); // null | 'changelog' | 'roadmap'
@@ -5721,11 +5519,19 @@ export default function App() {
   const couple = pr.householdMode === 'couple';
   // Couple mode: whose settings the sidebar shows, and the tabs it offers.
   const [editScope, setEditScope] = useState('self');
-  const scope = hasPartner ? editScope : null;
-  const visibleTabs = tabsFor(hasPartner, scope);
-  const shownTab = visibleTabs.includes(activeTab) ? activeTab : 'Personal';
+  // Which settings: 'self', 'partner' (with a partner), 'household' or 'assumptions'.
+  const scope = editScope === 'partner' && !hasPartner ? 'self' : editScope;
+  const visibleTabs = tabsFor(scope, hasPartner);
+  const activeTab = tabByGroup[tabGroup(scope)];
+  const shownTab = visibleTabs.includes(activeTab) ? activeTab : visibleTabs[0];
+  const setActiveTab = (tab) => setTabByGroup((t) => ({ ...t, [tabGroup(scope)]: tab }));
+  // Open another group's tab (e.g. the base rate's, from a tracker mortgage).
+  const goTo = (toScope, tab) => {
+    setEditScope(toScope);
+    setTabByGroup((t) => ({ ...t, [tabGroup(toScope)]: tab }));
+  };
   // Couple mode: the chart's timeline is your age; your partner's ages are
-  // offset by this much. The plan runs until the younger of you reaches Model to Age.
+  // offset by this much. The plan runs until the younger of you reaches Plan until age.
   const partnerOffset = couple ? p.currentAge - p.partner.currentAge : 0;
   const horizonAge = p.maxAge + Math.max(0, partnerOffset);
   // Editing the partner: their own settings over the shared ones, and a setter
@@ -5759,7 +5565,7 @@ export default function App() {
 
   // Persist inputs to localStorage whenever they change
   useEffect(() => {
-    localStorage.setItem('inputs', JSON.stringify(p));
+    localStorage.setItem('inputs', JSON.stringify(inputsToJson(p)));
   }, [p]);
 
   // Undo/redo keyboard shortcuts: Ctrl/Cmd+Z, Ctrl/Cmd+Shift+Z, and Ctrl+Y.
@@ -5811,7 +5617,7 @@ export default function App() {
 
   async function handleCopy() {
     try {
-      await navigator.clipboard.writeText(JSON.stringify(p, null, 2));
+      await navigator.clipboard.writeText(JSON.stringify(inputsToJson(p), null, 2));
       setCopyMsg('Copied!');
     } catch {
       setCopyMsg('Failed');
@@ -5825,10 +5631,16 @@ export default function App() {
       const parsed = JSON.parse(text);
       if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed))
         throw new Error('not an object');
-      replaceP({ ...DEFAULTS, ...migrateInputs(parsed) });
+      replaceP(inputsFromJson(parsed));
       setPasteMsg('Applied!');
     } catch (e) {
-      setPasteMsg(e instanceof SyntaxError ? 'Invalid JSON' : 'Failed');
+      setPasteMsg(
+        e instanceof SyntaxError
+          ? 'Invalid JSON'
+          : e instanceof RangeError
+            ? 'Newer version'
+            : 'Failed'
+      );
     }
     setTimeout(() => setPasteMsg(null), 2000);
   }
@@ -5953,7 +5765,7 @@ export default function App() {
   }, [pr]);
 
   // First projected year's surplus (today's money — year 0 is unscaled), surfaced
-  // in the Personal tab so the savings implied by the expenses input is visible.
+  // in the Spending tab so the savings implied by the expenses input is visible.
   const firstYearDetail = chartData[0]?._detail ?? null;
   const derivedSavings = firstYearDetail
     ? {
@@ -5963,7 +5775,7 @@ export default function App() {
       }
     : null;
 
-  // The partner's Class 3 top-up result (couple mode), for their Personal tab.
+  // The partner's Class 3 top-up result (couple mode), for their State pension tab.
   const partnerSummary = summary?.people?.[1] ?? null;
   const partnerTopUpInfo = partnerSummary
     ? {
@@ -5974,7 +5786,7 @@ export default function App() {
       }
     : null;
 
-  // Voluntary Class 3 state-pension top-up result, surfaced in the Personal tab.
+  // Voluntary Class 3 state-pension top-up result, surfaced in the State pension tab.
   const topUpInfo = summary
     ? {
         yearsBought: summary.class3YearsBought,
@@ -6404,7 +6216,7 @@ export default function App() {
             {
               value: 'alone',
               label: 'Just me',
-              title: `Where you'd stand on your own, for example if you split up: your own pay, pensions and savings, ${p.yourSharePct}% of the mortgage, debts and one-off events, and living costs at ${p.survivorSpendingPct}% of the household's (set in the Household tab)`,
+              title: `Where you'd stand on your own, for example if you split up: your own pay, pensions and savings, ${p.yourSharePct}% of the mortgage, debts and one-off events, and living costs at ${p.survivorSpendingPct}% of the household's (set in Household › Couple)`,
             },
           ]}
         />
@@ -6445,7 +6257,7 @@ export default function App() {
       </div>
       <HelpTip
         title="Nominal vs real"
-        text="Nominal: all figures shown in future pounds (the actual cash amounts at each age). Real: figures are adjusted for inflation and expressed in today's purchasing power, so you can compare values across different ages on a like-for-like basis. Uses the inflation rate set in the Rates tab."
+        text="Nominal: all figures shown in future pounds (the actual cash amounts at each age). Real: figures are adjusted for inflation and expressed in today's purchasing power, so you can compare values across different ages on a like-for-like basis. Uses the inflation rate set in Assumptions › Economy."
       />
       <div
         style={{
@@ -6517,7 +6329,7 @@ export default function App() {
       </div>
       <HelpTip
         title="All balances vs available funds"
-        text="All balances: the chart shows your whole pot — pension + ISA + GIA — at every age. Available funds: shows only money you could actually spend at that age. Your defined-contribution pension is excluded before your pension access age (set in the Pension tab), because it's locked until then; ISA and GIA count throughout.
+        text="All balances: the chart shows your whole pot — pension + ISA + GIA — at every age. Available funds: shows only money you could actually spend at that age. Your defined-contribution pension is excluded before your pension access age (set in each person’s Pension tab), because it's locked until then; ISA and GIA count throughout.
 
 Two other age gates matter for what you can actually rely on, both marked on the chart:
 • State pension — this is age-gated income, not a spendable balance, so it doesn't appear in either view. It only starts at your state pension age, and from then on it reduces how much you draw from your pots. Before that age you're on your own funds.
@@ -6674,7 +6486,8 @@ Use Available funds to see whether an early-retirement plan can bridge the gap u
         title="Reset every parameter back to its default value"
         onClick={() => {
           replaceP(DEFAULTS);
-          setActiveTab('Personal');
+          setEditScope('self');
+          setTabByGroup(FIRST_TABS);
         }}
         style={{
           width: '100%',
@@ -6708,7 +6521,8 @@ Use Available funds to see whether an early-retirement plan can bridge the gap u
         tab={shownTab}
         p={scope === 'partner' ? pv : p}
         set={scope === 'partner' ? setPv : set}
-        scope={scope}
+        couple={hasPartner}
+        goTo={goTo}
         derived={derivedSavings}
         topUp={scope === 'partner' ? partnerTopUpInfo : topUpInfo}
         annuity={summary?.annuity ?? null}
@@ -6763,7 +6577,7 @@ Use Available funds to see whether an early-retirement plan can bridge the gap u
           on your own, for example if you split up — your own pay, pensions and savings,{' '}
           {p.yourSharePct}% of the mortgage, other debts and one-off events, and living costs and
           retirement spending at {p.survivorSpendingPct}% of the household&apos;s (living alone
-          costs more than half). Change these in the Household tab; your inputs stay as they are.
+          costs more than half). Change these in Household › Couple; your inputs stay as they are.
         </div>
       )}
       {/* Stat cards */}
@@ -6989,7 +6803,7 @@ Use Available funds to see whether an early-retirement plan can bridge the gap u
         <HelpTip
           title="Deterministic vs Monte Carlo"
           text={
-            'Deterministic: one fixed projection using the exact rates you set in the Rates tab. Useful for understanding how the plan works and stress-testing specific assumptions. Because it uses a single unchanging set of assumptions, it is inherently optimistic — there is no mechanism for things to go wrong beyond what you explicitly model.\n\n' +
+            'Deterministic: one fixed projection using the exact rates you set under Assumptions. Useful for understanding how the plan works and stress-testing specific assumptions. Because it uses a single unchanging set of assumptions, it is inherently optimistic — there is no mechanism for things to go wrong beyond what you explicitly model.\n\n' +
             'Monte Carlo: runs hundreds of simulations, each with a different random sequence of market returns and economic conditions. The fan chart shows the spread of outcomes — the wide band is the 10th–90th percentile range, the narrow band is 25th–75th, and the centre line is the median. The simulation is calibrated so the median trial tracks the deterministic projection — your return rate sliders represent full-cycle expected returns, already inclusive of bear markets. The fan shows what happens when bad years cluster unluckily (p10) or conditions are unusually favourable (p90).\n\n' +
             'Use Monte Carlo to understand retirement risk — specifically, whether your plan survives bad luck, not just average conditions.'
           }
@@ -7034,7 +6848,7 @@ Use Available funds to see whether an early-retirement plan can bridge the gap u
           title="Monte Carlo results"
           text={
             `${mcResults ? mcResults.trialCount : 0} trials shown. Each trial varies investment returns (market factor) and inflation / BoE / wage growth (macro factor) using correlated random shocks.\n\n` +
-            'Solvent for life: the chance you never run out of money while still alive — the complement of the lifetime probability of ruin. Each trial that runs dry is weighted by the probability you live to see it (from ONS life tables for your sex and year of birth, set in the Simulation tab), so dying with money left counts as success. Set high enough that the age horizon reaches ~100 for this to be meaningful.\n\n' +
+            'Solvent for life: the chance you never run out of money while still alive — the complement of the lifetime probability of ruin. Each trial that runs dry is weighted by the probability you live to see it (from ONS life tables for your sex and year of birth, set in each person’s Personal tab), so dying with money left counts as success. Set high enough that the age horizon reaches ~100 for this to be meaningful.\n\n' +
             'Running dry means being unable to meet your target spending — including the bridge years before your pension access age, when a locked pension you cannot yet touch does not count as available. Early access penalties are not modelled.\n\n' +
             'The "to age N" figure is the simpler fixed-horizon view: the fraction of trials solvent all the way to the model horizon, ignoring survival. It is always the more pessimistic of the two.\n\n' +
             'Bands show the 10th–90th percentile range (faint) and 25th–75th range (stronger). Lines show the 5 key percentiles. ' +
@@ -7720,7 +7534,7 @@ Use Available funds to see whether an early-retirement plan can bridge the gap u
                       )}
                       <div style={{ color: 'var(--text-muted)', fontSize: 11, marginTop: 6 }}>
                         Amounts in the money of the year of the death. Spending falls to{' '}
-                        {p.survivorSpendingPct}% (Household tab).
+                        {p.survivorSpendingPct}% (Household › Couple).
                       </div>
                     </div>
                   ) : (
@@ -7996,7 +7810,7 @@ Use Available funds to see whether an early-retirement plan can bridge the gap u
                 borderTop: landscape ? 'none' : '1px solid var(--border)',
               }}
             >
-              {hasPartner && <ScopeSwitch scope={editScope} onChange={setEditScope} />}
+              <ScopeSwitch scope={scope} onChange={setEditScope} couple={hasPartner} />
               <SectionPicker value={shownTab} onChange={setActiveTab} tabs={visibleTabs} />
               <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '14px 14px 6px' }}>
                 {errorBanner}
@@ -8184,13 +7998,14 @@ Use Available funds to see whether an early-retirement plan can bridge the gap u
             overflow: 'hidden',
           }}
         >
-          {/* Couple mode: whose settings */}
-          {hasPartner && <ScopeSwitch scope={editScope} onChange={setEditScope} />}
+          {/* You, Partner, Household or Assumptions */}
+          <ScopeSwitch scope={scope} onChange={setEditScope} couple={hasPartner} />
           {/* Tab bar */}
           <div
             style={{
               display: 'grid',
-              gridTemplateColumns: 'repeat(4, 1fr)',
+              // Rows of four person tabs, or of three (Household, Assumptions).
+              gridTemplateColumns: `repeat(${visibleTabs.length % 3 === 0 ? 3 : 4}, 1fr)`,
               borderBottom: '1px solid var(--border)',
               flexShrink: 0,
             }}

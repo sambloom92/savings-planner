@@ -234,6 +234,9 @@ function amortiseYear(balance, monthlyRate, monthlyPayment, monthlyOverpayment =
  *   willsToEachOther?:      boolean,        - Cohabiting only: whether wills leave savings to
  *                                             each other (default true). Without, the survivor
  *                                             inherits only pensions.
+ *   takePCLS?:              boolean,        - This person's own choice of a tax-free lump sum
+ *                                             at retirement (the partner's goes on `partner`);
+ *                                             without it, retirementOptions.takePCLS applies.
  *   survivorSpendingShare?: number,         - Household spending after a death, as a share of
  *                                             the couple's (default 0.72, Retirement Living
  *                                             Standards 2026).
@@ -370,14 +373,22 @@ export function projectLifecycle(
     throw new RangeError('retirementOptions.annuity.owner is the partner, but there is no partner');
   const optionsWithoutAnnuity =
     retirementOptions == null ? null : { ...retirementOptions, annuity: null };
+  // Each person can choose their own tax-free lump sum (`takePCLS` on their
+  // profile); otherwise they follow retirementOptions.takePCLS.
+  const ownLumpSum = (person, options) => {
+    if (person.takePCLS === undefined) return options;
+    if (typeof person.takePCLS !== 'boolean') throw new TypeError('takePCLS must be a boolean');
+    return options == null ? options : { ...options, takePCLS: person.takePCLS };
+  };
 
   const self = createPerson(
     profile,
     pots,
-    annuityOwner === 'self' ? retirementOptions : optionsWithoutAnnuity,
+    ownLumpSum(profile, annuityOwner === 'self' ? retirementOptions : optionsWithoutAnnuity),
     currentYear
   );
   self.id = 'self';
+  self.plannedTakePCLS = profile.takePCLS ?? retirementOptions?.takePCLS ?? false;
   const { currentAge, retirementAge } = self;
 
   let partner = null;
@@ -387,10 +398,14 @@ export function projectLifecycle(
     partner = createPerson(
       partnerProfile,
       partnerProfile.pots ?? {},
-      annuityOwner === 'partner' ? retirementOptions : optionsWithoutAnnuity,
+      ownLumpSum(
+        partnerProfile,
+        annuityOwner === 'partner' ? retirementOptions : optionsWithoutAnnuity
+      ),
       currentYear
     );
     partner.id = 'partner';
+    partner.plannedTakePCLS = partnerProfile.takePCLS ?? retirementOptions?.takePCLS ?? false;
     if (!PARTNERSHIPS.includes(partnership))
       throw new RangeError(`partnership must be one of ${PARTNERSHIPS.join(', ')}`);
     if (typeof willsToEachOther !== 'boolean')
@@ -2415,7 +2430,7 @@ export function projectLifecycle(
       break;
     for (const P of stopping)
       enterRetirement(P, P.currentAge + i, retirement?.maxAge ?? Infinity, {
-        takePCLS: retirement?.takePCLS ?? false,
+        takePCLS: retirement != null && P.plannedTakePCLS,
         pclsPercentage: retirement?.pclsPercentage ?? PENSION_CONSTANTS.maxPCLSPercentage,
       });
 
