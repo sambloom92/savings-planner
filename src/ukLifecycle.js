@@ -821,23 +821,31 @@ export function projectLifecycle(
    * not the model. Deliberately simple and slightly conservative.
    */
   function rundownSurvives(i, spendReal, annuityGrossNominal = 0, annuityInflationLinked = true) {
+    return rundownTest(i, annuityGrossNominal, annuityInflationLinked)(spendReal);
+  }
+
+  // The rundown check for year `i`, as a function of the spend: everything that
+  // doesn't depend on the spend (the pots, debts and each year's guaranteed
+  // income) is worked out once, so trying many spends (the guardrails'
+  // bisection) is cheap. The arithmetic is the same, in the same order.
+  function rundownTest(i, annuityGrossNominal = 0, annuityInflationLinked = true) {
     const alive = alivePeople();
     const horizonIndex = (retirementOptions.maxAge ?? 90) + ageGap - currentAge;
     const deflate = econ.cumulInflation > 0 ? 1 / econ.cumulInflation : 1;
 
     // Today's-money buckets: accessible (ISA + GIA) and each locked pension (NMPA).
-    let accessible = Math.max(0, alive.reduce((s, P) => s + P.isa + P.gia, 0) * deflate);
+    let accessible0 = Math.max(0, alive.reduce((s, P) => s + P.isa + P.gia, 0) * deflate);
     const locked = alive.map((P) => ({ P, amount: Math.max(0, P.pension * deflate) }));
     for (const P of alive) {
       if (!P.inherited) continue;
       // An inherited pension can be drawn at any age: tax-free, or taxed like a pension.
-      accessible += Math.max(0, P.inherited.taxFree * deflate);
+      accessible0 += Math.max(0, P.inherited.taxFree * deflate);
       locked.push({ P, amount: Math.max(0, P.inherited.taxable * deflate), anyAge: true });
     }
     // Clear outstanding debt from spendable pots first (conservative).
     let debt = Math.max(0, (mortgageBalance + unsecuredOutstanding()) * deflate);
-    const payFromAccessible = Math.min(accessible, debt);
-    accessible -= payFromAccessible;
+    const payFromAccessible = Math.min(accessible0, debt);
+    accessible0 -= payFromAccessible;
     debt -= payFromAccessible;
     for (const b of locked) {
       const before = b.amount;
@@ -856,37 +864,59 @@ export function projectLifecycle(
     // ignored: converting pot to income at a fair rate is roughly neutral here.
     const annuityReal0 = Math.max(0, annuityGrossNominal * deflate);
 
-    for (let k = i; k <= horizonIndex; k++) {
+    // Each year's guaranteed income: the state pension, and the annuity and
+    // any DB pensions (taxed like the annuity); and the first year each locked
+    // pot can be drawn.
+    const years = Math.max(0, horizonIndex - i + 1);
+    const spByYear = new Float64Array(years);
+    const otherByYear = new Float64Array(years);
+    const anyDb = alive.some((P) => P.dbStates.length > 0);
+    for (let j = 0; j < years; j++) {
+      const k = i + j;
       const annuityReal = annuityInflationLinked
         ? annuityReal0
         : annuityReal0 / Math.pow(1 + inflationRate, k - i);
-      // DB pensions are guaranteed income too, taxed like the annuity.
-      const spReal = alive.reduce(
-        (s, P, j) => s + (P.currentAge + k >= P.spClaimAge ? stateReal[j] : 0),
-        0
-      );
-      const dbReal = alive.reduce(
-        (s, P) => s + dbRealIncomeAt(P, P.currentAge + k, P.currentAge + i, deflate, inflationRate),
-        0
-      );
-      let need = Math.max(0, spendReal - spReal - ANNUITY_NET_FACTOR * (annuityReal + dbReal));
-      if (need > 0) {
-        const fromAccessible = Math.min(accessible, need);
-        accessible -= fromAccessible;
-        need -= fromAccessible;
+      let spReal = 0;
+      let dbReal = 0;
+      for (let n = 0; n < alive.length; n++) {
+        const P = alive[n];
+        spReal = spReal + (P.currentAge + k >= P.spClaimAge ? stateReal[n] : 0);
+        if (anyDb)
+          dbReal =
+            dbReal + dbRealIncomeAt(P, P.currentAge + k, P.currentAge + i, deflate, inflationRate);
       }
-      for (const b of locked) {
-        if (need > 0 && (b.anyAge || b.P.currentAge + k >= b.P.pensionAccessAge) && b.amount > 0) {
-          const grossDrawn = Math.min(b.amount, need * TEST_PENSION_GROSSUP);
-          b.amount -= grossDrawn;
-          need -= grossDrawn / TEST_PENSION_GROSSUP;
-        }
-      }
-      if (need > 0.5) return false; // can't meet this year's spending under central assumptions
-      accessible *= 1 + centralRealReturn;
-      for (const b of locked) b.amount *= 1 + centralRealReturn;
+      spByYear[j] = spReal;
+      otherByYear[j] = ANNUITY_NET_FACTOR * (annuityReal + dbReal);
     }
-    return true;
+    const drawableFrom = locked.map((b) =>
+      b.anyAge ? 0 : b.P.pensionAccessAge - b.P.currentAge - i
+    );
+    const lockedStart = locked.map((b) => b.amount);
+    const amounts = new Float64Array(locked.length);
+
+    return (spendReal) => {
+      let accessible = accessible0;
+      amounts.set(lockedStart);
+      for (let j = 0; j < years; j++) {
+        let need = Math.max(0, spendReal - spByYear[j] - otherByYear[j]);
+        if (need > 0) {
+          const fromAccessible = Math.min(accessible, need);
+          accessible -= fromAccessible;
+          need -= fromAccessible;
+        }
+        for (let n = 0; n < amounts.length; n++) {
+          if (need > 0 && j >= drawableFrom[n] && amounts[n] > 0) {
+            const grossDrawn = Math.min(amounts[n], need * TEST_PENSION_GROSSUP);
+            amounts[n] -= grossDrawn;
+            need -= grossDrawn / TEST_PENSION_GROSSUP;
+          }
+        }
+        if (need > 0.5) return false; // can't meet this year's spending under central assumptions
+        accessible *= 1 + centralRealReturn;
+        for (let n = 0; n < amounts.length; n++) amounts[n] *= 1 + centralRealReturn;
+      }
+      return true;
+    };
   }
 
   // Flexible-retirement on-track test: can the target spend be funded for life?
@@ -897,12 +927,14 @@ export function projectLifecycle(
     return rundownSurvives(i, targetReal * spendingShare());
   }
 
-  // Largest real (today's-money) net spend the pots can sustain from year `i` to
-  // the horizon under central assumptions — the spending guardrails steer toward
-  // this. Found by bisection on rundownSurvives, which is monotonic in spend
-  // (more spending is never easier to sustain). ~30 iterations gives sub-pound
-  // resolution on any realistic pot.
-  function sustainableSpendReal(i, annuityGrossNominal = 0, annuityInflationLinked = true) {
+  // The largest real (today's-money) net spend the pots can sustain from year
+  // `i` to the horizon under central assumptions is what the spending
+  // guardrails steer toward. It's found by bisection on the rundown check,
+  // which is monotonic in spend (more spending is never easier to sustain).
+  //
+  // A spend that always fails the rundown: drawing the whole (real) pot plus
+  // all guaranteed income in a single year cannot be sustained beyond it.
+  function sustainableUpperBound(i, annuityGrossNominal = 0) {
     const alive = alivePeople();
     const deflate = econ.cumulInflation > 0 ? 1 / econ.cumulInflation : 1;
     const totalReal = Math.max(
@@ -910,18 +942,22 @@ export function projectLifecycle(
       alive.reduce((s, P) => s + P.pension + P.isa + P.gia + inheritedPensionBalance(P), 0) *
         deflate
     );
-    // Upper bound: drawing the whole (real) pot plus all guaranteed income in a
-    // single year cannot be sustained beyond it, so this always fails the rundown.
-    let hi =
+    return (
       totalReal +
       alive.reduce((s, P) => s + computeStatePension(P.niYears) * P.statePensionDeferralUplift, 0) +
       Math.max(0, annuityGrossNominal * deflate) +
       alive.reduce((s, P) => s + P.dbStates.reduce((t, st) => t + st.pension * deflate * 2, 0), 0) +
-      1;
+      1
+    );
+  }
+
+  // 30 halvings of [0, hi]: the largest spend found to survive, within
+  // hi / 2^30 of the true limit (and never above it).
+  function bisectSustainable(survives, hi) {
     let lo = 0;
     for (let iter = 0; iter < 30; iter++) {
       const mid = (lo + hi) / 2;
-      if (rundownSurvives(i, mid, annuityGrossNominal, annuityInflationLinked)) lo = mid;
+      if (survives(mid)) lo = mid;
       else hi = mid;
     }
     return lo;
@@ -983,14 +1019,42 @@ export function projectLifecycle(
    * (scaled to the household's spending share), returning the action taken.
    */
   function applyGuardrails(i, annuityGross, annuityInflationLinked) {
-    const sustainable = sustainableSpendReal(i, annuityGross, annuityInflationLinked);
     const share = spendingShare();
+    const { band, step } = guardrails;
+    const spend = retirement.grSpendReal * share;
+    // The rule compares this spend with the sustainable spend found by
+    // bisection (bisectSustainable): cut if it's more than `band` above,
+    // raise if more than `band` below. The bisection settles within
+    // hi / 2^30 of the true limit and never above it, so wherever the
+    // threshold is clearly on one side of the limit, one or two rundown checks
+    // give the same answer as the 30 the bisection takes; only right at the
+    // edge does it run the bisection itself.
+    const survives = rundownTest(i, annuityGross, annuityInflationLinked);
+    const hi = sustainableUpperBound(i, annuityGross);
+    const margin = (2 * hi) / 2 ** 30 + 1e-9 * (spend + 1);
+    let sustainable = null;
+    const exact = () => (sustainable ??= bisectSustainable(survives, hi));
+    // Is the limit above `threshold`? true / false, or null if too close to call.
+    const above = (threshold) => {
+      if (survives(threshold + margin)) return true;
+      if (!survives(threshold - margin)) return false;
+      return null;
+    };
+
+    let cut = band > 0 ? above(spend / (1 + band)) === false : null;
+    if (band <= 0 || cut === null) cut = spend > exact() * (1 + band);
+    let raise = false;
+    if (!cut) {
+      raise = band > 0 && band < 1 ? above(spend / (1 - band)) : null;
+      if (raise === null) raise = spend < exact() * (1 - band);
+    }
+
     let action = 'none';
-    if (retirement.grSpendReal * share > sustainable * (1 + guardrails.band)) {
-      retirement.grSpendReal = retirement.grSpendReal * (1 - guardrails.step);
+    if (cut) {
+      retirement.grSpendReal = retirement.grSpendReal * (1 - step);
       action = 'cut';
-    } else if (retirement.grSpendReal * share < sustainable * (1 - guardrails.band)) {
-      retirement.grSpendReal = retirement.grSpendReal * (1 + guardrails.step);
+    } else if (raise) {
+      retirement.grSpendReal = retirement.grSpendReal * (1 + step);
       action = 'raise';
     }
     retirement.grSpendReal = Math.min(

@@ -135,6 +135,25 @@ function sampleDeathYear(surv, u) {
 
 // ── Main simulation ───────────────────────────────────────────────────────────
 export function runMonteCarlo(profile, baseRates, pots, retirementOpts, opts = {}) {
+  const plan = planMonteCarlo(profile, baseRates, pots, retirementOpts, opts);
+  const trials = [];
+  for (let t = 0; t < plan.trials; t++) trials.push(runMonteCarloTrial(plan, t));
+  return summariseMonteCarlo(plan, trials);
+}
+
+// ── The three steps ───────────────────────────────────────────────────────────
+// runMonteCarlo is planMonteCarlo → runMonteCarloTrial for each trial →
+// summariseMonteCarlo. The trials are independent once planned, so the app
+// can run them in several workers at once: each worker makes the same plan
+// (the draws come from the seed), runs its share of the trials and sends back
+// their summaries, and the page summarises them all. The result is the same
+// as running them one after another.
+
+/**
+ * Draw every trial's year-by-year rates and (in couple mode) death ages, from
+ * the seed. Same arguments as runMonteCarlo. Cheap next to running the trials.
+ */
+export function planMonteCarlo(profile, baseRates, pots, retirementOpts, opts = {}) {
   const {
     trials = 200,
     volatility = 1.0,
@@ -190,14 +209,13 @@ export function runMonteCarlo(profile, baseRates, pots, retirementOpts, opts = {
   const ageGap = couple ? Math.max(0, profile.currentAge - partnerProfile.currentAge) : 0;
   const totalYears = retirementOpts.maxAge + ageGap - profile.currentAge + 1;
   const rand = makePRNG(seed);
-  const successful = [];
 
   // Couple mode: each trial draws a death age for each partner from their own
   // cohort life table (sex and year of birth), independently. The first death
   // within the plan is applied, so the trial runs the survivor's plan from
   // then; a shortfall after it is weighted by the survivor's chance of still
-  // being alive (below). Deaths use their own random stream, so the market
-  // draws are the same as without them.
+  // being alive (summariseMonteCarlo). Deaths use their own random stream, so
+  // the market draws are the same as without them.
   const startYear = profile.currentYear ?? 2025;
   const deathRand = makePRNG((seed ^ 0x9e3779b9) >>> 0);
   const survSelf = couple
@@ -206,13 +224,16 @@ export function runMonteCarlo(profile, baseRates, pots, retirementOpts, opts = {
   const survPartner = couple
     ? survivalByYear(partnerProfile.currentAge, partnerSex, startYear - partnerProfile.currentAge)
     : null;
-  const trialDeaths = [];
 
-  for (let t = 0; t < trials; t++) {
+  // Each trial's rates, five a year (RATE_KEYS order), and death years.
+  const n = monteCarloTrialCount({ trials });
+  const rates = new Float64Array(n * totalYears * RATE_KEYS.length);
+  const deathYears = couple ? new Int32Array(n * 2) : null;
+  let at = 0;
+  for (let t = 0; t < n; t++) {
     let inBear = false;
     let volState = VOL_NORMAL;
 
-    const yearlyRatesOverride = [];
     for (let y = 0; y < totalYears; y++) {
       // ── Regime transition ──────────────────────────────────────────────────
       if (inBear) {
@@ -241,55 +262,239 @@ export function runMonteCarlo(profile, baseRates, pots, retirementOpts, opts = {
       // ── Bear shift (positive = downward pressure on returns) ───────────────
       const Δ = inBear ? bearSeverity : 0;
 
-      yearlyRatesOverride.push({
-        // Investment rates: no floor (see module docstring).
-        // retirementRate shock is scaled by volRatio — a de-risked (lower-equity)
-        // portfolio suffers less volatility and a smaller bear-market drag.
-        // comp* offsets ensure E[rate] ≈ slider value across the full cycle.
-        savingsRate: baseRates.savingsRate + compSavings - Δ + z1 * σ_eff,
-        retirementRate:
-          baseRates.retirementRate + compRetirement - Δ * volRatio + z1 * σ_eff * volRatio,
-        // Macro rates: bear pushes inflation/BoE up, so compensation subtracts.
-        inflationRate: Math.max(-0.05, baseRates.inflationRate - compInfl + Δ * 0.15 + z2 * σ_mac),
-        boeRate: Math.max(-0.05, baseRates.boeRate - compBoe + Δ * 0.1 + z2 * σ_mac),
-        wageGrowthRate: baseRates.wageGrowthRate + compWage - Δ * 0.25 + z2 * σ_mac * 0.5,
-      });
+      // Investment rates: no floor (see module docstring).
+      // retirementRate shock is scaled by volRatio — a de-risked (lower-equity)
+      // portfolio suffers less volatility and a smaller bear-market drag.
+      // comp* offsets ensure E[rate] ≈ slider value across the full cycle.
+      rates[at++] = baseRates.savingsRate + compSavings - Δ + z1 * σ_eff;
+      rates[at++] =
+        baseRates.retirementRate + compRetirement - Δ * volRatio + z1 * σ_eff * volRatio;
+      // Macro rates: bear pushes inflation/BoE up, so compensation subtracts.
+      rates[at++] = Math.max(-0.05, baseRates.inflationRate - compInfl + Δ * 0.15 + z2 * σ_mac);
+      rates[at++] = Math.max(-0.05, baseRates.boeRate - compBoe + Δ * 0.1 + z2 * σ_mac);
+      rates[at++] = baseRates.wageGrowthRate + compWage - Δ * 0.25 + z2 * σ_mac * 0.5;
     }
 
-    let trialProfile = profile;
-    let deathMeta = null;
     if (couple) {
-      const dSelf = sampleDeathYear(survSelf, deathRand());
-      const dPartner = sampleDeathYear(survPartner, deathRand());
-      const selfFirst = dSelf <= dPartner;
-      const firstIdx = Math.min(dSelf, dPartner);
-      deathMeta = {
-        firstIdx: firstIdx <= totalYears - 1 ? firstIdx : Infinity,
-        survivorSurv: selfFirst ? survPartner : survSelf,
-      };
-      if (deathMeta.firstIdx !== Infinity)
-        trialProfile = {
-          ...profile,
-          death: selfFirst
-            ? { person: 'self', age: profile.currentAge + dSelf }
-            : { person: 'partner', age: partnerProfile.currentAge + dPartner },
-        };
-    }
-
-    try {
-      successful.push(
-        projectLifecycle(trialProfile, baseRates, pots, retirementOpts, yearlyRatesOverride)
-      );
-      trialDeaths.push(deathMeta);
-    } catch {
-      /* skip failed trials */
+      deathYears[2 * t] = sampleDeathYear(survSelf, deathRand());
+      deathYears[2 * t + 1] = sampleDeathYear(survPartner, deathRand());
     }
   }
 
-  if (successful.length === 0) return null;
+  return {
+    profile,
+    baseRates,
+    pots,
+    retirementOpts,
+    trials: n,
+    totalYears,
+    couple,
+    sex,
+    partnerSex,
+    essentialFloorReal,
+    survSelf,
+    survPartner,
+    rates,
+    deathYears,
+  };
+}
 
-  const ages = successful[0].yearlyBreakdown.map((r) => r.age);
-  const portfolioMatrix = successful.map((r) => r.yearlyBreakdown.map(rowPortfolio));
+/** How many trials a run with these options makes. */
+export function monteCarloTrialCount(opts = {}) {
+  return Math.max(0, opts.trials ?? 200);
+}
+
+// The order of each year's rates in a plan.
+const RATE_KEYS = ['savingsRate', 'retirementRate', 'inflationRate', 'boeRate', 'wageGrowthRate'];
+
+// Trial t's first death within the plan: its year index (Infinity if none)
+// and the survivor's survival curve; and the profile it runs with.
+function trialSetup(plan, t) {
+  const { profile, couple, totalYears, survSelf, survPartner, deathYears } = plan;
+  if (!couple) return { profile, death: null };
+  const dSelf = deathYears[2 * t];
+  const dPartner = deathYears[2 * t + 1];
+  const selfFirst = dSelf <= dPartner;
+  const firstIdx = Math.min(dSelf, dPartner);
+  const death = {
+    firstIdx: firstIdx <= totalYears - 1 ? firstIdx : Infinity,
+    survivorSurv: selfFirst ? survPartner : survSelf,
+  };
+  if (death.firstIdx === Infinity) return { profile, death };
+  return {
+    profile: {
+      ...profile,
+      death: selfFirst
+        ? { person: 'self', age: profile.currentAge + dSelf }
+        : { person: 'partner', age: profile.partner.currentAge + dPartner },
+    },
+    death,
+  };
+}
+
+// Project trial t in full (throws if the projection does).
+function projectTrial(plan, t) {
+  const { baseRates, pots, retirementOpts, totalYears, rates } = plan;
+  const yearlyRatesOverride = [];
+  let at = t * totalYears * RATE_KEYS.length;
+  for (let y = 0; y < totalYears; y++) {
+    yearlyRatesOverride.push({
+      savingsRate: rates[at],
+      retirementRate: rates[at + 1],
+      inflationRate: rates[at + 2],
+      boeRate: rates[at + 3],
+      wageGrowthRate: rates[at + 4],
+    });
+    at += RATE_KEYS.length;
+  }
+  return projectLifecycle(
+    trialSetup(plan, t).profile,
+    baseRates,
+    pots,
+    retirementOpts,
+    yearlyRatesOverride
+  );
+}
+
+/**
+ * Run trial t of a plan and keep what summariseMonteCarlo needs: yearly
+ * figures as typed arrays (cheap to send between workers) and a few numbers.
+ * Null if the projection fails (the trial is left out, as before).
+ */
+export function runMonteCarloTrial(plan, t) {
+  let r;
+  try {
+    r = projectTrial(plan, t);
+  } catch {
+    return null; // skip failed trials
+  }
+  const { profile, couple, essentialFloorReal } = plan;
+  const rows = r.yearlyBreakdown;
+  const n = rows.length;
+  const f64 = () => new Float64Array(n);
+  const out = {
+    t,
+    startYear: r.startYear,
+    retirementAge: r.summary.retirementAge,
+    nominalRetirementAge: r.summary.nominalRetirementAge,
+    annuity: r.summary.annuity,
+    ages: f64(),
+    portfolio: f64(),
+    available: f64(),
+    pension: f64(),
+    isa: f64(),
+    gia: f64(),
+    mortgage: f64(),
+    unsecuredDebt: f64(),
+    studentLoan: f64(),
+    shortfallAge: Infinity,
+    belowFloorAge: Infinity,
+    // Retirement years with a guardrail budget: the age and today's-money budget.
+    budgetAges: [],
+    budgets: [],
+    everCut: false,
+  };
+
+  // Available funds: money you could actually spend at each age — ISA + GIA
+  // always, plus the pension only from the access age. In couple mode each
+  // partner's pension unlocks at their own access age; an inherited pension
+  // can be drawn at any age.
+  const accessAge = profile.pensionAccessAge ?? LIFECYCLE_CONSTANTS.pension.defaultAccessAge;
+  const accessAges = {
+    self: accessAge,
+    partner: profile.partner?.pensionAccessAge ?? LIFECYCLE_CONSTANTS.pension.defaultAccessAge,
+  };
+  const currentAge = rows[0]?.age;
+  const death = trialSetup(plan, t).death;
+  const survivorShare = profile.survivorSpendingShare ?? COUPLE_DEFAULTS.survivorSpendingShare;
+  const floorOn = essentialFloorReal != null && essentialFloorReal > 0;
+
+  for (let k = 0; k < n; k++) {
+    const row = rows[k];
+    out.ages[k] = row.age;
+    out.portfolio[k] = rowPortfolio(row);
+    if (row.people) {
+      out.available[k] = row.people.reduce((sum, p) => {
+        if (p.status === 'died') return sum;
+        const pension = p.age >= accessAges[p.id] ? Math.max(0, p.pension?.closingBalance ?? 0) : 0;
+        return (
+          sum +
+          Math.max(0, p.isa?.closingBalance ?? 0) +
+          Math.max(0, p.gia?.closingBalance ?? 0) +
+          pension +
+          Math.max(0, p.inheritedPension?.closingBalance ?? 0)
+        );
+      }, 0);
+    } else {
+      const isa = Math.max(0, row.isa?.closingBalance ?? 0);
+      const gia = Math.max(0, row.gia?.closingBalance ?? 0);
+      const pension = row.age >= accessAge ? Math.max(0, row.pension?.closingBalance ?? 0) : 0;
+      out.available[k] = isa + gia + pension;
+    }
+    // Pot balances for the single-trial view: assets as positive values, debts
+    // as positive balances (the chart draws them below zero).
+    out.pension[k] = Math.max(
+      0,
+      (row.pension?.closingBalance ?? 0) + (row.inheritedPension?.closingBalance ?? 0)
+    );
+    out.isa[k] = Math.max(0, row.isa?.closingBalance ?? 0);
+    out.gia[k] = Math.max(0, row.gia?.closingBalance ?? 0);
+    out.mortgage[k] = row.mortgage?.closingBalance ?? 0;
+    out.unsecuredDebt[k] =
+      row.unsecuredDebts?.reduce((s, d) => s + (d.closingBalance ?? 0), 0) ?? 0;
+    out.studentLoan[k] = row.studentLoan?.closingBalance ?? 0;
+
+    // The first year spending isn't met (see summariseMonteCarlo).
+    if (out.shortfallAge === Infinity && (row.shortfall ?? 0) > 0) out.shortfallAge = row.age;
+
+    if (row.phase !== 'retirement') continue;
+    // The first retirement year the achieved spend falls below the essential
+    // floor (in that year's money); after a death the floor falls to the
+    // survivor's share, like spending.
+    if (floorOn && out.belowFloorAge === Infinity) {
+      const afterDeath = couple && row.age - currentAge >= death.firstIdx;
+      const floorNominal =
+        essentialFloorReal * (afterDeath ? survivorShare : 1) * (row.inflationIndex ?? 1);
+      if ((row.netIncomeAchieved ?? 0) < floorNominal - 1) out.belowFloorAge = row.age;
+    }
+    if (row.spendingBudgetReal == null) continue;
+    out.budgetAges.push(row.age);
+    out.budgets.push(row.spendingBudgetReal);
+    if (row.guardrailAction === 'cut') out.everCut = true;
+  }
+  out.budgetAges = Float64Array.from(out.budgetAges);
+  out.budgets = Float64Array.from(out.budgets);
+  return out;
+}
+
+/** The typed arrays in a trial summary (runMonteCarloTrial). */
+export const TRIAL_ARRAYS = [
+  'ages',
+  'portfolio',
+  'available',
+  'pension',
+  'isa',
+  'gia',
+  'mortgage',
+  'unsecuredDebt',
+  'studentLoan',
+  'budgetAges',
+  'budgets',
+];
+
+/**
+ * Summarise a plan's trials (runMonteCarloTrial results, in trial order; null
+ * for a failed trial) into the Monte Carlo result. Null if every trial failed.
+ */
+export function summariseMonteCarlo(plan, trialResults) {
+  const { profile, retirementOpts, couple, sex, partnerSex, essentialFloorReal } = plan;
+  const { survSelf, survPartner } = plan;
+  const successful = trialResults.filter((r) => r != null);
+  if (successful.length === 0) return null;
+  const trialDeaths = successful.map((r) => (couple ? trialSetup(plan, r.t).death : null));
+
+  const ages = Array.from(successful[0].ages);
+  const portfolioMatrix = successful.map((r) => Array.from(r.portfolio));
 
   // Age at which each trial first fails to meet its target spending — its ruin
   // age (Infinity = never within the horizon). Computed once and shared by both
@@ -306,16 +511,7 @@ export function runMonteCarlo(profile, baseRates, pots, retirementOpts, opts = {
   // "Shortfall from Age" readout, which uses the same field.
   const maxAgeIdx = ages.length - 1;
   const currentAge = ages[0];
-
-  function firstShortfallAge(breakdown) {
-    for (const row of breakdown) {
-      if ((row.shortfall ?? 0) > 0) return row.age;
-    }
-    return Infinity;
-  }
-
-  const shortfallAges = successful.map((r) => firstShortfallAge(r.yearlyBreakdown));
-
+  const shortfallAges = successful.map((r) => r.shortfallAge);
   // ── Rank trials for representative-path selection ─────────────────────────
   // Sort order (ascending = worst → best):
   //   Survivors (never exhaust funds) always beat exhausted trials.
@@ -364,34 +560,7 @@ export function runMonteCarlo(profile, baseRates, pots, retirementOpts, opts = {
   // bands can fall to zero during an early-retirement bridge while the total
   // pot is still large. Used by the chart's "Available funds" view.
   const accessAge = profile.pensionAccessAge ?? LIFECYCLE_CONSTANTS.pension.defaultAccessAge;
-  // In couple mode each partner's pension unlocks at their own access age; an
-  // inherited pension can be drawn at any age.
-  const accessAges = {
-    self: accessAge,
-    partner: partnerProfile?.pensionAccessAge ?? LIFECYCLE_CONSTANTS.pension.defaultAccessAge,
-  };
-  const availableMatrix = successful.map((r) =>
-    r.yearlyBreakdown.map((row) => {
-      if (row.people) {
-        return row.people.reduce((sum, p) => {
-          if (p.status === 'died') return sum;
-          const pension =
-            p.age >= accessAges[p.id] ? Math.max(0, p.pension?.closingBalance ?? 0) : 0;
-          return (
-            sum +
-            Math.max(0, p.isa?.closingBalance ?? 0) +
-            Math.max(0, p.gia?.closingBalance ?? 0) +
-            pension +
-            Math.max(0, p.inheritedPension?.closingBalance ?? 0)
-          );
-        }, 0);
-      }
-      const isa = Math.max(0, row.isa?.closingBalance ?? 0);
-      const gia = Math.max(0, row.gia?.closingBalance ?? 0);
-      const pension = row.age >= accessAge ? Math.max(0, row.pension?.closingBalance ?? 0) : 0;
-      return isa + gia + pension;
-    })
-  );
+  const availableMatrix = successful.map((r) => r.available);
   const availablePercentileData = ages.map((age, ai) => {
     const vals = availableMatrix.map((col) => col[ai]).sort((a, b) => a - b);
     return {
@@ -404,25 +573,24 @@ export function runMonteCarlo(profile, baseRates, pots, retirementOpts, opts = {
     };
   });
 
+  // The representative trials' full year-by-year rows, projected again (the
+  // same inputs give the same rows).
   const repPaths = {};
   for (const p of PCTS) {
-    repPaths[p] = successful[repTrialIdx[p]].yearlyBreakdown;
+    repPaths[p] = projectTrial(plan, successful[repTrialIdx[p]].t).yearlyBreakdown;
   }
 
   // Per-trial pot balances — lightweight snapshot used by the locked-trial
   // stacked view in FanChart.  Assets stored as positive values; debts stored
   // as positive balances (the canvas draws them below zero).
   const allPotData = successful.map((r) =>
-    r.yearlyBreakdown.map((row) => ({
-      pension: Math.max(
-        0,
-        (row.pension?.closingBalance ?? 0) + (row.inheritedPension?.closingBalance ?? 0)
-      ),
-      isa: Math.max(0, row.isa?.closingBalance ?? 0),
-      gia: Math.max(0, row.gia?.closingBalance ?? 0),
-      mortgage: row.mortgage?.closingBalance ?? 0,
-      unsecuredDebt: row.unsecuredDebts?.reduce((s, d) => s + (d.closingBalance ?? 0), 0) ?? 0,
-      studentLoan: row.studentLoan?.closingBalance ?? 0,
+    Array.from(r.ages, (_, k) => ({
+      pension: r.pension[k],
+      isa: r.isa[k],
+      gia: r.gia[k],
+      mortgage: r.mortgage[k],
+      unsecuredDebt: r.unsecuredDebt[k],
+      studentLoan: r.studentLoan[k],
     }))
   );
 
@@ -496,18 +664,7 @@ export function runMonteCarlo(profile, baseRates, pots, retirementOpts, opts = {
   let essentialSecuredForLife = null;
   let essentialSecuredToHorizon = null;
   if (essentialFloorReal != null && essentialFloorReal > 0) {
-    // After a death the essential floor falls to the survivor's share, like spending.
-    const survivorShare = profile.survivorSpendingShare ?? COUPLE_DEFAULTS.survivorSpendingShare;
-    const belowFloorAges = successful.map((r, t) => {
-      for (const row of r.yearlyBreakdown) {
-        if (row.phase !== 'retirement') continue;
-        const afterDeath = couple && row.age - currentAge >= trialDeaths[t].firstIdx;
-        const floorNominal =
-          essentialFloorReal * (afterDeath ? survivorShare : 1) * (row.inflationIndex ?? 1);
-        if ((row.netIncomeAchieved ?? 0) < floorNominal - 1) return row.age;
-      }
-      return Infinity;
-    });
+    const belowFloorAges = successful.map((r) => r.belowFloorAge);
     const n = belowFloorAges.length;
     essentialSecuredToHorizon = n > 0 ? belowFloorAges.filter((a) => a === Infinity).length / n : 0;
     essentialSecuredForLife =
@@ -544,8 +701,8 @@ export function runMonteCarlo(profile, baseRates, pots, retirementOpts, opts = {
   // target, so all of this collapses to the nominal age (fractionDelayed = 0).
   // (In couple mode a trial where the main person dies before retiring has no
   // retirement age and is left out.)
-  const retirementAges = successful.map((r) => r.summary.retirementAge).filter((a) => a !== null);
-  const nominalRetAge = successful[0].summary.nominalRetirementAge;
+  const retirementAges = successful.map((r) => r.retirementAge).filter((a) => a !== null);
+  const nominalRetAge = successful[0].nominalRetirementAge;
   const retSorted = [...retirementAges].sort((a, b) => a - b);
   const distCounts = new Map();
   for (const a of retirementAges) distCounts.set(a, (distCounts.get(a) ?? 0) + 1);
@@ -590,22 +747,20 @@ export function runMonteCarlo(profile, baseRates, pots, retirementOpts, opts = {
   let totalRetYears = 0;
   for (const r of successful) {
     let minBudget = Infinity;
-    let everCut = false;
     let aboveTarget = false;
-    for (const row of r.yearlyBreakdown) {
-      if (row.phase !== 'retirement' || row.spendingBudgetReal == null) continue;
-      const b = row.spendingBudgetReal;
+    for (let k = 0; k < r.budgets.length; k++) {
+      const b = r.budgets[k];
+      const age = r.budgetAges[k];
       totalRetYears++;
       if (b < targetReal - 0.5) belowTargetYears++;
       if (b > targetReal + 0.5) aboveTarget = true;
-      if (row.guardrailAction === 'cut') everCut = true;
       if (b < minBudget) minBudget = b;
-      if (!budgetByAge.has(row.age)) budgetByAge.set(row.age, []);
-      budgetByAge.get(row.age).push(b);
+      if (!budgetByAge.has(age)) budgetByAge.set(age, []);
+      budgetByAge.get(age).push(b);
     }
     if (minBudget !== Infinity) {
       trialMinPct.push(minBudget / tDiv);
-      if (everCut) trialsEverCut++;
+      if (r.everCut) trialsEverCut++;
       if (aboveTarget) trialsAboveTarget++;
       if (minBudget <= floorReal + 0.5) trialsHitFloor++;
     }
@@ -648,7 +803,7 @@ export function runMonteCarlo(profile, baseRates, pots, retirementOpts, opts = {
   // With an annuity planned, each trial buys at its own pot size: a trial whose
   // pension can't afford the target buys a partial annuity (or none, if the
   // pension is already empty). Summarise how often the target was fully met.
-  const annuityRuns = successful.map((r) => r.summary.annuity).filter(Boolean);
+  const annuityRuns = successful.map((r) => r.annuity).filter(Boolean);
   let annuity = { active: false };
   if (annuityRuns.length > 0) {
     const coverage = annuityRuns.map((a) => a.coverage).sort((a, b) => a - b);
